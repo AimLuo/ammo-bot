@@ -1,0 +1,460 @@
+import { describe, expect, it } from "vitest";
+import {
+  issueBranch,
+  runPipeline,
+  worktreePath as projectWorktreePath,
+} from "./pipeline.ts";
+import {
+  AGENT_ACTOR,
+  COMPLETION_SIGNAL,
+  type Agent,
+  type AgentRole,
+  type Beads,
+  type Bead,
+  type Git,
+} from "./types.ts";
+
+const PRIMARY = "/projects/demo";
+const TARGET = "main";
+
+function worktreePath(beadId: string) {
+  return projectWorktreePath(PRIMARY, beadId);
+}
+
+type ImplementStep = {
+  output?: string;
+  commit?: boolean;
+  delayMs?: number;
+};
+
+type MergeConcurrency = { current: number; max: number };
+
+function createHarness(options: {
+  beadId?: string;
+  implement?: ImplementStep[];
+  review?: { output?: string; delayMs?: number };
+  merge?: { output?: string | string[]; delayMs?: number };
+  primary?: { clean?: boolean; branch?: string };
+  mergeConcurrency?: MergeConcurrency;
+  claimedByAgent?: boolean;
+  seedCommits?: string[];
+} = {}) {
+  const beadId = options.beadId ?? "bead-1";
+  const mergeConcurrency = options.mergeConcurrency ?? {
+    current: 0,
+    max: 0,
+  };
+  const bead: Bead = {
+    id: beadId,
+    title: "Do the thing",
+    status: options.claimedByAgent ? "in_progress" : "open",
+    assignee: options.claimedByAgent ? AGENT_ACTOR : null,
+    labels: [],
+  };
+
+  const agentCalls: { role: AgentRole; cwd: string; at: number }[] = [];
+  const commitsAhead = new Map<string, string[]>();
+  const worktrees = new Set<string>();
+  const removedWorktrees: string[] = [];
+  const removedBranches: string[] = [];
+  let primaryClean = options.primary?.clean ?? true;
+  let primaryBranch = options.primary?.branch ?? TARGET;
+  let implementIndex = 0;
+  let mergeIndex = 0;
+  let humanFlagWaiters: Array<() => void> = [];
+  let humanFlagCount = 0;
+  const humanFlagListeners: Array<() => void> = [];
+  let mergeStarted!: () => void;
+  const whenMergeStarted = new Promise<void>((resolve) => {
+    mergeStarted = resolve;
+  });
+
+  const implementSteps: ImplementStep[] =
+    options.implement ?? [{ output: COMPLETION_SIGNAL }];
+
+  const agent: Agent = {
+    async run({ cwd, role }) {
+      agentCalls.push({ role, cwd, at: Date.now() });
+      if (role === "implement") {
+        const step = implementSteps[implementIndex] ?? { output: "" };
+        implementIndex += 1;
+        if (step.delayMs) {
+          await new Promise((r) => setTimeout(r, step.delayMs));
+        }
+        if (step.commit) {
+          const existing = commitsAhead.get(cwd) ?? [];
+          commitsAhead.set(cwd, [...existing, `sha-${existing.length + 1}`]);
+        }
+        return { output: step.output ?? "" };
+      }
+      if (role === "review") {
+        const reviewDelay = options.review?.delayMs;
+        if (reviewDelay) {
+          await new Promise((r) => setTimeout(r, reviewDelay));
+        }
+        return { output: options.review?.output ?? COMPLETION_SIGNAL };
+      }
+      mergeConcurrency.current += 1;
+      mergeConcurrency.max = Math.max(
+        mergeConcurrency.max,
+        mergeConcurrency.current,
+      );
+      mergeStarted();
+      const mergeDelay = options.merge?.delayMs;
+      if (mergeDelay) {
+        await new Promise((r) => setTimeout(r, mergeDelay));
+      }
+      mergeConcurrency.current -= 1;
+      const outputs = options.merge?.output;
+      const scripted = Array.isArray(outputs)
+        ? outputs
+        : [outputs ?? COMPLETION_SIGNAL];
+      const output = scripted[mergeIndex] ?? scripted[scripted.length - 1] ?? "";
+      mergeIndex += 1;
+      return { output };
+    },
+  };
+
+  const beads: Beads & {
+    comments: string[];
+  } = {
+    comments: [],
+    async claim(id) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      bead.status = "in_progress";
+      bead.assignee = AGENT_ACTOR;
+    },
+    async unclaim(id) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      bead.status = "open";
+      bead.assignee = null;
+    },
+    async close(id) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      bead.status = "closed";
+    },
+    async addHumanFlag(id, comment) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      if (!bead.labels.includes("human")) bead.labels.push("human");
+      this.comments.push(comment);
+      humanFlagCount += 1;
+      for (const listener of humanFlagListeners) listener();
+    },
+    async get(id) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      return { ...bead, labels: [...bead.labels] };
+    },
+    async waitUntilNoHumanFlag(id) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      if (!bead.labels.includes("human")) return;
+      await new Promise<void>((resolve) => {
+        humanFlagWaiters.push(resolve);
+      });
+    },
+  };
+
+  const git: Git & {
+    setPrimary(next: { clean?: boolean; branch?: string }): void;
+  } = {
+    async addWorktree({ worktreePath, branch }) {
+      worktrees.add(worktreePath);
+      if (!commitsAhead.has(worktreePath)) {
+        commitsAhead.set(worktreePath, options.seedCommits ?? []);
+      }
+      void branch;
+    },
+    async removeWorktree({ worktreePath, branch }) {
+      worktrees.delete(worktreePath);
+      removedWorktrees.push(worktreePath);
+      removedBranches.push(branch);
+    },
+    async listCommitsAhead({ cwd }) {
+      return commitsAhead.get(cwd) ?? [];
+    },
+    async status({ cwd }) {
+      if (cwd === PRIMARY) {
+        return { clean: primaryClean, branch: primaryBranch };
+      }
+      return { clean: true, branch: issueBranch(beadId) };
+    },
+    setPrimary(next) {
+      if (next.clean !== undefined) primaryClean = next.clean;
+      if (next.branch !== undefined) primaryBranch = next.branch;
+    },
+  };
+
+  function clearHumanFlag() {
+    bead.labels = bead.labels.filter((l) => l !== "human");
+    const waiters = humanFlagWaiters;
+    humanFlagWaiters = [];
+    for (const w of waiters) w();
+  }
+
+  async function waitForHumanFlagCount(n: number) {
+    while (humanFlagCount < n) {
+      await new Promise<void>((resolve) => {
+        humanFlagListeners.push(resolve);
+      });
+    }
+  }
+
+  return {
+    beadId,
+    bead,
+    agentCalls,
+    worktrees,
+    removedWorktrees,
+    removedBranches,
+    get maxConcurrentMerges() {
+      return mergeConcurrency.max;
+    },
+    whenMergeStarted,
+    waitForHumanFlagCount,
+    clearHumanFlag,
+    setAssignee(assignee: string | null) {
+      bead.assignee = assignee;
+    },
+    comments: beads.comments,
+    git,
+    run() {
+      return runPipeline({
+        project: { path: PRIMARY, targetBranch: TARGET },
+        beadId,
+        agent,
+        beads,
+        git,
+      });
+    },
+  };
+}
+
+describe("runPipeline", () => {
+  it("cancels claim without review, merge, or close when implement produces no commits", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL }],
+    });
+
+    const result = await h.run();
+
+    expect(result).toEqual({ outcome: "cancelled" });
+    expect(h.bead.status).toBe("open");
+    expect(h.bead.assignee).toBeNull();
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement"]);
+    expect(h.agentCalls[0]?.cwd).toBe(worktreePath(h.beadId));
+    expect(h.bead.labels).not.toContain("human");
+    expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
+    expect(h.removedBranches).toContain(issueBranch(h.beadId));
+  });
+
+  it("runs implement iterations until the completion signal, then reviews once and merges", async () => {
+    const h = createHarness({
+      implement: [
+        { output: "still working", commit: true },
+        { output: COMPLETION_SIGNAL, commit: true },
+      ],
+    });
+
+    const result = await h.run();
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.bead.status).toBe("closed");
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "implement",
+      "review",
+      "merge",
+    ]);
+    expect(h.agentCalls[0]?.cwd).toBe(worktreePath(h.beadId));
+    expect(h.agentCalls[2]?.cwd).toBe(worktreePath(h.beadId));
+    expect(h.agentCalls[3]?.cwd).toBe(PRIMARY);
+    expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
+    expect(h.removedBranches).toContain(issueBranch(h.beadId));
+  });
+
+  it("stops implement after 100 iterations without a completion signal", async () => {
+    const h = createHarness({
+      implement: Array.from({ length: 100 }, (_, i) => ({
+        commit: i === 0,
+      })),
+    });
+
+    const result = await h.run();
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.agentCalls.filter((c) => c.role === "implement")).toHaveLength(
+      100,
+    );
+    expect(h.agentCalls.filter((c) => c.role === "review")).toHaveLength(1);
+    expect(h.agentCalls.filter((c) => c.role === "merge")).toHaveLength(1);
+  });
+
+  it("runs two mergers one at a time", async () => {
+    const mergeConcurrency = { current: 0, max: 0 };
+    const a = createHarness({
+      beadId: "bead-a",
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      merge: { delayMs: 40 },
+      mergeConcurrency,
+    });
+    const b = createHarness({
+      beadId: "bead-b",
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      merge: { delayMs: 40 },
+      mergeConcurrency,
+    });
+
+    const [ra, rb] = await Promise.all([a.run(), b.run()]);
+
+    expect(ra).toEqual({ outcome: "merged" });
+    expect(rb).toEqual({ outcome: "merged" });
+    expect(mergeConcurrency.max).toBe(1);
+  });
+
+  it("lets implement and review proceed while another pipeline holds the merge lock", async () => {
+    const slow = createHarness({
+      beadId: "slow-merge",
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      merge: { delayMs: 80 },
+    });
+    const fast = createHarness({
+      beadId: "fast-implement",
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+    });
+
+    const slowRun = slow.run();
+    await slow.whenMergeStarted;
+    const started = Date.now();
+    const fastRun = fast.run();
+    const [slowResult, fastResult] = await Promise.all([slowRun, fastRun]);
+
+    expect(slowResult).toEqual({ outcome: "merged" });
+    expect(fastResult).toEqual({ outcome: "merged" });
+    const fastReview = fast.agentCalls.find((c) => c.role === "review");
+    const fastMerge = fast.agentCalls.find((c) => c.role === "merge");
+    expect(fastReview).toBeDefined();
+    expect(fastMerge).toBeDefined();
+    expect(fastReview!.at - started).toBeLessThan(80);
+  });
+
+  it("flags human and keeps in_progress when primary checkout is dirty, then resumes merge after the flag is cleared", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      primary: { clean: false },
+    });
+
+    const running = h.run();
+    await h.waitForHumanFlagCount(1);
+
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.bead.assignee).toBe(AGENT_ACTOR);
+    expect(h.bead.labels).toContain("human");
+    expect(h.comments.length).toBeGreaterThan(0);
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.git.setPrimary({ clean: true });
+    h.clearHumanFlag();
+    const result = await running;
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.bead.status).toBe("closed");
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "review",
+      "merge",
+    ]);
+    expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
+  });
+
+  it("flags human when primary checkout is not on the target branch", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      primary: { branch: "feature" },
+    });
+
+    const running = h.run();
+    await h.waitForHumanFlagCount(1);
+
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.bead.labels).toContain("human");
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
+
+    h.git.setPrimary({ branch: TARGET });
+    h.clearHumanFlag();
+    await running;
+    expect(h.bead.status).toBe("closed");
+  });
+
+  it("flags human again when resume merge still cannot proceed", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      primary: { clean: false },
+    });
+
+    const running = h.run();
+    await h.waitForHumanFlagCount(1);
+    h.clearHumanFlag();
+    await h.waitForHumanFlagCount(2);
+
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.bead.labels).toContain("human");
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.git.setPrimary({ clean: true });
+    h.clearHumanFlag();
+    await running;
+    expect(h.bead.status).toBe("closed");
+  });
+
+  it("flags human and leaves the worktree when the merger iteration does not complete", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      merge: { output: ["tests still failing", COMPLETION_SIGNAL] },
+    });
+
+    const running = h.run();
+    await h.waitForHumanFlagCount(1);
+
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.bead.labels).toContain("human");
+    expect(h.removedWorktrees).toEqual([]);
+    expect(h.agentCalls.filter((c) => c.role === "merge")).toHaveLength(1);
+
+    h.clearHumanFlag();
+    await running;
+    expect(h.bead.status).toBe("closed");
+    expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
+  });
+
+  it("skips implement and review when resuming merge for a bead already claimed by ammo-bot", async () => {
+    const h = createHarness({
+      claimedByAgent: true,
+      seedCommits: ["sha-existing"],
+    });
+
+    const result = await h.run();
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["merge"]);
+    expect(h.bead.status).toBe("closed");
+  });
+
+  it("does not merge after the human flag is cleared if ammo-bot no longer holds the claim", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      primary: { clean: false },
+    });
+
+    const running = h.run();
+    await h.waitForHumanFlagCount(1);
+    h.setAssignee("ada");
+    h.clearHumanFlag();
+    const result = await running;
+
+    expect(result).toEqual({ outcome: "cancelled" });
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.removedWorktrees).toEqual([]);
+  });
+});
