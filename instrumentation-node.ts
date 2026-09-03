@@ -11,6 +11,8 @@
  * swallow exactly those and let every other error crash as usual.
  */
 import { closeAllSseStreams } from "./lib/sse-registry";
+import { listArmedProjects } from "./lib/config";
+import { startScannerLoop } from "./src/start-scanner.ts";
 
 /**
  * `next start` drains in-flight requests on SIGINT/SIGTERM before exiting, and
@@ -20,9 +22,11 @@ import { closeAllSseStreams } from "./lib/sse-registry";
  * process.exit(): Next's own handler still owns the actual shutdown.
  */
 let closing = false;
+const g = globalThis as typeof globalThis & { __ammoScannerStop?: () => void };
 const closeStreams = (sig: string) => {
   if (closing) return;
   closing = true;
+  g.__ammoScannerStop?.();
   const n = closeAllSseStreams();
   if (n > 0) console.log(`[instrumentation] ${sig}: closed ${n} open SSE stream(s)`);
 };
@@ -50,3 +54,10 @@ process.on("unhandledRejection", (reason) => {
   }
   throw reason;
 });
+
+const phase = process.env.NEXT_PHASE ?? "";
+if (!phase.includes("build") && !g.__ammoScannerStop) {
+  g.__ammoScannerStop = startScannerLoop({
+    listArmed: () => listArmedProjects(),
+  }).stop;
+}

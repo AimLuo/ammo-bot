@@ -13,6 +13,7 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
+    "allowImportingTsExtensions": true,
     "plugins": [
       {
         "name": "next"
@@ -33,9 +34,10 @@
     "lib/**/*.ts",
     "instrumentation.ts",
     "instrumentation-node.ts",
+    "src/**/*.ts",
     "next.config.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": ["node_modules", "src"]
+  "exclude": ["node_modules", "src/**/*.test.ts"]
 }

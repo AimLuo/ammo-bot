@@ -19,6 +19,8 @@ export interface ProjectEntry {
   /** ISO timestamps. */
   addedAt: string;
   lastOpened: string;
+  /** When true, this project's scanner may claim from the unattended queue. */
+  armed: boolean;
 }
 
 export interface AppConfig {
@@ -127,6 +129,7 @@ function makeEntry(inputPath: string, taken: Set<string>): ProjectEntry {
     path: abs,
     addedAt: now,
     lastOpened: now,
+    armed: false,
   };
 }
 
@@ -147,6 +150,7 @@ function sanitizeProjects(input: unknown): ProjectEntry[] {
       name: typeof e.name === "string" && e.name ? e.name : path.basename(e.path) || e.path,
       addedAt: typeof e.addedAt === "string" ? e.addedAt : new Date().toISOString(),
       lastOpened: typeof e.lastOpened === "string" ? e.lastOpened : new Date().toISOString(),
+      armed: e.armed === true,
     });
   }
   return out;
@@ -242,6 +246,10 @@ export function listProjects(): ProjectEntry[] {
   return getConfig().projects;
 }
 
+export function listArmedProjects(): ProjectEntry[] {
+  return getConfig().projects.filter((p) => p.armed);
+}
+
 export function getProject(id: string): ProjectEntry | DemoProject | undefined {
   if (id === DEMO_PROJECT.id) return DEMO_PROJECT;
   return getConfig().projects.find((p) => p.id === id);
@@ -292,6 +300,15 @@ export function renameProject(id: string, name: string): ProjectEntry | undefine
   const p = cfg.projects.find((x) => x.id === id);
   if (!p) return undefined;
   p.name = name;
+  persist(cfg);
+  return p;
+}
+
+export function setProjectArmed(id: string, armed: boolean): ProjectEntry | undefined {
+  const cfg = getConfig();
+  const p = cfg.projects.find((x) => x.id === id);
+  if (!p) return undefined;
+  p.armed = armed;
   persist(cfg);
   return p;
 }

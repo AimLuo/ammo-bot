@@ -16,7 +16,7 @@ function annotate(p: ProjectEntry | DemoProject) {
       hasBeads = false;
     }
   }
-  return { ...p, hasBeads };
+  return { ...p, hasBeads, armed: "armed" in p ? p.armed : false };
 }
 
 export async function GET() {

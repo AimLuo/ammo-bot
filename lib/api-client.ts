@@ -76,6 +76,7 @@ export interface ProjectInfo {
   addedAt?: string;
   lastOpened?: string;
   hasBeads: boolean;
+  armed?: boolean;
 }
 export interface ProjectsResponse {
   projects: ProjectInfo[];
@@ -310,6 +311,11 @@ export const api = {
       request<ProjectInfo>(`/api/projects/${enc(id)}`, {
         method: "PATCH",
         body: JSON.stringify({ name }),
+      }),
+    setArmed: (id: string, armed: boolean) =>
+      request<ProjectInfo>(`/api/projects/${enc(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ armed }),
       }),
   },
 

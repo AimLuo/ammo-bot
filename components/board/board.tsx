@@ -20,6 +20,8 @@ import { matchesFilters, emptyFilters, labelOptionsFrom, type Filters } from "@/
 import { BOARD_COLUMNS as COLUMNS, sortByOrder as sortCards } from "@/lib/board-columns";
 import { Column } from "./column";
 import type { Bead } from "@/lib/schema";
+import { Switch } from "@/components/ui/switch";
+import { useProjects, useSetArmed } from "@/hooks/use-projects";
 
 export function Board() {
   const { beads, index, humanAllowlist, openCreate, loading, projectId } = useApp();
@@ -140,14 +142,17 @@ export function Board() {
           onShowArchived={setShowArchived}
         />
 
-        <button
-          onClick={() => openCreate()}
-          className="flex h-9 flex-shrink-0 items-center gap-[6px] rounded-[9px] px-[14px] text-[13px] font-[550] text-white"
-          style={{ background: "var(--brand)", boxShadow: "0 2px 8px -2px var(--brand)" }}
-        >
-          <Icon name="plus" size={15} />
-          <span>New</span>
-        </button>
+        <div className="ml-auto flex flex-shrink-0 items-center gap-3">
+          <ArmedSwitch projectId={projectId} />
+          <button
+            onClick={() => openCreate()}
+            className="flex h-9 flex-shrink-0 items-center gap-[6px] rounded-[9px] px-[14px] text-[13px] font-[550] text-white"
+            style={{ background: "var(--brand)", boxShadow: "0 2px 8px -2px var(--brand)" }}
+          >
+            <Icon name="plus" size={15} />
+            <span>New</span>
+          </button>
+        </div>
       </header>
 
       <div className="bd-scroll min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-[18px_22px]">
@@ -186,6 +191,31 @@ export function Board() {
           </DndContext>
         )}
       </div>
+    </div>
+  );
+}
+
+function ArmedSwitch({ projectId }: { projectId: string }) {
+  const { data } = useProjects();
+  const setArmed = useSetArmed();
+  const project = data?.projects.find((p) => p.id === projectId);
+  if (!project || project.path === null) return null;
+  const armed = !!project.armed;
+  return (
+    <div
+      className="flex items-center gap-2 text-[12.5px] font-[550] text-[var(--text-2)]"
+      title={
+        armed
+          ? "Disarm: stop claiming new beads; in-flight pipelines finish"
+          : "Arm: scanner claims the unattended queue as ammo-bot"
+      }
+    >
+      <span>Armed</span>
+      <Switch
+        checked={armed}
+        disabled={setArmed.isPending}
+        onCheckedChange={(next) => setArmed.mutate({ id: projectId, armed: next })}
+      />
     </div>
   );
 }

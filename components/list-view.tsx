@@ -24,7 +24,7 @@ import { useOrder, useSetOrder } from "@/hooks/use-order";
 import { useSetStatus } from "@/hooks/use-beads";
 import { matchesFilters, emptyFilters, labelOptionsFrom, type Filters } from "@/lib/filters";
 import { BOARD_COLUMNS, COLUMN_ORDER, colOf } from "@/lib/board-columns";
-import { beadOrigin, originTitle } from "@/lib/attribution";
+import { beadActor, beadActorOrigin, originTitle } from "@/lib/attribution";
 import {
   catColor,
   statusLabel,
@@ -249,7 +249,8 @@ function Row({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: bead.id,
   });
-  const o = beadOrigin(bead, humanAllowlist);
+  const o = beadActorOrigin(bead, humanAllowlist);
+  const actor = beadActor(bead);
   const labels = (bead.labels ?? []).filter((l) => l !== "archived").slice(0, 2);
   const openFromKeyboard = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
@@ -339,7 +340,7 @@ function Row({
         <PriorityChip p={bead.priority} />
       </span>
       <span className="hidden w-[26px] flex-shrink-0 justify-center sm:flex">
-        <OriginBadge origin={o} title={originTitle(bead.created_by, o)} />
+        <OriginBadge origin={o} title={originTitle(actor, o)} />
       </span>
       <span className="hidden min-w-0 max-w-[130px] flex-shrink-0 items-center gap-[6px] md:flex">
         <span

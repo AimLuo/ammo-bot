@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { AGENT_ACTOR, type Bead, type Beads } from "./types.ts";
+import type { QueueBead, ScannerQueue } from "./scanner.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -10,6 +11,7 @@ type BdIssue = {
   status?: string;
   assignee?: string;
   labels?: string[];
+  issue_type?: string;
 };
 
 function asStatus(value: string | undefined): Bead["status"] {
@@ -17,10 +19,10 @@ function asStatus(value: string | undefined): Bead["status"] {
   return "open";
 }
 
-export function createBeadsCli(repoPath: string): Beads {
+function createBdRunner(projectPath: string) {
   const run = async (args: string[]): Promise<string> => {
     const { stdout } = await execFileAsync("bd", args, {
-      cwd: repoPath,
+      cwd: projectPath,
       maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, BEADS_ACTOR: AGENT_ACTOR },
     });
@@ -31,6 +33,50 @@ export function createBeadsCli(repoPath: string): Beads {
     const stdout = await run([...args, "--json"]);
     return JSON.parse(stdout) as T;
   };
+
+  return { run, runJson };
+}
+
+function asQueueBead(issue: BdIssue): QueueBead | null {
+  if (!issue.id) return null;
+  return {
+    id: issue.id,
+    issue_type: issue.issue_type ?? "task",
+    labels: issue.labels ?? [],
+    status: issue.status ?? "open",
+  };
+}
+
+export function createScannerQueue(projectPath: string): ScannerQueue {
+  const { run, runJson } = createBdRunner(projectPath);
+  return {
+    async listReady() {
+      const stdout = await run(["ready", "--json"]);
+      if (!stdout.trim()) return [];
+      const raw = JSON.parse(stdout) as BdIssue[] | BdIssue | null;
+      const issues = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      return issues.flatMap((issue) => {
+        const item = asQueueBead(issue);
+        return item ? [item] : [];
+      });
+    },
+    async tryClaim(beadId) {
+      try {
+        await run(["update", beadId, "--claim"]);
+      } catch {
+        return false;
+      }
+      const raw = await runJson<BdIssue | BdIssue[]>(["show", beadId]);
+      const issue = Array.isArray(raw) ? raw[0] : raw;
+      return (
+        issue?.status === "in_progress" && (issue.assignee || null) === AGENT_ACTOR
+      );
+    },
+  };
+}
+
+export function createBeadsCli(repoPath: string): Beads {
+  const { run, runJson } = createBdRunner(repoPath);
 
   return {
     async claim(beadId) {

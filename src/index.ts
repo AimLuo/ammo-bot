@@ -1,7 +1,9 @@
 export { runPipeline, worktreePath, issueBranch } from "./pipeline.ts";
-export { createBeadsCli } from "./beads-cli.ts";
+export { createBeadsCli, createScannerQueue } from "./beads-cli.ts";
 export { createGitCli } from "./git-cli.ts";
 export { createCursorAgent } from "./cursor-agent.ts";
+export { createScanner, MAX_IN_FLIGHT } from "./scanner.ts";
+export { startScannerLoop } from "./start-scanner.ts";
 export { DEFAULT_AGENT_MODEL } from "./constants.ts";
 export {
   AGENT_ACTOR,
@@ -18,3 +20,8 @@ export type {
   PipelineResult,
   Project,
 } from "./types.ts";
+export type {
+  QueueBead,
+  ScannerQueue,
+  ScannerProject,
+} from "./scanner.ts";

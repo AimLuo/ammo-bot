@@ -20,3 +20,15 @@ export function originTitle(name: string | undefined, origin: Origin): string {
   const who = name || "unknown";
   return origin === "human" ? `Human · ${who}` : `Agent · ${who}`;
 }
+
+/** Assignee while in progress (human actor vs agent actor); otherwise creator. */
+export function beadActor(b: Bead): string | undefined {
+  if (b.status === "in_progress" || b.status === "hooked") {
+    return b.assignee || b.created_by;
+  }
+  return b.created_by;
+}
+
+export function beadActorOrigin(b: Bead, humanAllowlist: string[]): Origin {
+  return originOf(beadActor(b), humanAllowlist);
+}

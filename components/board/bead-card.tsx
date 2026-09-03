@@ -6,7 +6,7 @@ import type { Bead } from "@/lib/schema";
 import { Icon, typeIconName } from "@/components/icons";
 import { useApp } from "@/components/app-context";
 import { CopyableId } from "@/components/copyable-id";
-import { beadOrigin, originTitle } from "@/lib/attribution";
+import { beadActor, beadActorOrigin, originTitle } from "@/lib/attribution";
 import {
   catColor,
   statusLabel,
@@ -27,7 +27,8 @@ export function BeadCard({ bead, childCount = 0 }: { bead: Bead; childCount?: nu
     id: bead.id,
   });
 
-  const o = beadOrigin(bead, humanAllowlist);
+  const o = beadActorOrigin(bead, humanAllowlist);
+  const actor = beadActor(bead);
   const parent = parentOf(bead, index);
   const blocked = isBlocked(bead, index);
   const visLabels = (bead.labels ?? []).filter((l) => l !== "archived").slice(0, 2);
@@ -62,7 +63,7 @@ export function BeadCard({ bead, childCount = 0 }: { bead: Bead; childCount?: nu
         />
         <span className="flex-1" />
         <PriorityChip p={bead.priority} />
-        <OriginBadge origin={o} title={originTitle(bead.created_by, o)} />
+        <OriginBadge origin={o} title={originTitle(actor, o)} />
       </div>
 
       <div className="text-[13.5px] font-[550] leading-[1.35] tracking-[-.006em] text-[var(--text)] [text-wrap:pretty]">
