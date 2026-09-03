@@ -53,6 +53,7 @@ describe("scanner", () => {
       bead({ id: "epic-1", issue_type: "epic" }),
       bead({ id: "wayfinder-1", labels: ["wayfinder:research"] }),
       bead({ id: "in-flight", status: "in_progress" }),
+      bead({ id: "needs-you", labels: ["human"] }),
       bead({ id: "ready-1" }),
     ]);
     const spawned: string[] = [];
@@ -67,6 +68,28 @@ describe("scanner", () => {
 
     expect(claimed).toEqual(["ready-1"]);
     expect(spawned).toEqual(["ready-1"]);
+  });
+
+  it("claims a previously flagged bead on a later tick after the human flag is cleared", async () => {
+    const flagged = bead({ id: "needs-you", labels: ["human"] });
+    const { queue, claimed } = createQueue([flagged]);
+    const spawned: string[] = [];
+    const scanner = createScanner({
+      runPipeline: async ({ beadId }) => {
+        spawned.push(beadId);
+      },
+    });
+
+    await scanner.tick([{ project: PROJECT, queue }]);
+    expect(claimed).toEqual([]);
+    expect(spawned).toEqual([]);
+
+    flagged.labels = [];
+    await scanner.tick([{ project: PROJECT, queue }]);
+    await scanner.whenIdle();
+
+    expect(claimed).toEqual(["needs-you"]);
+    expect(spawned).toEqual(["needs-you"]);
   });
 
   it("skips a bead when claim loses to a human", async () => {

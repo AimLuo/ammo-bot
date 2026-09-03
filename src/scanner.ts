@@ -27,6 +27,7 @@ function inUnattendedQueue(bead: QueueBead): boolean {
   if (bead.issue_type === "epic") return false;
   if (bead.status === "in_progress") return false;
   if (bead.labels.some(isWayfinderLabel)) return false;
+  if (bead.labels.includes("human")) return false;
   return true;
 }
 

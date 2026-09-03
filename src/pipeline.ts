@@ -37,6 +37,10 @@ function mergeBlockedReason(
   return null;
 }
 
+function heldByAgent(bead: { assignee: string | null; status: string }): boolean {
+  return bead.assignee === AGENT_ACTOR && bead.status === "in_progress";
+}
+
 export async function runPipeline(input: {
   project: Project;
   beadId: string;
@@ -52,8 +56,7 @@ export async function runPipeline(input: {
   const branch = issueBranch(input.beadId);
 
   const before = await beads.get(input.beadId);
-  const resumeMerge =
-    before.status === "in_progress" && before.assignee === AGENT_ACTOR;
+  const skipToMerge = heldByAgent(before);
 
   await beads.claim(input.beadId);
   const bead = await beads.get(input.beadId);
@@ -64,12 +67,20 @@ export async function runPipeline(input: {
     targetBranch,
   });
 
+  async function waitToResume(): Promise<boolean> {
+    await beads.waitUntilNoHumanFlag(input.beadId);
+    return heldByAgent(await beads.get(input.beadId));
+  }
+
   const existingCommits = await git.listCommitsAhead({
     cwd: worktree,
     targetBranch,
   });
-  if (!(resumeMerge && existingCommits.length > 0)) {
+  if (!(skipToMerge && existingCommits.length > 0)) {
     for (let i = 0; i < MAX_IMPLEMENT_ITERATIONS; i++) {
+      if (!(await waitToResume())) {
+        return { outcome: "cancelled" };
+      }
       const { output } = await agent.run({
         cwd: worktree,
         prompt: implementPrompt({
@@ -96,6 +107,9 @@ export async function runPipeline(input: {
       return { outcome: "cancelled" };
     }
 
+    if (!(await waitToResume())) {
+      return { outcome: "cancelled" };
+    }
     await agent.run({
       cwd: worktree,
       prompt: reviewPrompt({ branch, targetBranch }),
@@ -105,11 +119,7 @@ export async function runPipeline(input: {
 
   const lockKey = `${input.project.path}::${targetBranch}`;
   for (;;) {
-    const snapshot = await beads.get(input.beadId);
-    if (
-      snapshot.assignee !== AGENT_ACTOR ||
-      snapshot.status !== "in_progress"
-    ) {
+    if (!(await waitToResume())) {
       return { outcome: "cancelled" };
     }
 

@@ -25,6 +25,7 @@ type ImplementStep = {
   output?: string;
   commit?: boolean;
   delayMs?: number;
+  raiseHumanFlag?: boolean;
 };
 
 type MergeConcurrency = { current: number; max: number };
@@ -32,12 +33,13 @@ type MergeConcurrency = { current: number; max: number };
 function createHarness(options: {
   beadId?: string;
   implement?: ImplementStep[];
-  review?: { output?: string; delayMs?: number };
+  review?: { output?: string; delayMs?: number; raiseHumanFlag?: boolean };
   merge?: { output?: string | string[]; delayMs?: number };
   primary?: { clean?: boolean; branch?: string };
   mergeConcurrency?: MergeConcurrency;
   claimedByAgent?: boolean;
   seedCommits?: string[];
+  startWithHumanFlag?: boolean;
 } = {}) {
   const beadId = options.beadId ?? "bead-1";
   const mergeConcurrency = options.mergeConcurrency ?? {
@@ -49,8 +51,12 @@ function createHarness(options: {
     title: "Do the thing",
     status: options.claimedByAgent ? "in_progress" : "open",
     assignee: options.claimedByAgent ? AGENT_ACTOR : null,
-    labels: [],
+    labels: options.startWithHumanFlag ? ["human"] : [],
   };
+
+  function raiseFlag() {
+    if (!bead.labels.includes("human")) bead.labels.push("human");
+  }
 
   const agentCalls: { role: AgentRole; cwd: string; at: number }[] = [];
   const commitsAhead = new Map<string, string[]>();
@@ -64,6 +70,8 @@ function createHarness(options: {
   let humanFlagWaiters: Array<() => void> = [];
   let humanFlagCount = 0;
   const humanFlagListeners: Array<() => void> = [];
+  let waitingForHumanFlag = 0;
+  let waitStartResolvers: Array<() => void> = [];
   let mergeStarted!: () => void;
   const whenMergeStarted = new Promise<void>((resolve) => {
     mergeStarted = resolve;
@@ -85,6 +93,7 @@ function createHarness(options: {
           const existing = commitsAhead.get(cwd) ?? [];
           commitsAhead.set(cwd, [...existing, `sha-${existing.length + 1}`]);
         }
+        if (step.raiseHumanFlag) raiseFlag();
         return { output: step.output ?? "" };
       }
       if (role === "review") {
@@ -92,6 +101,7 @@ function createHarness(options: {
         if (reviewDelay) {
           await new Promise((r) => setTimeout(r, reviewDelay));
         }
+        if (options.review?.raiseHumanFlag) raiseFlag();
         return { output: options.review?.output ?? COMPLETION_SIGNAL };
       }
       mergeConcurrency.current += 1;
@@ -147,9 +157,14 @@ function createHarness(options: {
     async waitUntilNoHumanFlag(id) {
       if (id !== bead.id) throw new Error(`unknown bead ${id}`);
       if (!bead.labels.includes("human")) return;
+      waitingForHumanFlag += 1;
+      const started = waitStartResolvers;
+      waitStartResolvers = [];
+      for (const resolve of started) resolve();
       await new Promise<void>((resolve) => {
         humanFlagWaiters.push(resolve);
       });
+      waitingForHumanFlag -= 1;
     },
   };
 
@@ -198,6 +213,13 @@ function createHarness(options: {
     }
   }
 
+  function whenWaitingForHumanFlag() {
+    if (waitingForHumanFlag > 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      waitStartResolvers.push(resolve);
+    });
+  }
+
   return {
     beadId,
     bead,
@@ -210,6 +232,7 @@ function createHarness(options: {
     },
     whenMergeStarted,
     waitForHumanFlagCount,
+    whenWaitingForHumanFlag,
     clearHumanFlag,
     setAssignee(assignee: string | null) {
       bead.assignee = assignee;
@@ -336,7 +359,7 @@ describe("runPipeline", () => {
     expect(fastReview!.at - started).toBeLessThan(80);
   });
 
-  it("flags human and keeps in_progress when primary checkout is dirty, then resumes merge after the flag is cleared", async () => {
+  it("flags human and keeps in_progress when primary checkout is dirty, then Resumes after the flag is cleared", async () => {
     const h = createHarness({
       implement: [{ output: COMPLETION_SIGNAL, commit: true }],
       primary: { clean: false },
@@ -385,7 +408,7 @@ describe("runPipeline", () => {
     expect(h.bead.status).toBe("closed");
   });
 
-  it("flags human again when resume merge still cannot proceed", async () => {
+  it("flags human again when Resume still cannot proceed", async () => {
     const h = createHarness({
       implement: [{ output: COMPLETION_SIGNAL, commit: true }],
       primary: { clean: false },
@@ -427,7 +450,7 @@ describe("runPipeline", () => {
     expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
   });
 
-  it("skips implement and review when resuming merge for a bead already claimed by ammo-bot", async () => {
+  it("skips implement and review when ammo-bot already holds the claim and the worktree has commits", async () => {
     const h = createHarness({
       claimedByAgent: true,
       seedCommits: ["sha-existing"],
@@ -448,6 +471,138 @@ describe("runPipeline", () => {
 
     const running = h.run();
     await h.waitForHumanFlagCount(1);
+    h.setAssignee("ada");
+    h.clearHumanFlag();
+    const result = await running;
+
+    expect(result).toEqual({ outcome: "cancelled" });
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.removedWorktrees).toEqual([]);
+  });
+
+  it("does not call implement while a human flag is present, then Resumes after it is cleared", async () => {
+    const h = createHarness({
+      startWithHumanFlag: true,
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+
+    expect(h.agentCalls).toEqual([]);
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.bead.assignee).toBe(AGENT_ACTOR);
+    expect(h.worktrees.has(worktreePath(h.beadId))).toBe(true);
+
+    h.clearHumanFlag();
+    const result = await running;
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "review",
+      "merge",
+    ]);
+  });
+
+  it("does not start the next implement iteration while a human flag is present", async () => {
+    const h = createHarness({
+      implement: [
+        { output: "asking", commit: true, raiseHumanFlag: true },
+        { output: COMPLETION_SIGNAL, commit: true },
+      ],
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement"]);
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.clearHumanFlag();
+    await running;
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "implement",
+      "review",
+      "merge",
+    ]);
+  });
+
+  it("does not call review while a human flag is present, then Resumes after it is cleared", async () => {
+    const h = createHarness({
+      implement: [
+        { output: COMPLETION_SIGNAL, commit: true, raiseHumanFlag: true },
+      ],
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement"]);
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.clearHumanFlag();
+    await running;
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "review",
+      "merge",
+    ]);
+  });
+
+  it("does not call the merger while a human flag is present even if primary checkout is clean", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      review: { raiseHumanFlag: true },
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.clearHumanFlag();
+    const result = await running;
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "review",
+      "merge",
+    ]);
+  });
+
+  it("cancels claim without review or merge when implement produces no commits even if a human flag is present", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, raiseHumanFlag: true }],
+    });
+
+    const result = await h.run();
+
+    expect(result).toEqual({ outcome: "cancelled" });
+    expect(h.bead.status).toBe("open");
+    expect(h.bead.assignee).toBeNull();
+    expect(h.bead.labels).toContain("human");
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement"]);
+    expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
+    expect(h.removedBranches).toContain(issueBranch(h.beadId));
+  });
+
+  it("does not merge after Resume if ammo-bot no longer holds the claim", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      review: { raiseHumanFlag: true },
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
     h.setAssignee("ada");
     h.clearHumanFlag();
     const result = await running;
