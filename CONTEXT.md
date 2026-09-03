@@ -33,8 +33,8 @@ _Avoid_: task（Sandcastle 的词）、ticket、job、work item
 _Avoid_: open（太宽）、backlog
 
 **Unattended queue**：
-已 **Armed** 的 scanner 会考虑的 bead——**ready** 去掉带 wayfinder 标签的。
-_Avoid_: ready queue（那份含 wayfinder）
+已 **Armed** 的 scanner 会考虑的 bead——**ready** 去掉 wayfinder，再去掉带 **human flag** 的。
+_Avoid_: ready queue（那份含 wayfinder 和待处理的 Needs You）
 
 **Armed**：
 按 project 的模式。Armed 期间，该 project 的 scanner 可以从 unattended queue claim。默认未 Armed。Disarm 停止新的 claim；已在飞的 pipeline 跑完。
@@ -59,7 +59,7 @@ _Avoid_: bot user、cursor、BEADS_ACTOR
 _Avoid_: 扫描执行、worker、daemon、orchestrator
 
 **Pipeline**：
-一张已 claim 的 bead，走 implement → review → merge → close。implement 是 **iteration** 循环（上限 100）。review 是一次 **iteration**。merge 是 **primary checkout** 上的一次 **merger** **iteration**（上限 1，与 Sandcastle 的 merger 相同），受 **merge lock** 保护。Ammo-bot 自己启动 Cursor CLI，不调用 Sandcastle 的 `run()`。
+一张已 claim 的 bead，走 implement → review → merge → close。implement 是 **iteration** 循环（上限 100）。review 是一次 **iteration**。merge 是 **primary checkout** 上的一次 **merger** **iteration**（上限 1，与 Sandcastle 的 merger 相同），受 **merge lock** 保护。下一轮 implement / review / **merger** 开始前若仍有 **human flag**，进程内等待。Ammo-bot 自己启动 Cursor CLI，不调用 Sandcastle 的 `run()`。
 _Avoid_: run、job、"sandcastle run"
 
 **Iteration**：
@@ -86,14 +86,22 @@ _Avoid_: worktree lock、queue（那是 scanner 的事）
 merge 合入 **primary checkout** 的那条分支。按 **project** 配置，默认 `main`。
 _Avoid_: HEAD、current branch、base branch
 
+**Origin**：
+作者是人还是 agent：名字在 human allowlist 里就是人。卡片 badge 用。不是 **Needs You** 的进件条件。
+_Avoid_: human flag、human label、Needs You
+
 **Needs You**：
-等人处理的看板收件箱：带 **human flag** 的 bead，外加已就绪的 human-approval gate。
-_Avoid_: blocked（Beads 的 status）、inbox、"需要人工处理"
+等人处理的看板收件箱：带 **human flag** 的 bead，外加已就绪的 **human-approval gate**。判定与 Scotty 相同。
+_Avoid_: blocked（Beads 的 status）、inbox、"需要人工处理"、Origin
 
 **Human flag**：
-bead 上的 `human` 标签（`bd human`）。进入 **Needs You**，不改 status。在 merge 无法进行时打上——**primary checkout** 有未提交改动，或不在 **target branch** 上。人处理完后摘掉。在一条进行中的 pipeline 上摘掉，就是 **resume merge** 的信号。与 human-approval gate 不同，gate 是另一张 bead。
-_Avoid_: gate、blocked、escalate（太含糊）
+Beads 的 `human` 标签，和 Scotty **Needs You** 认的是同一标记。进入 **Needs You**，不改 status。谁打上的都算：pipeline 在 merge 无法进行时打上（**primary checkout** 不干净、不在 **target branch** 上，或 **merger** 未完成），agent 提问时也可以打上。scanner 不领带该标签的 bead；进行中的 pipeline 在下一轮 implement / review / **merger** 前只要标签还在就等待。人摘掉标签且不 close，pipeline 才继续。不是 `bd human`（给人列出/回复/驳回），也不是 **Origin**。
+_Avoid_: `bd human`（打标）、`bd human respond`（会 close，不是让 pipeline 继续）、Origin、gate、blocked、escalate
 
-**Resume merge**：
-**human flag** 被摘掉后重试 merge，此时 bead 仍由 **agent actor** claim，且 **worktree** 还在。若仍无法 merge，再次打上 **human flag**。
-_Avoid_: retry（太泛）、restart（像整条 pipeline 重来）
+**Human-approval gate**：
+等待人批准的独立 gate bead，就绪后进 **Needs You**。不是 **human flag**；merge 受阻不走 gate。
+_Avoid_: human flag、human label
+
+**Resume**：
+摘掉 **human flag** 后，仍由 **agent actor** claim、**worktree** 还在的那条 **pipeline** 从暂停点继续——下一轮 implement、review 或 **merger**。若仍无法进行，再打上 **human flag**。
+_Avoid_: Resume merge、retry（太泛）、restart（像整条 pipeline 重来）
