@@ -1,9 +1,11 @@
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createBeadsCli } from "./beads-cli.ts";
 import { HUMAN_FLAG_POLL_MS } from "./constants.ts";
 import { createCursorAgent } from "./cursor-agent.ts";
 import { createGitCli } from "./git-cli.ts";
 import { mergeLock } from "./merge-lock.ts";
+import { mergeSyncFrom, type MergeSync } from "./project-layout.ts";
 import { implementPrompt, mergePrompt, reviewPrompt } from "./prompts.ts";
 import {
   AGENT_ACTOR,
@@ -49,6 +51,7 @@ export async function runPipeline(input: {
   agent?: Agent;
   beads?: Beads;
   git?: Git;
+  mergeSync?: MergeSync;
 }): Promise<PipelineResult> {
   const agent = input.agent ?? createCursorAgent();
   const beads = input.beads ?? createBeadsCli(input.project.path);
@@ -171,6 +174,7 @@ export async function runPipeline(input: {
   }
 
   const lockKey = `${input.project.path}::${targetBranch}`;
+  let rememberedSubtrees: MergeSync["subtrees"] | undefined;
   for (;;) {
     if (!(await waitToResume())) {
       return { outcome: "cancelled" };
@@ -197,6 +201,19 @@ export async function runPipeline(input: {
         await beads.addHumanFlag(input.beadId, blockedUnderLock);
         waitForHuman = true;
       } else {
+        let mergeSync =
+          input.mergeSync ??
+          (await loadMergeSync({
+            projectPath: input.project.path,
+            git,
+            targetBranch,
+            branch,
+          }));
+        if (mergeSync.subtrees.length > 0) {
+          rememberedSubtrees = mergeSync.subtrees;
+        } else if (rememberedSubtrees?.length) {
+          mergeSync = { ...mergeSync, subtrees: rememberedSubtrees };
+        }
         const { output } = await runAgent({
           cwd: input.project.path,
           prompt: mergePrompt({
@@ -204,23 +221,38 @@ export async function runPipeline(input: {
             branch,
             targetBranch,
             comments: await commentsForPrompt(),
+            sync: mergeSync,
           }),
           role: "merge",
         });
         if (output.includes(COMPLETION_SIGNAL)) {
-          await beads.close(input.beadId);
-          await git.removeWorktree({
-            primaryPath: input.project.path,
-            worktreePath: worktree,
-            branch,
-          });
-          return { outcome: "merged" };
+          if (
+            await git.hasUnpushedCommits({
+              cwd: input.project.path,
+              targetBranch,
+            })
+          ) {
+            await beads.addHumanFlag(
+              input.beadId,
+              "target branch has commits not on origin",
+            );
+            waitForHuman = true;
+          } else {
+            await beads.close(input.beadId);
+            await git.removeWorktree({
+              primaryPath: input.project.path,
+              worktreePath: worktree,
+              branch,
+            });
+            return { outcome: "merged" };
+          }
+        } else {
+          await beads.addHumanFlag(
+            input.beadId,
+            "merger could not complete typecheck or tests",
+          );
+          waitForHuman = true;
         }
-        await beads.addHumanFlag(
-          input.beadId,
-          "merger could not complete typecheck or tests",
-        );
-        waitForHuman = true;
       }
     } finally {
       release();
@@ -229,4 +261,45 @@ export async function runPipeline(input: {
       await beads.waitUntilNoHumanFlag(input.beadId);
     }
   }
+}
+
+async function loadMergeSync(input: {
+  projectPath: string;
+  git: Git;
+  targetBranch: string;
+  branch: string;
+}): Promise<MergeSync> {
+  let agentsMd: string | null = null;
+  try {
+    agentsMd = await readFile(join(input.projectPath, "AGENTS.md"), "utf8");
+  } catch {
+    agentsMd = null;
+  }
+  let hasReposDir = false;
+  try {
+    hasReposDir = (await stat(join(input.projectPath, "repos"))).isDirectory();
+  } catch {
+    hasReposDir = false;
+  }
+  const remotes = await input.git.listRemotes({ cwd: input.projectPath });
+  let diffPaths = await input.git.listChangedPaths({
+    cwd: input.projectPath,
+    from: input.targetBranch,
+    to: input.branch,
+    pathspec: "repos/",
+  });
+  if (diffPaths.length === 0) {
+    diffPaths = await input.git.listChangedPaths({
+      cwd: input.projectPath,
+      from: `origin/${input.targetBranch}`,
+      to: "HEAD",
+      pathspec: "repos/",
+    });
+  }
+  return mergeSyncFrom({
+    agentsMd,
+    hasReposDir,
+    remotes,
+    diffPaths,
+  });
 }

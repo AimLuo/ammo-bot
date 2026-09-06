@@ -42,6 +42,12 @@ function createHarness(options: {
   claimedByAgent?: boolean;
   seedCommits?: string[];
   startWithHumanFlag?: boolean;
+  unpushed?: boolean;
+  mergeSync?: {
+    kind: "single" | "multi";
+    originUrl: string | null;
+    subtrees: { name: string; url: string | null }[];
+  };
 } = {}) {
   const beadId = options.beadId ?? "bead-1";
   const mergeConcurrency = options.mergeConcurrency ?? {
@@ -73,6 +79,7 @@ function createHarness(options: {
   const removedBranches: string[] = [];
   let primaryClean = options.primary?.clean ?? true;
   let primaryBranch = options.primary?.branch ?? TARGET;
+  let unpushed = options.unpushed ?? false;
   let implementIndex = 0;
   let mergeIndex = 0;
   let humanFlagWaiters: Array<() => void> = [];
@@ -210,6 +217,7 @@ function createHarness(options: {
 
   const git: Git & {
     setPrimary(next: { clean?: boolean; branch?: string }): void;
+    setUnpushed(unpushed: boolean): void;
   } = {
     async addWorktree({ worktreePath, branch }) {
       worktrees.add(worktreePath);
@@ -232,9 +240,21 @@ function createHarness(options: {
       }
       return { clean: true, branch: issueBranch(beadId) };
     },
+    async listRemotes() {
+      return [];
+    },
+    async listChangedPaths() {
+      return [];
+    },
+    async hasUnpushedCommits() {
+      return unpushed;
+    },
     setPrimary(next) {
       if (next.clean !== undefined) primaryClean = next.clean;
       if (next.branch !== undefined) primaryBranch = next.branch;
+    },
+    setUnpushed(next) {
+      unpushed = next;
     },
   };
 
@@ -298,6 +318,7 @@ function createHarness(options: {
         agent,
         beads,
         git,
+        mergeSync: options.mergeSync,
       });
     },
   };
@@ -756,5 +777,51 @@ describe("runPipeline", () => {
     expect(h.agentCalls.map((c) => c.role)).toEqual(["implement", "review"]);
     expect(h.bead.status).toBe("in_progress");
     expect(h.removedWorktrees).toEqual([]);
+  });
+
+  it("flags human and leaves the worktree when the target still has commits not on origin", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      unpushed: true,
+    });
+
+    const running = h.run();
+    await h.waitForHumanFlagCount(1);
+
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.bead.labels).toContain("human");
+    expect(h.comments).toContain("target branch has commits not on origin");
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.git.setUnpushed(false);
+    h.clearHumanFlag();
+    const result = await running;
+
+    expect(result).toEqual({ outcome: "merged" });
+    expect(h.bead.status).toBe("closed");
+    expect(h.removedWorktrees).toContain(worktreePath(h.beadId));
+  });
+
+  it("injects layout and subtree remotes into the merger prompt", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      mergeSync: {
+        kind: "multi",
+        originUrl: "git@github.com:org/parent.git",
+        subtrees: [
+          { name: "ammo-bot", url: "https://github.com/org/ammo-bot.git" },
+        ],
+      },
+    });
+
+    await h.run();
+
+    const prompt = h.agentCalls.find((c) => c.role === "merge")?.prompt;
+    expect(prompt).toContain("multi-context");
+    expect(prompt).toContain(
+      "git subtree push --prefix=repos/ammo-bot https://github.com/org/ammo-bot.git main",
+    );
+    expect(prompt).toContain("git push");
+    expect(prompt).not.toMatch(/Close the bead with/);
   });
 });

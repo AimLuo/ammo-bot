@@ -62,6 +62,17 @@ export type Git = {
     targetBranch: string;
   }): Promise<string[]>;
   status(input: { cwd: string }): Promise<{ clean: boolean; branch: string }>;
+  listRemotes(input: { cwd: string }): Promise<{ name: string; url: string }[]>;
+  listChangedPaths(input: {
+    cwd: string;
+    from: string;
+    to: string;
+    pathspec?: string;
+  }): Promise<string[]>;
+  hasUnpushedCommits(input: {
+    cwd: string;
+    targetBranch: string;
+  }): Promise<boolean>;
 };
 
 export type PipelineResult =

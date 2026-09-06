@@ -79,5 +79,58 @@ export function createGitCli(): Git {
       ).trim();
       return { clean: porcelain.trim() === "", branch };
     },
+    async listRemotes({ cwd }) {
+      let stdout: string;
+      try {
+        stdout = await git(["remote", "-v"], cwd);
+      } catch {
+        return [];
+      }
+      const byName = new Map<string, string>();
+      for (const line of stdout.split("\n")) {
+        const match = /^(\S+)\s+(\S+)/.exec(line.trim());
+        if (!match) continue;
+        const name = match[1];
+        const url = match[2];
+        if (!name || !url || byName.has(name)) continue;
+        byName.set(name, url);
+      }
+      return [...byName.entries()].map(([name, url]) => ({ name, url }));
+    },
+    async listChangedPaths({ cwd, from, to, pathspec }) {
+      const args = ["diff", "--name-only", `${from}...${to}`];
+      if (pathspec) args.push("--", pathspec);
+      try {
+        const stdout = await git(args, cwd);
+        return stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
+      } catch {
+        return [];
+      }
+    },
+    async hasUnpushedCommits({ cwd, targetBranch }) {
+      if (!(await gitOk(["remote", "get-url", "origin"], cwd))) {
+        return false;
+      }
+      if (
+        !(await gitOk(
+          ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+          cwd,
+        ))
+      ) {
+        return true;
+      }
+      if (
+        !(await gitOk(["rev-parse", "--verify", `origin/${targetBranch}`], cwd))
+      ) {
+        return true;
+      }
+      const count = (
+        await git(["rev-list", "--count", `origin/${targetBranch}..HEAD`], cwd)
+      ).trim();
+      return Number(count) > 0;
+    },
   };
 }

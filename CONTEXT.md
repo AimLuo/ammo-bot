@@ -59,7 +59,7 @@ _Avoid_: bot user、cursor、BEADS_ACTOR
 _Avoid_: 扫描执行、worker、daemon、orchestrator
 
 **Pipeline**：
-一张已 claim 的 bead，走 implement → review → merge → close。implement 是 **iteration** 循环（上限 100）。review 是一次 **iteration**。merge 是 **primary checkout** 上的一次 **merger** **iteration**（上限 1，与 Sandcastle 的 merger 相同），受 **merge lock** 保护。**human flag** 一出现（agent 或人打上的都算），立刻停掉当前 Cursor **iteration**；pipeline 进程不退出，等人摘标后 **Resume**。Ammo-bot 自己启动 Cursor CLI，不调用 Sandcastle 的 `run()`。
+一张已 claim 的 bead，走 implement → review → merge → close。implement 是 **iteration** 循环（上限 100）。review 是一次 **iteration**。merge 是 **primary checkout** 上的一次 **merger** **iteration**（上限 1，与 Sandcastle 的 merger 相同），受 **merge lock** 保护。close 只在 **merger** 发出 **completion signal** 且名为 `origin` 的 git remote 不再落后之后。**human flag** 一出现（agent 或人打上的都算），立刻停掉当前 Cursor **iteration**；pipeline 进程不退出，等人摘标后 **Resume**。Ammo-bot 自己启动 Cursor CLI，不调用 Sandcastle 的 `run()`。
 _Avoid_: run、job、"sandcastle run"
 
 **Iteration**：
@@ -75,8 +75,8 @@ _Avoid_: done flag、exit signal
 _Avoid_: sandbox、workspace、`.sandcastle/worktrees`、merge worktree
 
 **Merger**：
-拿着 **merge lock** 的 Cursor agent：把 `ammo/issue-<id>` 合进 **primary checkout** 上的 **target branch**，解冲突，跑 typecheck 和测试，并 close 这张 **bead**。一次 **iteration**，然后发 **completion signal**。
-_Avoid_: 纯脚本 merge、批量 merger、把 merge 当成只跑 `git merge` 的壳步骤
+拿着 **merge lock** 的 Cursor agent：把 `ammo/issue-<id>` 合进 **primary checkout** 上的 **target branch**，解冲突，跑 typecheck 和测试，并按目标项目 AGENTS.md 的单仓/多仓把已合入的提交同步到存在的 git remote（先改动过的 `repos/<名>` subtree，再名为 `origin` 的父仓 remote）。一次 **iteration**，然后发 **completion signal**。不 close **bead**。
+_Avoid_: 纯脚本 merge、批量 merger、把 merge 当成只跑 `git merge` 的壳步骤、把 git remote 叫 Origin
 
 **Merge lock**：
 按 **target branch** 的锁，同一时刻只有一个 **merger** 写 **primary checkout**。其他 bead 的 implement / review 不拿这把锁。

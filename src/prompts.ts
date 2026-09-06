@@ -1,4 +1,5 @@
 import { COMPLETION_SIGNAL, type BeadComment } from "./types.ts";
+import type { MergeSync } from "./project-layout.ts";
 
 function commentsSection(comments: BeadComment[] | undefined): string {
   if (!comments?.length) return "";
@@ -112,18 +113,55 @@ export function mergePrompt(input: {
   branch: string;
   targetBranch: string;
   comments?: BeadComment[];
+  sync: MergeSync;
 }): string {
+  const layoutLabel =
+    input.sync.kind === "multi" ? "multi-context" : "single-context";
+  const missing = input.sync.subtrees.filter((s) => !s.url);
+  const ready = input.sync.subtrees.filter((s) => s.url);
+  const remoteLines: string[] = [];
+  let n = 5;
+  for (const subtree of ready) {
+    remoteLines.push(
+      `${n}. Run \`git subtree push --prefix=repos/${subtree.name} ${subtree.url} ${input.targetBranch}\`. If it is not a fast-forward, add the human flag and stop.`,
+    );
+    n += 1;
+  }
+  if (missing.length) {
+    remoteLines.push(
+      `${n}. A changed prefix has no git remote URL: ${missing
+        .map((s) => `repos/${s.name}`)
+        .join(
+          ", ",
+        )}. Comment which prefix is missing, add the human flag (\`bd update ${input.beadId} --add-label human\`), and stop. Do not output ${COMPLETION_SIGNAL}.`,
+    );
+    n += 1;
+  }
+  if (input.sync.originUrl) {
+    remoteLines.push(
+      `${n}. Run \`git push\` (or \`git push -u origin HEAD\` if there is no upstream). If it is not a fast-forward, add the human flag and stop.`,
+    );
+  } else {
+    remoteLines.push(
+      `${n}. There is no origin remote. Skip pushing the parent.`,
+    );
+  }
+
   return `# TASK
 
 Merge \`${input.branch}\` into the current branch (\`${input.targetBranch}\`).
 
-1. Run \`git merge ${input.branch} --no-edit\`
-2. If there are merge conflicts, resolve them by reading both sides and choosing the correct resolution
-3. After merging, run typecheck and tests. If they fail, fix them in this same iteration.
-4. Close the bead with \`bd close ${input.beadId}\`
+This project is ${layoutLabel} according to its AGENTS.md. If that disagrees with AGENTS.md in your context, add the human flag and stop.
 
-Do not run \`bd update --claim\`.
+1. If \`git merge-base --is-ancestor ${input.branch} HEAD\` succeeds, the branch is already merged. Skip merge and typecheck; only finish remote sync.
+2. Otherwise run \`git merge ${input.branch} --no-edit\`
+3. If there are merge conflicts, resolve them by reading both sides and choosing the correct resolution
+4. After merging, run typecheck and tests. If they fail, fix them in this same iteration.
+${remoteLines.join("\n")}
+
+Do not close the bead. Do not run \`bd close\` or \`bd update --claim\`. Never use --force or --force-with-lease.
 ${commentsSection(input.comments)}${needsYouSection(input.beadId)}
-Once you have merged and closed what you can, output ${COMPLETION_SIGNAL}.
+Once you have merged and synced remotes, output ${COMPLETION_SIGNAL}.
 `;
 }
+
