@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { createBeadsCli } from "./beads-cli.ts";
+import { HUMAN_FLAG_POLL_MS } from "./constants.ts";
 import { createCursorAgent } from "./cursor-agent.ts";
 import { createGitCli } from "./git-cli.ts";
 import { mergeLock } from "./merge-lock.ts";
@@ -10,6 +11,7 @@ import {
   DEFAULT_TARGET_BRANCH,
   MAX_IMPLEMENT_ITERATIONS,
   type Agent,
+  type AgentRole,
   type Beads,
   type Git,
   type PipelineResult,
@@ -72,6 +74,51 @@ export async function runPipeline(input: {
     return heldByAgent(await beads.get(input.beadId));
   }
 
+  async function commentsForPrompt() {
+    return beads.listComments(input.beadId);
+  }
+
+  async function runAgent(args: {
+    cwd: string;
+    prompt: string;
+    role: AgentRole;
+  }): Promise<{ output: string }> {
+    const ac = new AbortController();
+    const watch = (async () => {
+      while (!ac.signal.aborted) {
+        const current = await beads.get(input.beadId);
+        if (current.labels.includes("human")) {
+          ac.abort();
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          if (ac.signal.aborted) {
+            resolve();
+            return;
+          }
+          const timer = setTimeout(resolve, HUMAN_FLAG_POLL_MS);
+          ac.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      }
+    })();
+    try {
+      return await agent.run({ ...args, signal: ac.signal });
+    } catch (err) {
+      if (ac.signal.aborted) return { output: "" };
+      throw err;
+    } finally {
+      ac.abort();
+      await watch;
+    }
+  }
+
   const existingCommits = await git.listCommitsAhead({
     cwd: worktree,
     targetBranch,
@@ -81,12 +128,13 @@ export async function runPipeline(input: {
       if (!(await waitToResume())) {
         return { outcome: "cancelled" };
       }
-      const { output } = await agent.run({
+      const { output } = await runAgent({
         cwd: worktree,
         prompt: implementPrompt({
           beadId: input.beadId,
           title: bead.title,
           branch,
+          comments: await commentsForPrompt(),
         }),
         role: "implement",
       });
@@ -110,9 +158,14 @@ export async function runPipeline(input: {
     if (!(await waitToResume())) {
       return { outcome: "cancelled" };
     }
-    await agent.run({
+    await runAgent({
       cwd: worktree,
-      prompt: reviewPrompt({ branch, targetBranch }),
+      prompt: reviewPrompt({
+        beadId: input.beadId,
+        branch,
+        targetBranch,
+        comments: await commentsForPrompt(),
+      }),
       role: "review",
     });
   }
@@ -144,12 +197,13 @@ export async function runPipeline(input: {
         await beads.addHumanFlag(input.beadId, blockedUnderLock);
         waitForHuman = true;
       } else {
-        const { output } = await agent.run({
+        const { output } = await runAgent({
           cwd: input.project.path,
           prompt: mergePrompt({
             beadId: input.beadId,
             branch,
             targetBranch,
+            comments: await commentsForPrompt(),
           }),
           role: "merge",
         });

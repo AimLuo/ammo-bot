@@ -59,7 +59,7 @@ _Avoid_: bot user、cursor、BEADS_ACTOR
 _Avoid_: 扫描执行、worker、daemon、orchestrator
 
 **Pipeline**：
-一张已 claim 的 bead，走 implement → review → merge → close。implement 是 **iteration** 循环（上限 100）。review 是一次 **iteration**。merge 是 **primary checkout** 上的一次 **merger** **iteration**（上限 1，与 Sandcastle 的 merger 相同），受 **merge lock** 保护。下一轮 implement / review / **merger** 开始前若仍有 **human flag**，进程内等待。Ammo-bot 自己启动 Cursor CLI，不调用 Sandcastle 的 `run()`。
+一张已 claim 的 bead，走 implement → review → merge → close。implement 是 **iteration** 循环（上限 100）。review 是一次 **iteration**。merge 是 **primary checkout** 上的一次 **merger** **iteration**（上限 1，与 Sandcastle 的 merger 相同），受 **merge lock** 保护。**human flag** 一出现（agent 或人打上的都算），立刻停掉当前 Cursor **iteration**；pipeline 进程不退出，等人摘标后 **Resume**。Ammo-bot 自己启动 Cursor CLI，不调用 Sandcastle 的 `run()`。
 _Avoid_: run、job、"sandcastle run"
 
 **Iteration**：
@@ -95,7 +95,7 @@ _Avoid_: human flag、human label、Needs You
 _Avoid_: blocked（Beads 的 status）、inbox、"需要人工处理"、Origin
 
 **Human flag**：
-Beads 的 `human` 标签，和 Scotty **Needs You** 认的是同一标记。进入 **Needs You**，不改 status。谁打上的都算：pipeline 在 merge 无法进行时打上（**primary checkout** 不干净、不在 **target branch** 上，或 **merger** 未完成），agent 提问时也可以打上。scanner 不领带该标签的 bead；进行中的 pipeline 在下一轮 implement / review / **merger** 前只要标签还在就等待。人摘掉标签且不 close，pipeline 才继续。不是 `bd human`（给人列出/回复/驳回），也不是 **Origin**。
+Beads 的 `human` 标签，和 Scotty **Needs You** 认的是同一标记。进入 **Needs You**，不改 status。谁打上的都算：pipeline 在 merge 无法进行时打上（**primary checkout** 不干净、不在 **target branch** 上，或 **merger** 未完成）；agent 在 **iteration** 中发现必须等人时自行打上并 comment 问题。标签一出现，当前 Cursor **iteration** 立刻停掉（不发 **completion signal**）。scanner 不领带该标签的 bead；进行中的 pipeline 进程不退出，人摘掉标签且不 close 才 **Resume**。不是 `bd human`（给人列出/回复/驳回），也不是 **Origin**。
 _Avoid_: `bd human`（打标）、`bd human respond`（会 close，不是让 pipeline 继续）、Origin、gate、blocked、escalate
 
 **Human-approval gate**：
@@ -103,5 +103,5 @@ _Avoid_: `bd human`（打标）、`bd human respond`（会 close，不是让 pip
 _Avoid_: human flag、human label
 
 **Resume**：
-摘掉 **human flag** 后，仍由 **agent actor** claim、**worktree** 还在的那条 **pipeline** 从暂停点继续——下一轮 implement、review 或 **merger**。若仍无法进行，再打上 **human flag**。
+摘掉 **human flag** 后，仍由 **agent actor** claim、**worktree** 还在的那条 **pipeline** 从暂停点继续——下一轮 implement、review 或 **merger** 的 prompt 带上这张 **bead** 的 comments。若仍无法进行，再打上 **human flag**。
 _Avoid_: Resume merge、retry（太泛）、restart（像整条 pipeline 重来）

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { HUMAN_FLAG_POLL_MS } from "./constants.ts";
 import {
   issueBranch,
   runPipeline,
@@ -11,6 +12,7 @@ import {
   type AgentRole,
   type Beads,
   type Bead,
+  type BeadComment,
   type Git,
 } from "./types.ts";
 
@@ -58,7 +60,13 @@ function createHarness(options: {
     if (!bead.labels.includes("human")) bead.labels.push("human");
   }
 
-  const agentCalls: { role: AgentRole; cwd: string; at: number }[] = [];
+  const agentCalls: {
+    role: AgentRole;
+    cwd: string;
+    at: number;
+    prompt: string;
+  }[] = [];
+  const thread: BeadComment[] = [];
   const commitsAhead = new Map<string, string[]>();
   const worktrees = new Set<string>();
   const removedWorktrees: string[] = [];
@@ -72,6 +80,8 @@ function createHarness(options: {
   const humanFlagListeners: Array<() => void> = [];
   let waitingForHumanFlag = 0;
   let waitStartResolvers: Array<() => void> = [];
+  let agentStarted = 0;
+  let agentStartResolvers: Array<() => void> = [];
   let mergeStarted!: () => void;
   const whenMergeStarted = new Promise<void>((resolve) => {
     mergeStarted = resolve;
@@ -80,15 +90,38 @@ function createHarness(options: {
   const implementSteps: ImplementStep[] =
     options.implement ?? [{ output: COMPLETION_SIGNAL }];
 
+  function sleep(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    });
+  }
+
   const agent: Agent = {
-    async run({ cwd, role }) {
-      agentCalls.push({ role, cwd, at: Date.now() });
+    async run({ cwd, role, prompt, signal }) {
+      agentCalls.push({ role, cwd, at: Date.now(), prompt });
+      agentStarted += 1;
+      const started = agentStartResolvers;
+      agentStartResolvers = [];
+      for (const resolve of started) resolve();
       if (role === "implement") {
         const step = implementSteps[implementIndex] ?? { output: "" };
         implementIndex += 1;
         if (step.delayMs) {
-          await new Promise((r) => setTimeout(r, step.delayMs));
+          await sleep(step.delayMs, signal);
         }
+        if (signal?.aborted) return { output: "" };
         if (step.commit) {
           const existing = commitsAhead.get(cwd) ?? [];
           commitsAhead.set(cwd, [...existing, `sha-${existing.length + 1}`]);
@@ -99,8 +132,9 @@ function createHarness(options: {
       if (role === "review") {
         const reviewDelay = options.review?.delayMs;
         if (reviewDelay) {
-          await new Promise((r) => setTimeout(r, reviewDelay));
+          await sleep(reviewDelay, signal);
         }
+        if (signal?.aborted) return { output: "" };
         if (options.review?.raiseHumanFlag) raiseFlag();
         return { output: options.review?.output ?? COMPLETION_SIGNAL };
       }
@@ -112,9 +146,10 @@ function createHarness(options: {
       mergeStarted();
       const mergeDelay = options.merge?.delayMs;
       if (mergeDelay) {
-        await new Promise((r) => setTimeout(r, mergeDelay));
+        await sleep(mergeDelay, signal);
       }
       mergeConcurrency.current -= 1;
+      if (signal?.aborted) return { output: "" };
       const outputs = options.merge?.output;
       const scripted = Array.isArray(outputs)
         ? outputs
@@ -147,12 +182,17 @@ function createHarness(options: {
       if (id !== bead.id) throw new Error(`unknown bead ${id}`);
       if (!bead.labels.includes("human")) bead.labels.push("human");
       this.comments.push(comment);
+      thread.push({ author: AGENT_ACTOR, text: comment });
       humanFlagCount += 1;
       for (const listener of humanFlagListeners) listener();
     },
     async get(id) {
       if (id !== bead.id) throw new Error(`unknown bead ${id}`);
       return { ...bead, labels: [...bead.labels] };
+    },
+    async listComments(id) {
+      if (id !== bead.id) throw new Error(`unknown bead ${id}`);
+      return thread.map((c) => ({ ...c }));
     },
     async waitUntilNoHumanFlag(id) {
       if (id !== bead.id) throw new Error(`unknown bead ${id}`);
@@ -233,7 +273,19 @@ function createHarness(options: {
     whenMergeStarted,
     waitForHumanFlagCount,
     whenWaitingForHumanFlag,
+    whenAgentStarted() {
+      if (agentStarted > 0) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        agentStartResolvers.push(resolve);
+      });
+    },
+    raiseHumanFlag() {
+      raiseFlag();
+    },
     clearHumanFlag,
+    addComment(author: string, text: string) {
+      thread.push({ author, text });
+    },
     setAssignee(assignee: string | null) {
       bead.assignee = assignee;
     },
@@ -505,6 +557,99 @@ describe("runPipeline", () => {
       "merge",
     ]);
   });
+
+  it("Resumes implement with bead comments after the human flag is cleared", async () => {
+    const h = createHarness({
+      implement: [
+        { output: "asking", commit: true, raiseHumanFlag: true },
+        { output: COMPLETION_SIGNAL, commit: true },
+      ],
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+    h.addComment("ada", "use Clerk for sign-in");
+    h.clearHumanFlag();
+    await running;
+
+    const implementPrompts = h.agentCalls
+      .filter((c) => c.role === "implement")
+      .map((c) => c.prompt);
+    expect(implementPrompts[0]).toContain("--add-label human");
+    expect(implementPrompts[1]).toContain("ada");
+    expect(implementPrompts[1]).toContain("use Clerk for sign-in");
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "implement",
+      "review",
+      "merge",
+    ]);
+  });
+
+  it("Resumes review with bead comments after the human flag is cleared", async () => {
+    const h = createHarness({
+      implement: [
+        { output: COMPLETION_SIGNAL, commit: true, raiseHumanFlag: true },
+      ],
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+    h.addComment("ada", "keep the public API unchanged");
+    h.clearHumanFlag();
+    await running;
+
+    const reviewPrompt = h.agentCalls.find((c) => c.role === "review")?.prompt;
+    expect(reviewPrompt).toContain("--add-label human");
+    expect(reviewPrompt).toContain("ada");
+    expect(reviewPrompt).toContain("keep the public API unchanged");
+  });
+
+  it("Resumes the merger with bead comments after the human flag is cleared", async () => {
+    const h = createHarness({
+      implement: [{ output: COMPLETION_SIGNAL, commit: true }],
+      review: { raiseHumanFlag: true },
+    });
+
+    const running = h.run();
+    await h.whenWaitingForHumanFlag();
+    h.addComment("ada", "resolve the lockfile in favor of main");
+    h.clearHumanFlag();
+    await running;
+
+    const mergePrompt = h.agentCalls.find((c) => c.role === "merge")?.prompt;
+    expect(mergePrompt).toContain("--add-label human");
+    expect(mergePrompt).toContain("ada");
+    expect(mergePrompt).toContain("resolve the lockfile in favor of main");
+  });
+
+  it("stops the current implement iteration as soon as a human flag is added", async () => {
+    const h = createHarness({
+      implement: [
+        { delayMs: HUMAN_FLAG_POLL_MS + 500, output: COMPLETION_SIGNAL, commit: true },
+        { output: COMPLETION_SIGNAL, commit: true },
+      ],
+    });
+
+    const running = h.run();
+    await h.whenAgentStarted();
+    h.raiseHumanFlag();
+    await h.whenWaitingForHumanFlag();
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual(["implement"]);
+    expect(h.bead.status).toBe("in_progress");
+    expect(h.removedWorktrees).toEqual([]);
+
+    h.clearHumanFlag();
+    await running;
+
+    expect(h.agentCalls.map((c) => c.role)).toEqual([
+      "implement",
+      "implement",
+      "review",
+      "merge",
+    ]);
+  }, HUMAN_FLAG_POLL_MS + 10_000);
 
   it("does not start the next implement iteration while a human flag is present", async () => {
     const h = createHarness({

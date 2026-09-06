@@ -21,11 +21,17 @@ export type Bead = {
   labels: string[];
 };
 
+export type BeadComment = {
+  author: string;
+  text: string;
+};
+
 export type Agent = {
   run(input: {
     cwd: string;
     prompt: string;
     role: AgentRole;
+    signal?: AbortSignal;
   }): Promise<{ output: string }>;
 };
 
@@ -35,6 +41,7 @@ export type Beads = {
   close(beadId: string): Promise<void>;
   addHumanFlag(beadId: string, comment: string): Promise<void>;
   get(beadId: string): Promise<Bead>;
+  listComments(beadId: string): Promise<BeadComment[]>;
   waitUntilNoHumanFlag(beadId: string): Promise<void>;
 };
 

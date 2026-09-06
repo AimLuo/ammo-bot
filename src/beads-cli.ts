@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { AGENT_ACTOR, type Bead, type Beads } from "./types.ts";
+import { HUMAN_FLAG_POLL_MS } from "./constants.ts";
+import { AGENT_ACTOR, type Bead, type BeadComment, type Beads } from "./types.ts";
 import type { QueueBead, ScannerQueue } from "./scanner.ts";
 
 const execFileAsync = promisify(execFile);
@@ -112,11 +113,34 @@ export function createBeadsCli(repoPath: string): Beads {
         labels: issue.labels ?? [],
       };
     },
+    async listComments(beadId) {
+      const stdout = await run(["comments", beadId, "--json"]);
+      if (!stdout.trim()) return [];
+      const raw = JSON.parse(stdout) as unknown;
+      const items = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      return items.flatMap((item): BeadComment[] => {
+        if (!item || typeof item !== "object") return [];
+        const rec = item as { author?: unknown; text?: unknown; body?: unknown };
+        const text =
+          typeof rec.text === "string"
+            ? rec.text
+            : typeof rec.body === "string"
+              ? rec.body
+              : "";
+        if (!text) return [];
+        return [
+          {
+            author: typeof rec.author === "string" ? rec.author : "",
+            text,
+          },
+        ];
+      });
+    },
     async waitUntilNoHumanFlag(beadId) {
       for (;;) {
         const bead = await this.get(beadId);
         if (!bead.labels.includes("human")) return;
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, HUMAN_FLAG_POLL_MS));
       }
     },
   };

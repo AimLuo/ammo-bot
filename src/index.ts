@@ -4,7 +4,7 @@ export { createGitCli } from "./git-cli.ts";
 export { createCursorAgent } from "./cursor-agent.ts";
 export { createScanner, MAX_IN_FLIGHT } from "./scanner.ts";
 export { startScannerLoop } from "./start-scanner.ts";
-export { DEFAULT_AGENT_MODEL } from "./constants.ts";
+export { DEFAULT_AGENT_MODEL, HUMAN_FLAG_POLL_MS } from "./constants.ts";
 export {
   AGENT_ACTOR,
   COMPLETION_SIGNAL,
@@ -16,6 +16,7 @@ export type {
   AgentRole,
   Beads,
   Bead,
+  BeadComment,
   Git,
   PipelineResult,
   Project,
