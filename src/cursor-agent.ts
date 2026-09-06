@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { DEFAULT_AGENT_MODEL } from "./constants.ts";
+import { AGENT_MODEL_BY_ROLE } from "./constants.ts";
 import type { Agent } from "./types.ts";
 
 function runAgent(
@@ -30,18 +30,16 @@ function runAgent(
   });
 }
 
-export function createCursorAgent(
-  model: string = DEFAULT_AGENT_MODEL,
-): Agent {
+export function createCursorAgent(): Agent {
   return {
-    async run({ cwd, prompt, signal }) {
+    async run({ cwd, prompt, role, signal }) {
       return runAgent(
         [
           "--print",
           "--output-format",
           "stream-json",
           "--model",
-          model,
+          AGENT_MODEL_BY_ROLE[role],
           "--force",
           prompt,
         ],
