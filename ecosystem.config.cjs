@@ -5,7 +5,7 @@
  * No max_memory_restart and no Node heap cap: pipelines spawned here
  * may use the host freely.
  *
- *   bun run build && pm2 start ecosystem.config.cjs
+ *   bun run build && pm2 start
  */
 module.exports = {
   apps: [
