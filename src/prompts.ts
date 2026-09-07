@@ -37,9 +37,9 @@ export function implementPrompt(input: {
 }): string {
   return `# TASK
 
-Fix bead ${input.beadId}: ${input.title}
+Implement bead ${input.beadId}: ${input.title}
 
-Pull in the bead using \`bd show ${input.beadId}\`. If it has a parent, pull that in too.
+This prompt is the implementation. Pull in the bead with \`bd show ${input.beadId}\`. If it has a parent, pull that in too.
 
 Only work on the bead specified.
 
@@ -83,7 +83,9 @@ export function reviewPrompt(input: {
 }): string {
   return `# TASK
 
-Review the code changes on branch \`${input.branch}\` and improve code clarity, consistency, and maintainability while preserving exact functionality.
+Improve the existing commits on branch \`${input.branch}\` for clarity, consistency, and maintainability, preserving exact functionality.
+
+This prompt is the improve pass. Read bead \`${input.beadId}\` with \`bd show ${input.beadId}\` if the diff needs spec context.
 
 # CONTEXT
 
@@ -92,7 +94,7 @@ Run:
 \`git diff ${input.targetBranch}...${input.branch}\`
 \`git log ${input.targetBranch}..${input.branch} --oneline\`
 ${commentsSection(input.comments)}
-# REVIEW PROCESS
+# PROCESS
 
 1. Understand the change from the diff and commits.
 2. Improve clarity and consistency without changing behaviour.

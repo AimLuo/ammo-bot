@@ -5,10 +5,12 @@ export type QueueBead = {
   issue_type: string;
   labels: string[];
   status: string;
+  parent: string | null;
 };
 
 export type ScannerQueue = {
   listReady(): Promise<QueueBead[]>;
+  listWayfinderMapIds(): Promise<string[]>;
   tryClaim(beadId: string): Promise<boolean>;
 };
 
@@ -23,11 +25,15 @@ function isWayfinderLabel(label: string): boolean {
   return label === "wayfinder" || label.startsWith("wayfinder:");
 }
 
-function inUnattendedQueue(bead: QueueBead): boolean {
+export function inUnattendedQueue(
+  bead: QueueBead,
+  wayfinderMapIds: ReadonlySet<string>,
+): boolean {
   if (bead.issue_type === "epic") return false;
   if (bead.status === "in_progress") return false;
   if (bead.labels.some(isWayfinderLabel)) return false;
   if (bead.labels.includes("human")) return false;
+  if (bead.parent && wayfinderMapIds.has(bead.parent)) return false;
   return true;
 }
 
@@ -65,10 +71,14 @@ export function createScanner(input: {
     async tick(armed: ScannerProject[]) {
       for (const { project, queue } of armed) {
         if (inFlight.size >= maxInFlight) return;
-        const ready = await queue.listReady();
+        const [ready, mapIds] = await Promise.all([
+          queue.listReady(),
+          queue.listWayfinderMapIds(),
+        ]);
+        const wayfinderMaps = new Set(mapIds);
         for (const item of ready) {
           if (inFlight.size >= maxInFlight) return;
-          if (!inUnattendedQueue(item)) continue;
+          if (!inUnattendedQueue(item, wayfinderMaps)) continue;
           const key = flightKey(project, item.id);
           if (inFlight.has(key)) continue;
           const won = await queue.tryClaim(item.id);

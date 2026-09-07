@@ -33,7 +33,7 @@ _Avoid_: task（Sandcastle 的词）、ticket、job、work item
 _Avoid_: open（太宽）、backlog
 
 **Unattended queue**：
-已 **Armed** 的 scanner 会考虑的 bead——**ready** 去掉 wayfinder，再去掉带 **human flag** 的。
+已 **Armed** 的 scanner 会考虑的 bead——**ready** 去掉 epic，去掉自身带 `wayfinder` / `wayfinder:*` 的，去掉 parent 带 `wayfinder:map` 的孩子，再去掉带 **human flag** 的。
 _Avoid_: ready queue（那份含 wayfinder 和待处理的 Needs You）
 
 **Armed**：

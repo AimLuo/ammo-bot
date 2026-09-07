@@ -13,6 +13,8 @@ type BdIssue = {
   assignee?: string;
   labels?: string[];
   issue_type?: string;
+  parent?: string | null;
+  dependencies?: { type?: string; depends_on_id?: string }[];
 };
 
 function asStatus(value: string | undefined): Bead["status"] {
@@ -38,6 +40,13 @@ function createBdRunner(projectPath: string) {
   return { run, runJson };
 }
 
+function parentId(issue: BdIssue): string | null {
+  const direct = issue.parent?.trim();
+  if (direct) return direct;
+  const edge = issue.dependencies?.find((d) => d.type === "parent-child");
+  return edge?.depends_on_id?.trim() || null;
+}
+
 function asQueueBead(issue: BdIssue): QueueBead | null {
   if (!issue.id) return null;
   return {
@@ -45,7 +54,15 @@ function asQueueBead(issue: BdIssue): QueueBead | null {
     issue_type: issue.issue_type ?? "task",
     labels: issue.labels ?? [],
     status: issue.status ?? "open",
+    parent: parentId(issue),
   };
+}
+
+function parseIssues(stdout: string): BdIssue[] {
+  if (!stdout.trim()) return [];
+  const raw = JSON.parse(stdout) as BdIssue[] | BdIssue | null;
+  if (Array.isArray(raw)) return raw;
+  return raw ? [raw] : [];
 }
 
 export function createScannerQueue(projectPath: string): ScannerQueue {
@@ -53,13 +70,22 @@ export function createScannerQueue(projectPath: string): ScannerQueue {
   return {
     async listReady() {
       const stdout = await run(["ready", "--json"]);
-      if (!stdout.trim()) return [];
-      const raw = JSON.parse(stdout) as BdIssue[] | BdIssue | null;
-      const issues = Array.isArray(raw) ? raw : raw ? [raw] : [];
-      return issues.flatMap((issue) => {
+      return parseIssues(stdout).flatMap((issue) => {
         const item = asQueueBead(issue);
         return item ? [item] : [];
       });
+    },
+    async listWayfinderMapIds() {
+      const stdout = await run([
+        "list",
+        "--all",
+        "-n",
+        "0",
+        "--label",
+        "wayfinder:map",
+        "--json",
+      ]);
+      return parseIssues(stdout).flatMap((issue) => (issue.id ? [issue.id] : []));
     },
     async tryClaim(beadId) {
       try {

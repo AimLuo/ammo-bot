@@ -10,16 +10,20 @@ function bead(partial: Partial<QueueBead> & { id: string }): QueueBead {
     issue_type: "task",
     labels: [],
     status: "open",
+    parent: null,
     ...partial,
   };
 }
 
-function createQueue(ready: QueueBead[]) {
+function createQueue(ready: QueueBead[], mapIds: string[] = []) {
   const claimed: string[] = [];
   const lost = new Set<string>();
   const queue: ScannerQueue = {
     async listReady() {
       return ready.filter((b) => !claimed.includes(b.id));
+    },
+    async listWayfinderMapIds() {
+      return mapIds;
     },
     async tryClaim(beadId) {
       if (lost.has(beadId)) return false;
@@ -56,6 +60,28 @@ describe("scanner", () => {
       bead({ id: "needs-you", labels: ["human"] }),
       bead({ id: "ready-1" }),
     ]);
+    const spawned: string[] = [];
+    const scanner = createScanner({
+      runPipeline: async ({ beadId }) => {
+        spawned.push(beadId);
+      },
+    });
+
+    await scanner.tick([{ project: PROJECT, queue }]);
+    await scanner.whenIdle();
+
+    expect(claimed).toEqual(["ready-1"]);
+    expect(spawned).toEqual(["ready-1"]);
+  });
+
+  it("skips an unlabeled child whose parent is a wayfinder:map", async () => {
+    const { queue, claimed } = createQueue(
+      [
+        bead({ id: "leaked-child", parent: "map-1" }),
+        bead({ id: "ready-1" }),
+      ],
+      ["map-1"],
+    );
     const spawned: string[] = [];
     const scanner = createScanner({
       runPipeline: async ({ beadId }) => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MergeSync } from "./project-layout.ts";
-import { mergePrompt } from "./prompts.ts";
+import { implementPrompt, mergePrompt, reviewPrompt } from "./prompts.ts";
+import { COMPLETION_SIGNAL } from "./types.ts";
 
 const base = {
   beadId: "bead-1",
@@ -99,5 +100,34 @@ describe("mergePrompt", () => {
     });
     expect(prompt).toContain("git merge-base --is-ancestor");
     expect(prompt).toContain("only finish remote sync");
+  });
+});
+
+describe("implementPrompt", () => {
+  it("asks the agent to follow this prompt and the bead", () => {
+    const prompt = implementPrompt({
+      beadId: "bead-1",
+      title: "add login",
+      branch: "ammo/issue-bead-1",
+    });
+    expect(prompt).toContain("This prompt is the implementation");
+    expect(prompt).toContain("bd show bead-1");
+    expect(prompt).toContain(COMPLETION_SIGNAL);
+    expect(prompt).not.toContain("/code-review");
+  });
+});
+
+describe("reviewPrompt", () => {
+  it("asks the agent to improve existing commits from this prompt", () => {
+    const prompt = reviewPrompt({
+      beadId: "bead-1",
+      branch: "ammo/issue-bead-1",
+      targetBranch: "main",
+    });
+    expect(prompt).toContain("This prompt is the improve pass");
+    expect(prompt).toContain("Improve the existing commits");
+    expect(prompt).toContain(COMPLETION_SIGNAL);
+    expect(prompt).not.toContain("/code-review");
+    expect(prompt).not.toContain("Review the code changes");
   });
 });
