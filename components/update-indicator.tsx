@@ -72,7 +72,7 @@ export function UpdateIndicator() {
               <span className="font-mono">build</span>
               {data.supervised
                 ? ", then restarts the server automatically."
-                : ". The server is not running under the supervisor (npm run serve), so you'll need to restart it manually afterward."}
+                : ". The server is not running under the supervisor (bun run serve), so you'll need to restart it manually afterward."}
             </p>
           )}
 

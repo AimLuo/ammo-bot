@@ -9,13 +9,13 @@ export type { UpdateStatus, UpdateStep, UpdateResult };
 
 /**
  * Self-update support (bead bgb). Detects when the app's own git clone is behind
- * origin/main and applies an update: git pull → npm install (if deps changed) →
+ * origin/main and applies an update: git pull → bun install (if deps changed) →
  * next build → relaunch. Only meaningful when the server runs from the app's own
  * git checkout (dev / self-host) — under the global `scotty` install there's no
  * source to pull and no devDeps to build with, so everything degrades to a no-op.
  *
  * The Next server always runs with cwd = the app package root (the launcher sets
- * cwd: ROOT; `npm run dev/start/serve` run from the repo), so appRoot = cwd.
+ * cwd: ROOT; `bun run dev/start/serve` run from the repo), so appRoot = cwd.
  */
 
 const pexec = promisify(execFile);
@@ -103,9 +103,7 @@ export async function runUpdate(): Promise<UpdateResult> {
   let depsChanged = false;
   try {
     const changed = await git(["diff", "--name-only", fromSha, "HEAD"]);
-    // Match any manifest/lockfile by basename so nested packages and non-npm
-    // package managers (pnpm/yarn) still trigger an install.
-    const DEP_FILES = new Set(["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"]);
+    const DEP_FILES = new Set(["package.json", "bun.lock", "bun.lockb"]);
     depsChanged = changed
       .split("\n")
       .map((f) => f.trim())
@@ -113,8 +111,8 @@ export async function runUpdate(): Promise<UpdateResult> {
   } catch {
     /* if the diff fails, skip install (build will still run) */
   }
-  if (depsChanged) await run("npm install", "npm", ["install", "--no-audit", "--no-fund"]);
-  await run("next build", "npm", ["run", "build"]);
+  if (depsChanged) await run("bun install", "bun", ["install"]);
+  await run("next build", "bun", ["run", "build"]);
 
   return { ok: true, steps, restarting: isSupervised(), fromSha, toSha };
 }

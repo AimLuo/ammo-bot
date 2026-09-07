@@ -7,8 +7,10 @@
   "bin": {
     "ammo-bot": "bin/ammo-bot.mjs"
   },
+  "packageManager": "bun@1.4.2",
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "bun": ">=1.4.0"
   },
   "scripts": {
     "dev": "next dev",

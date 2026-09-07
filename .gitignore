@@ -14,6 +14,7 @@ dist
 
 # debug
 npm-debug.log*
+bun-debug.log*
 
 # env files
 .env*

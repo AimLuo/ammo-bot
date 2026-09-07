@@ -116,7 +116,7 @@ function resolveNextBin() {
     return path.join(path.dirname(pkg), "dist", "bin", "next");
   } catch {
     console.error(
-      "Could not find the 'next' package. Run `npm install` in the project first.",
+      "Could not find the 'next' package. Run `bun install` in the project first.",
     );
     process.exit(1);
   }
@@ -221,8 +221,8 @@ async function main() {
   if (!fs.existsSync(path.join(ROOT, ".next", "BUILD_ID"))) {
     console.error(
       "No production build found.\n" +
-        "Run `npm run build` in the project directory, then reinstall " +
-        "(`npm link` or `npm install -g .`).",
+        "Run `bun run build` in the project directory, then reinstall " +
+        "(`bun link` or `bun install -g .`).",
     );
     process.exit(1);
   }

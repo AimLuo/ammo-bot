@@ -5,8 +5,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Apply a self-update (bead bgb): git pull → npm install (if deps changed) →
- * next build. When running under the supervised launcher (`npm run serve`), the
+ * Apply a self-update (bead bgb): git pull → bun install (if deps changed) →
+ * next build. When running under the supervised launcher (`bun run serve`), the
  * process then exits with RESTART_EXIT_CODE so the supervisor relaunches with the
  * new build. Otherwise it returns restarting:false and the UI tells the user to
  * restart manually.
