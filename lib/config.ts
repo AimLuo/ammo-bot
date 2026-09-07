@@ -158,14 +158,11 @@ function sanitizeProjects(input: unknown): ProjectEntry[] {
 
 // ---- load / persist ------------------------------------------------------
 
-let cached: AppConfig | null = null;
-
 /**
  * Persist the config, preserving any unknown keys already on disk (e.g. the
  * legacy `repoPath`/`demo` fields) so older app versions can still read them.
  */
 function persist(cfg: AppConfig): void {
-  cached = cfg;
   try {
     fs.mkdirSync(configDir(), { recursive: true });
     let base: Record<string, unknown> = {};
@@ -177,12 +174,16 @@ function persist(cfg: AppConfig): void {
     const next = { ...base, ...cfg };
     fs.writeFileSync(configFile(), JSON.stringify(next, null, 2), "utf8");
   } catch {
-    /* best-effort; config still applies for the session */
+    /* best-effort */
   }
 }
 
+/**
+ * Always read from disk. Next can put instrumentation (scanner) and route
+ * handlers in separate bundles; a module-level cache would then hide Armed
+ * from the scanner after the board persisted it.
+ */
 export function getConfig(): AppConfig {
-  if (cached) return cached;
   const d = defaults();
 
   let onDisk:
@@ -225,10 +226,9 @@ export function getConfig(): AppConfig {
     }
   }
 
-  cached = merged;
   // Persist the migrated entry so its id is stable across restarts.
   if (migrated) persist(merged);
-  return cached;
+  return merged;
 }
 
 /** Update global settings (actor / allowlist / poll). Project registry has its own mutators. */

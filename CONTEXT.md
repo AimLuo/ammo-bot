@@ -22,6 +22,10 @@ _Avoid_: 主工作区、host cwd、main worktree（会和名为 main 的 target 
 某个 project 的 bead 看板 UI。
 _Avoid_: Scotty、dashboard、UI（太泛）
 
+**App config**：
+Ammo-bot 本机上的操作台状态：登记的 **project**、每个 project 是否 **Armed**、**human actor**。不进 Beads。
+_Avoid_: sqlite、database、repo config
+
 ### 队列
 
 **Bead**：
