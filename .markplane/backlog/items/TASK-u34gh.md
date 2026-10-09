@@ -1,7 +1,7 @@
 ---
 id: TASK-u34gh
 title: my-to-spec 技能
-status: backlog
+status: in-progress
 priority: medium
 type: feature
 effort: medium
@@ -12,7 +12,7 @@ depends_on:
 - TASK-d5gnj
 blocks: []
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aB
