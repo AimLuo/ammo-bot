@@ -1,7 +1,7 @@
 ---
 id: TASK-k4tfw
 title: my-setup-matt-pocock-skills、Markplane tracker 文档与 link-skills.sh
-status: in-progress
+status: done
 priority: medium
 type: feature
 effort: medium
