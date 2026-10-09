@@ -1,7 +1,7 @@
 ---
 id: TASK-u34gh
 title: my-to-spec 技能
-status: in-progress
+status: done
 priority: medium
 type: feature
 effort: medium
