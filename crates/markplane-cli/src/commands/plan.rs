@@ -2,7 +2,7 @@ use markplane_core::{
     IdPrefix, LinkAction, LinkRelation, MarkplaneDocument, Project, Task, parse_id,
 };
 
-use super::{parse_comma_list, read_body_file};
+use super::{optional_body_file, parse_comma_list};
 
 pub fn run(
     id: Option<String>,
@@ -13,10 +13,7 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let project = Project::from_current_dir()?;
     let tags = tags.map(|t| parse_comma_list(&t)).unwrap_or_default();
-    let body = match body_file {
-        Some(path) => Some(read_body_file(&path)?),
-        None => None,
-    };
+    let body = optional_body_file(&body_file)?;
 
     match id {
         Some(task_id) => {

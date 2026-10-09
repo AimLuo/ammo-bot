@@ -163,6 +163,10 @@ pub fn list_tools(project: &Project) -> Value {
                             "type": "string",
                             "description": "Parent epic ID (e.g. EPIC-001). Tasks only."
                         },
+                        "plan": {
+                            "type": "string",
+                            "description": "Parent plan ID (e.g. PLAN-abc12). Tasks only. Mutually exclusive with map."
+                        },
                         "map": {
                             "type": "string",
                             "description": "Parent Map ID (e.g. MAP-abc12). Creates a Decision ticket. Tasks only. Mutually exclusive with epic/plan. Type must be research|prototype|grilling|task."
@@ -344,29 +348,38 @@ pub fn list_tools(project: &Project) -> Value {
             },
             {
                 "name": "markplane_plan",
-                "description": "Create an implementation plan linked to a task.",
+                "description": "Create an implementation plan. Omit task_id for a standalone PLAN (title required). With task_id, links the plan to that task.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "task_id": {
                             "type": "string",
-                            "description": "Task ID to create plan for"
+                            "description": "Optional task ID to link the plan to. Omit for a standalone PLAN."
                         },
                         "title": {
                             "type": "string",
-                            "description": "Optional plan title (defaults to 'Implementation plan for <task title>')"
+                            "description": "Plan title. Required for standalone plans; defaults to 'Implementation plan for <task title>' when task_id is set."
                         },
                         "template": {
                             "type": "string",
-                            "description": "Template name override (e.g. 'refactor', 'implementation'). Defaults to 'implementation'."
+                            "description": "Template name override (e.g. 'refactor', 'implementation', 'spec'). Defaults to 'implementation'."
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Plan body content placed after the title heading. When omitted, the template body is used."
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Tags for the plan (e.g. ready-for-agent)."
                         }
                     },
-                    "required": ["task_id"]
+                    "required": []
                 }
             },
             {
                 "name": "markplane_link",
-                "description": "Link two items with a typed relationship (blocks, depends_on, epic, plan, implements, map, related).",
+                "description": "Link two items with a typed relationship (blocks, depends_on, epic, plan, implements, map, spec, related).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -380,8 +393,8 @@ pub fn list_tools(project: &Project) -> Value {
                         },
                         "relation": {
                             "type": "string",
-                            "enum": ["blocks", "depends_on", "epic", "plan", "implements", "map", "related"],
-                            "description": "Relationship type: blocks, depends_on, epic, plan, implements, map, or related"
+                            "enum": ["blocks", "depends_on", "epic", "plan", "implements", "map", "spec", "related"],
+                            "description": "Relationship type: blocks, depends_on, epic, plan, implements, map, spec, or related"
                         },
                         "remove": {
                             "type": "boolean",
@@ -787,6 +800,17 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
+            let plan = args
+                .get("plan")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if map.is_some() && plan.is_some() {
+                return Err(
+                    "A Decision ticket (map) cannot also have an epic or plan".to_string(),
+                );
+            }
+
             let tags: Vec<String> = args
                 .get("tags")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -797,6 +821,12 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
                     title, item_type, priority, effort, epic, map, tags, template, body,
                 )
                 .map_err(|e| e.to_string())?;
+
+            if let Some(plan_id) = plan {
+                project
+                    .link_items(&item.id, &plan_id, LinkRelation::Plan, LinkAction::Add)
+                    .map_err(|e| e.to_string())?;
+            }
 
             let result = json!({ "id": item.id, "title": item.title });
             serde_json::to_string(&result).map_err(|e| e.to_string())
@@ -1167,38 +1197,60 @@ fn handle_promote(project: &Project, args: &Value) -> Result<String, String> {
 }
 
 fn handle_plan(project: &Project, args: &Value) -> Result<String, String> {
-    let task_id = args
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing required parameter: task_id".to_string())?;
-
-    // Read the task to get its title
-    let task_doc: MarkplaneDocument<Task> =
-        project.read_item(task_id).map_err(|e| e.to_string())?;
-
-    let default_title = format!("Implementation plan for {}", task_doc.frontmatter.title);
-    let title = args
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&default_title);
-
+    let task_id = args.get("task_id").and_then(|v| v.as_str());
     let template = args.get("template").and_then(|v| v.as_str());
+    let body = args.get("body").and_then(|v| v.as_str());
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
 
-    let plan = project
-        .create_plan(title, vec![], vec![], template, None)
-        .map_err(|e| e.to_string())?;
+    match task_id {
+        Some(task_id) => {
+            let task_doc: MarkplaneDocument<Task> =
+                project.read_item(task_id).map_err(|e| e.to_string())?;
 
-    // Link the plan to the task via the centralized link system
-    project
-        .link_items(task_id, &plan.id, LinkRelation::Plan, LinkAction::Add)
-        .map_err(|e| e.to_string())?;
+            let default_title =
+                format!("Implementation plan for {}", task_doc.frontmatter.title);
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&default_title);
 
-    let result = json!({
-        "id": plan.id,
-        "title": plan.title,
-        "implements": task_id
-    });
-    serde_json::to_string(&result).map_err(|e| e.to_string())
+            let plan = project
+                .create_plan(title, vec![], tags, template, body)
+                .map_err(|e| e.to_string())?;
+
+            project
+                .link_items(task_id, &plan.id, LinkRelation::Plan, LinkAction::Add)
+                .map_err(|e| e.to_string())?;
+
+            let result = json!({
+                "id": plan.id,
+                "title": plan.title,
+                "implements": task_id
+            });
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        None => {
+            let title = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    "title is required when creating a standalone plan".to_string()
+                })?;
+
+            let plan = project
+                .create_plan(title, vec![], tags, template, body)
+                .map_err(|e| e.to_string())?;
+
+            let result = json!({
+                "id": plan.id,
+                "title": plan.title
+            });
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+    }
 }
 
 fn handle_link(project: &Project, args: &Value) -> Result<String, String> {
@@ -1341,11 +1393,7 @@ fn handle_comment(project: &Project, args: &Value) -> Result<String, String> {
         .get("author")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "me".to_string())
-        });
+        .unwrap_or_else(crate::commands::default_user_name);
 
     project
         .add_comment(id, &author, body)

@@ -1,6 +1,6 @@
 use markplane_core::{Effort, LinkAction, LinkRelation, Priority, Project};
 
-use super::{parse_comma_list, read_body_file};
+use super::{optional_body_file, parse_comma_list};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -27,10 +27,7 @@ pub fn run(
     let priority: Priority = priority.parse()?;
     let effort: Effort = effort.parse()?;
     let tags = tags.map(|t| parse_comma_list(&t)).unwrap_or_default();
-    let body = match body_file {
-        Some(path) => Some(read_body_file(&path)?),
-        None => None,
-    };
+    let body = optional_body_file(&body_file)?;
 
     // Core rejects map+epic; reject map+plan before create so we fail cleanly.
     if map.is_some() && plan.is_some() {

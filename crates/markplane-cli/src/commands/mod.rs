@@ -587,3 +587,18 @@ pub fn read_body_file(path: &str) -> anyhow::Result<String> {
         Ok(std::fs::read_to_string(path)?)
     }
 }
+
+/// Resolve `--body-file` when present; `None` leaves the template body.
+pub fn optional_body_file(body_file: &Option<String>) -> anyhow::Result<Option<String>> {
+    match body_file {
+        Some(path) => Ok(Some(read_body_file(path)?)),
+        None => Ok(None),
+    }
+}
+
+/// Default comment/assignee name from `$USER` / `$USERNAME` / `me`.
+pub fn default_user_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "me".to_string())
+}

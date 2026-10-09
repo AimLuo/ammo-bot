@@ -494,6 +494,62 @@ fn test_tool_add_plan_standalone() {
 }
 
 #[test]
+fn test_tool_add_with_plan_parent() {
+    let tmp = setup_project();
+
+    let plan_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Parent plan",
+                    "kind": "plan"
+                }
+            }
+        }),
+    );
+    let plan_id = extract_id_from_response(&plan_resp);
+
+    let add_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Under plan via MCP",
+                    "plan": plan_id,
+                    "tags": ["ready-for-agent"]
+                }
+            }
+        }),
+    );
+    assert!(add_resp["error"].is_null());
+    let task_id = extract_id_from_response(&add_resp);
+
+    let task_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    assert!(task_content.contains(&plan_id));
+    assert!(task_content.contains("ready-for-agent"));
+
+    let plan_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    assert!(plan_content.contains(&task_id));
+}
+
+#[test]
 fn test_tool_query_filter_by_plan() {
     let tmp = setup_project();
     let root = tmp.path().join(".markplane");
@@ -1502,7 +1558,12 @@ fn test_tool_plan() {
             "method": "tools/call",
             "params": {
                 "name": "markplane_plan",
-                "arguments": { "task_id": task_id, "title": "My plan" }
+                "arguments": {
+                    "task_id": task_id,
+                    "title": "My plan",
+                    "body": "## Approach\n\nShip it.\n",
+                    "tags": ["ready-for-agent"]
+                }
             }
         }),
     );
@@ -1512,6 +1573,74 @@ fn test_tool_plan() {
     let result: Value = serde_json::from_str(text).unwrap();
     assert!(result["id"].as_str().unwrap().starts_with("PLAN-"));
     assert_eq!(result["implements"], task_id);
+
+    let plan_id = result["id"].as_str().unwrap();
+    let plan_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    assert!(plan_content.contains("## Approach"));
+    assert!(plan_content.contains("Ship it."));
+    assert!(plan_content.contains("ready-for-agent"));
+}
+
+#[test]
+fn test_tool_plan_standalone() {
+    let tmp = setup_project();
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 131,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_plan",
+                "arguments": {
+                    "title": "Standalone via markplane_plan",
+                    "body": "## Problem Statement\n\nNeed a plan.\n",
+                    "tags": ["ready-for-agent"]
+                }
+            }
+        }),
+    );
+
+    assert!(response["error"].is_null());
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    let result: Value = serde_json::from_str(text).unwrap();
+    let plan_id = result["id"].as_str().unwrap();
+    assert!(plan_id.starts_with("PLAN-"));
+    assert_eq!(result["title"], "Standalone via markplane_plan");
+    assert!(result.get("implements").is_none() || result["implements"].is_null());
+
+    let plan_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    assert!(plan_content.contains("## Problem Statement"));
+    assert!(plan_content.contains("Need a plan."));
+    assert!(plan_content.contains("ready-for-agent"));
+}
+
+#[test]
+fn test_tool_plan_standalone_requires_title() {
+    let tmp = setup_project();
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 132,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_plan",
+                "arguments": {
+                    "tags": ["ready-for-agent"]
+                }
+            }
+        }),
+    );
+    assert_tool_error(&response, "standalone plan requires title");
 }
 
 // ── Tool: markplane_link ─────────────────────────────────────────────────
@@ -1869,6 +1998,102 @@ fn test_tool_link_related_bidirectional() {
     assert!(
         show_text.contains(&epic_id),
         "Show output should contain related epic ID"
+    );
+}
+
+#[test]
+fn test_tool_link_spec() {
+    let tmp = setup_project();
+
+    let map_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "title": "Spec map", "kind": "map" }
+            }
+        }),
+    );
+    let map_id = extract_id_from_response(&map_resp);
+
+    let epic_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "title": "Published epic", "kind": "epic" }
+            }
+        }),
+    );
+    let epic_id = extract_id_from_response(&epic_resp);
+
+    let link_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_link",
+                "arguments": {
+                    "from": map_id,
+                    "to": epic_id,
+                    "relation": "spec"
+                }
+            }
+        }),
+    );
+    assert!(link_resp["error"].is_null());
+    let text = link_resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("success"));
+
+    let map_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    let map_fm = map_content.split("---").nth(1).unwrap_or("");
+    assert!(map_fm.contains("specs:"));
+    assert!(map_fm.contains(&epic_id));
+
+    let epic_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/roadmap/items/{}.md", epic_id)),
+    )
+    .unwrap();
+    let epic_fm = epic_content.split("---").nth(1).unwrap_or("");
+    assert!(!epic_fm.contains(&map_id));
+}
+
+#[test]
+fn test_tools_list_link_includes_spec() {
+    let tmp = setup_project();
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/list",
+            "params": {}
+        }),
+    );
+    let tools = response["result"]["tools"].as_array().unwrap();
+    let link = tools
+        .iter()
+        .find(|t| t["name"] == "markplane_link")
+        .expect("markplane_link tool");
+    let enum_vals = link["inputSchema"]["properties"]["relation"]["enum"]
+        .as_array()
+        .expect("relation enum");
+    assert!(
+        enum_vals.iter().any(|v| v.as_str() == Some("spec")),
+        "markplane_link relation enum should include spec"
     );
 }
 

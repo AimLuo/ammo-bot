@@ -168,7 +168,7 @@ The server exposes 17 tools via the `tools/list` method.
 
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
-| `markplane_add` | Create a new item. | `title` (string) | `kind` (string): `task` (default), `epic`, `plan`, `note`, or `map`; `type` (string): task type (with `map`: `research`/`prototype`/`grilling`/`task`); `priority` (string); `effort` (string); `epic` (string): parent epic (tasks); `map` (string): parent Map — Decision ticket (tasks; mutually exclusive with epic/plan); `note_type` (string); `tags` (string[]): tasks, notes, epics, plans; `template` (string); `body` (string): body after the title heading |
+| `markplane_add` | Create a new item. | `title` (string) | `kind` (string): `task` (default), `epic`, `plan`, `note`, or `map`; `type` (string): task type (with `map`: `research`/`prototype`/`grilling`/`task`); `priority` (string); `effort` (string); `epic` (string): parent epic (tasks); `plan` (string): parent plan (tasks; mutually exclusive with map); `map` (string): parent Map — Decision ticket (tasks; mutually exclusive with epic/plan); `note_type` (string); `tags` (string[]): tasks, notes, epics, plans; `template` (string); `body` (string): body after the title heading |
 | `markplane_update` | Update fields on an existing item. | `id` (string) | `title` (string); `status` (string) — includes Map statuses `active`/`done`/`abandoned`; `priority` (string); `effort` (string); `type` (string); `assignee` (string/null); `position` (string/null); `add_tags` (string[]); `remove_tags` (string[]); `started` (string/null); `target` (string/null); `note_type` (string) |
 | `markplane_move` | Move a task to a new position within its priority group. Handles fractional-indexing math automatically. | `id` (string) | `to` (string): `top` or `bottom`; `before` (string): task ID to position before; `after` (string): task ID to position after. Provide exactly one of `to`, `before`, or `after`. |
 | `markplane_comment` | Append a dated, attributed comment under `## Comments`. | `id` (string), `body` (string) | `author` (string) |
@@ -179,10 +179,8 @@ The server exposes 17 tools via the `tools/list` method.
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
 | `markplane_promote` | Promote a note to a task. | `note_id` (string) | `priority` (string): default medium; `effort` (string): default medium |
-| `markplane_plan` | Create an implementation plan linked to a task. (Standalone plans: use `markplane_add` with `kind: "plan"`.) | `task_id` (string) | `title` (string): defaults to "Implementation plan for {item title}"; `template` (string): template name override (e.g. `refactor`), defaults to `implementation` |
-| `markplane_link` | Link two items with a typed relationship. `related` is bidirectional and works between any item types. | `from` (string), `to` (string), `relation` (string): `blocks`, `depends_on`, `epic`, `plan`, `implements`, `map`, or `related` | `remove` (boolean): remove the link instead of adding it (default: false) |
-
-> Map → Spec (`spec`) linking is available on the CLI (`markplane link … -r spec`). Prefer the CLI for that relation until MCP grows a matching enum value.
+| `markplane_plan` | Create an implementation plan. Omit `task_id` for a standalone PLAN (`title` required). With `task_id`, links the plan to that task. | *(none)* | `task_id` (string); `title` (string): required when standalone, else defaults to "Implementation plan for {item title}"; `template` (string); `body` (string); `tags` (string[]) |
+| `markplane_link` | Link two items with a typed relationship. `related` is bidirectional and works between any item types. `spec` records Map → Spec (EPIC/PLAN) with no reverse field. | `from` (string), `to` (string), `relation` (string): `blocks`, `depends_on`, `epic`, `plan`, `implements`, `map`, `spec`, or `related` | `remove` (boolean): remove the link instead of adding it (default: false) |
 
 ### Archive
 
