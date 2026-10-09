@@ -327,6 +327,7 @@ async fn run_file_watcher(root: PathBuf, tx: broadcast::Sender<String>) -> anyho
                     markplane_core::IdPrefix::Task => "task",
                     markplane_core::IdPrefix::Plan => "plan",
                     markplane_core::IdPrefix::Note => "note",
+                    markplane_core::IdPrefix::Map => "map",
                 };
                 serde_json::json!({
                     "type": "file_changed",
@@ -2503,6 +2504,49 @@ async fn get_search(
         }
     }
 
+    // Search maps
+    let mut maps = state.project.list_maps().map_err(map_core_error)?;
+    let archived_map_ids: HashSet<String> = if params.include_archived {
+        let archived = state
+            .project
+            .list_maps_filtered(true)
+            .map_err(map_core_error)?;
+        let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
+        maps.extend(archived);
+        ids
+    } else {
+        HashSet::new()
+    };
+    for doc in &maps {
+        let fm = &doc.frontmatter;
+        let id_match = fm.id.to_lowercase().contains(&query);
+        let title_match = fm.title.to_lowercase().contains(&query);
+        let tag_match = fm.tags.iter().any(|t| t.to_lowercase().contains(&query));
+        let body_match = doc.body.to_lowercase().contains(&query);
+        if id_match || title_match || tag_match || body_match {
+            let score = if id_match {
+                3.0
+            } else if title_match {
+                2.0
+            } else if tag_match {
+                1.5
+            } else {
+                1.0
+            };
+            let snippet = extract_snippet(&doc.body, &query);
+            results.push(SearchResultResponse {
+                id: fm.id.clone(),
+                entity_type: "map".to_string(),
+                title: fm.title.clone(),
+                status: fm.status.to_string(),
+                priority: None,
+                snippet,
+                score,
+                archived: archived_map_ids.contains(&fm.id),
+            });
+        }
+    }
+
     // Sort by score descending, then by ID
     results.sort_by(|a, b| {
         b.score
@@ -2714,6 +2758,30 @@ fn build_graph(project: &Project, focus_id: Option<&str>) -> anyhow::Result<Grap
                 status: fm.status.to_string(),
                 priority: None,
                 tags: vec![],
+            },
+        );
+        for rel in &fm.related {
+            edges.push(GraphEdgeResponse {
+                source: fm.id.clone(),
+                target: rel.clone(),
+                relation: "related".to_string(),
+            });
+        }
+    }
+
+    // Collect maps
+    let maps = project.list_maps()?;
+    for doc in &maps {
+        let fm = &doc.frontmatter;
+        nodes_map.insert(
+            fm.id.clone(),
+            GraphNodeResponse {
+                id: fm.id.clone(),
+                node_type: "map".to_string(),
+                title: fm.title.clone(),
+                status: fm.status.to_string(),
+                priority: None,
+                tags: fm.tags.clone(),
             },
         );
         for rel in &fm.related {

@@ -167,6 +167,24 @@ impl Project {
     pub fn list_notes(&self) -> Result<Vec<MarkplaneDocument<Note>>> {
         self.list_notes_filtered(false)
     }
+
+    /// List all maps. Pass `archived: true` to list archived maps only.
+    pub fn list_maps_filtered(&self, archived: bool) -> Result<Vec<MarkplaneDocument<Map>>> {
+        let dir = self.item_dir(&IdPrefix::Map);
+        let scope = if archived {
+            ScanScope::Archived
+        } else {
+            ScanScope::Active
+        };
+        let mut items = scan_directory::<Map>(&dir, scope)?;
+        items.sort_by(|a, b| a.frontmatter.id.cmp(&b.frontmatter.id));
+        Ok(items)
+    }
+
+    /// List all active maps (convenience wrapper).
+    pub fn list_maps(&self) -> Result<Vec<MarkplaneDocument<Map>>> {
+        self.list_maps_filtered(false)
+    }
 }
 
 /// Scan a single directory for `.md` files, parse each one, and append to `results`.

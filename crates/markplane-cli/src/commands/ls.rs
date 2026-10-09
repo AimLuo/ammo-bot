@@ -56,6 +56,16 @@ struct NoteRow {
     status: String,
 }
 
+#[derive(Tabled)]
+struct MapRow {
+    #[tabled(rename = "ID")]
+    id: String,
+    #[tabled(rename = "Title")]
+    title: String,
+    #[tabled(rename = "Status")]
+    status: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     kind: Option<LsKind>,
@@ -74,6 +84,7 @@ pub fn run(
         Some(LsKind::Epics) => list_epics(&project, archived),
         Some(LsKind::Plans) => list_plans(&project, archived),
         Some(LsKind::Notes) => list_notes(&project, archived),
+        Some(LsKind::Maps) => list_maps(&project, archived),
         None => list_tasks(
             &project, status, priority, epic, plan, tags, assignee, item_type, archived,
         ),
@@ -207,6 +218,31 @@ fn list_notes(project: &Project, archived: bool) -> anyhow::Result<()> {
                 id: fm.id.clone(),
                 title: truncate(&fm.title, 40),
                 note_type: fm.note_type.to_string(),
+                status: colorize_status(&fm.status.to_string(), None),
+            }
+        })
+        .collect();
+
+    println!("{}", Table::new(rows));
+
+    Ok(())
+}
+
+fn list_maps(project: &Project, archived: bool) -> anyhow::Result<()> {
+    let items = project.list_maps_filtered(archived)?;
+
+    if items.is_empty() {
+        println!("No maps found.");
+        return Ok(());
+    }
+
+    let rows: Vec<MapRow> = items
+        .iter()
+        .map(|doc| {
+            let fm = &doc.frontmatter;
+            MapRow {
+                id: fm.id.clone(),
+                title: truncate(&fm.title, 40),
                 status: colorize_status(&fm.status.to_string(), None),
             }
         })

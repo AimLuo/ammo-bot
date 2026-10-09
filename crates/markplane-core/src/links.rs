@@ -149,6 +149,15 @@ fn update_related(
             doc.frontmatter.updated = today;
             project.write_item(id, &doc)?;
         }
+        IdPrefix::Map => {
+            let mut doc: MarkplaneDocument<Map> = project.read_item(id)?;
+            match action {
+                LinkAction::Add => push_unique(&mut doc.frontmatter.related, target),
+                LinkAction::Remove => remove_value(&mut doc.frontmatter.related, target),
+            }
+            doc.frontmatter.updated = today;
+            project.write_item(id, &doc)?;
+        }
     }
     Ok(())
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::frontmatter;
-use crate::models::{Epic, IdPrefix, Note, Plan, Task, parse_id};
+use crate::models::{Epic, IdPrefix, Map, Note, Plan, Task, parse_id};
 use crate::project::Project;
 
 /// Return a glob pattern for scanning .md files in the items subdirectory.
@@ -83,6 +83,7 @@ pub fn validate_references(project: &Project) -> Result<Vec<BrokenReference>> {
         IdPrefix::Task,
         IdPrefix::Plan,
         IdPrefix::Note,
+        IdPrefix::Map,
     ];
 
     for prefix in &dirs {
@@ -165,6 +166,7 @@ pub fn find_orphans(project: &Project) -> Result<Vec<String>> {
         IdPrefix::Task,
         IdPrefix::Plan,
         IdPrefix::Note,
+        IdPrefix::Map,
     ];
 
     for prefix in &dirs {
@@ -257,7 +259,7 @@ fn extract_frontmatter_references(content: &str) -> Vec<String> {
 
 /// Extract ID patterns (PREFIX-SUFFIX) from a line of text.
 fn extract_ids_from_line(line: &str, refs: &mut Vec<String>) {
-    let prefixes = ["EPIC-", "TASK-", "PLAN-", "NOTE-"];
+    let prefixes = ["EPIC-", "TASK-", "PLAN-", "NOTE-", "MAP-"];
     for prefix in &prefixes {
         let mut start = 0;
         while let Some(pos) = line[start..].find(prefix) {
@@ -289,6 +291,7 @@ pub fn build_reference_graph(project: &Project) -> Result<HashMap<String, Vec<St
         IdPrefix::Task,
         IdPrefix::Plan,
         IdPrefix::Note,
+        IdPrefix::Map,
     ];
 
     for prefix in &dirs {
@@ -339,25 +342,31 @@ pub struct AsymmetricLink {
     pub missing_field: String,
 }
 
-/// Helper to get the `related` field for any entity type.
-fn get_related<'a>(
-    id: &str,
+/// Loaded entities used when checking reciprocal `related` links.
+struct RelatedIndex<'a> {
     tasks: &'a HashMap<String, Task>,
     epics: &'a HashMap<String, Epic>,
     plans: &'a HashMap<String, Plan>,
     notes: &'a HashMap<String, Note>,
-) -> Option<&'a [String]> {
-    if let Some(t) = tasks.get(id) {
+    maps: &'a HashMap<String, Map>,
+}
+
+/// Helper to get the `related` field for any entity type.
+fn get_related<'a>(id: &str, index: &'a RelatedIndex<'a>) -> Option<&'a [String]> {
+    if let Some(t) = index.tasks.get(id) {
         return Some(&t.related);
     }
-    if let Some(e) = epics.get(id) {
+    if let Some(e) = index.epics.get(id) {
         return Some(&e.related);
     }
-    if let Some(p) = plans.get(id) {
+    if let Some(p) = index.plans.get(id) {
         return Some(&p.related);
     }
-    if let Some(n) = notes.get(id) {
+    if let Some(n) = index.notes.get(id) {
         return Some(&n.related);
+    }
+    if let Some(m) = index.maps.get(id) {
+        return Some(&m.related);
     }
     None
 }
@@ -366,14 +375,11 @@ fn get_related<'a>(
 fn collect_asymmetric_related(
     id: &str,
     targets: &[String],
-    tasks: &HashMap<String, Task>,
-    epics: &HashMap<String, Epic>,
-    plans: &HashMap<String, Plan>,
-    notes: &HashMap<String, Note>,
+    index: &RelatedIndex<'_>,
     asymmetric: &mut Vec<AsymmetricLink>,
 ) {
     for target in targets {
-        if let Some(target_related) = get_related(target, tasks, epics, plans, notes)
+        if let Some(target_related) = get_related(target, index)
             && !target_related.iter().any(|r| r == id)
         {
             asymmetric.push(AsymmetricLink {
@@ -397,6 +403,7 @@ pub fn validate_reciprocal_links(project: &Project) -> Result<Vec<AsymmetricLink
     let mut epics: HashMap<String, Epic> = HashMap::new();
     let mut plans: HashMap<String, Plan> = HashMap::new();
     let mut notes: HashMap<String, Note> = HashMap::new();
+    let mut maps: HashMap<String, Map> = HashMap::new();
 
     let task_dir = project.item_dir(&IdPrefix::Task);
     if task_dir.exists() {
@@ -454,6 +461,28 @@ pub fn validate_reciprocal_links(project: &Project) -> Result<Vec<AsymmetricLink
         }
     }
 
+    let map_dir = project.item_dir(&IdPrefix::Map);
+    if map_dir.exists() {
+        let pattern = scan_pattern(&map_dir);
+        for path in glob::glob(&pattern)
+            .unwrap_or_else(|_| glob::glob("").unwrap())
+            .flatten()
+        {
+            let content = std::fs::read_to_string(&path)?;
+            if let Ok(doc) = frontmatter::parse_frontmatter::<Map>(&content) {
+                maps.insert(doc.frontmatter.id.clone(), doc.frontmatter);
+            }
+        }
+    }
+
+    let related_index = RelatedIndex {
+        tasks: &tasks,
+        epics: &epics,
+        plans: &plans,
+        notes: &notes,
+        maps: &maps,
+    };
+
     // Check reciprocal pairs on tasks
     for (id, task) in &tasks {
         // blocks → depends_on
@@ -498,15 +527,7 @@ pub fn validate_reciprocal_links(project: &Project) -> Result<Vec<AsymmetricLink
         }
 
         // related (task side)
-        collect_asymmetric_related(
-            id,
-            &task.related,
-            &tasks,
-            &epics,
-            &plans,
-            &notes,
-            &mut asymmetric,
-        );
+        collect_asymmetric_related(id, &task.related, &related_index, &mut asymmetric);
     }
 
     // Check plan implements → task plan
@@ -525,40 +546,20 @@ pub fn validate_reciprocal_links(project: &Project) -> Result<Vec<AsymmetricLink
         }
 
         // related (plan side)
-        collect_asymmetric_related(
-            id,
-            &plan.related,
-            &tasks,
-            &epics,
-            &plans,
-            &notes,
-            &mut asymmetric,
-        );
+        collect_asymmetric_related(id, &plan.related, &related_index, &mut asymmetric);
     }
 
     // Check related on epics and notes
     for (id, epic) in &epics {
-        collect_asymmetric_related(
-            id,
-            &epic.related,
-            &tasks,
-            &epics,
-            &plans,
-            &notes,
-            &mut asymmetric,
-        );
+        collect_asymmetric_related(id, &epic.related, &related_index, &mut asymmetric);
     }
 
     for (id, note) in &notes {
-        collect_asymmetric_related(
-            id,
-            &note.related,
-            &tasks,
-            &epics,
-            &plans,
-            &notes,
-            &mut asymmetric,
-        );
+        collect_asymmetric_related(id, &note.related, &related_index, &mut asymmetric);
+    }
+
+    for (id, map) in &maps {
+        collect_asymmetric_related(id, &map.related, &related_index, &mut asymmetric);
     }
 
     // Sort for deterministic output

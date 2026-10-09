@@ -571,6 +571,45 @@ fn test_tool_query_filter_by_plan() {
 }
 
 #[test]
+fn test_tool_add_map() {
+    let tmp = setup_project();
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 240,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "MCP map",
+                    "kind": "map",
+                    "tags": ["wayfinder"]
+                }
+            }
+        }),
+    );
+
+    assert!(response["error"].is_null());
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    let result: Value = serde_json::from_str(text).unwrap();
+    let id = result["id"].as_str().unwrap();
+    assert!(
+        id.starts_with("MAP-"),
+        "ID should start with MAP-, got: {}",
+        id
+    );
+    assert_eq!(result["title"], "MCP map");
+
+    let path = tmp.path().join(format!(".markplane/maps/items/{}.md", id));
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("status: active"));
+    assert!(content.contains("## Destination"));
+    assert!(content.contains("tags:"));
+    assert!(content.contains("wayfinder"));
+}
+
+#[test]
 fn test_tool_add_invalid_kind() {
     let tmp = setup_project();
     let response = send_request(

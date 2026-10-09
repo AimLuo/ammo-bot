@@ -91,6 +91,7 @@ pub fn builtin_template(kind: &str, name: &str) -> &'static str {
         ("note", "research") => templates::NOTE_RESEARCH_TEMPLATE,
         ("note", "analysis") => templates::NOTE_ANALYSIS_TEMPLATE,
         ("note", _) => templates::NOTE_GENERIC_TEMPLATE,
+        ("map", _) => templates::MAP_TEMPLATE,
         _ => templates::TASK_TEMPLATE, // ultimate fallback
     }
 }
@@ -142,6 +143,12 @@ note:
       description: Research note with findings
     analysis:
       description: Analysis note with conclusions
+
+map:
+  default: default
+  templates:
+    default:
+      description: Wayfinder map with Destination and decision sections
 "#;
 
 #[cfg(test)]
@@ -156,6 +163,7 @@ mod tests {
         assert!(manifest.contains_key("epic"));
         assert!(manifest.contains_key("plan"));
         assert!(manifest.contains_key("note"));
+        assert!(manifest.contains_key("map"));
 
         let task = &manifest["task"];
         assert_eq!(task.default.as_deref(), Some("default"));

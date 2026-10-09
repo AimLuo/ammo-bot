@@ -28,6 +28,7 @@ fn extract_id(output: &[u8]) -> String {
                 || w.starts_with("EPIC-")
                 || w.starts_with("PLAN-")
                 || w.starts_with("NOTE-")
+                || w.starts_with("MAP-")
         })
         .unwrap_or_else(|| panic!("No ID found in output: {}", stdout))
         .to_string()
@@ -61,6 +62,7 @@ fn test_init_creates_structure() {
     assert!(tmp.path().join(".markplane/roadmap").is_dir());
     assert!(tmp.path().join(".markplane/plans").is_dir());
     assert!(tmp.path().join(".markplane/notes").is_dir());
+    assert!(tmp.path().join(".markplane/maps").is_dir());
     assert!(tmp.path().join(".markplane/.context").is_dir());
 }
 
@@ -2857,4 +2859,228 @@ fn test_epic_and_plan_with_spec_template() {
             "plan missing section {section}"
         );
     }
+}
+
+// ── Map ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_map_creates_with_five_sections() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Chart the summit"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let map_id = extract_id(&output.stdout);
+    assert!(map_id.starts_with("MAP-"));
+
+    let path = tmp
+        .path()
+        .join(format!(".markplane/maps/items/{}.md", map_id));
+    assert!(path.is_file());
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("status: active"));
+    assert!(content.contains("## Destination"));
+    assert!(content.contains("## Notes"));
+    assert!(content.contains("## Decisions so far"));
+    assert!(content.contains("## Not yet specified"));
+    assert!(content.contains("## Out of scope"));
+    assert!(!content.contains("priority:"));
+    assert!(!content.contains("assignee:"));
+}
+
+#[test]
+fn test_map_body_file_overrides_template() {
+    let tmp = setup_project();
+    let body_path = tmp.path().join("map-body.md");
+    std::fs::write(
+        &body_path,
+        "## Destination\n\nCustom dest.\n\n## Notes\n\nCustom notes.\n",
+    )
+    .unwrap();
+
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "map",
+            "Custom map",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let map_id = extract_id(&output.stdout);
+    let content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(content.contains("# Custom map"));
+    assert!(content.contains("Custom dest."));
+    assert!(content.contains("Custom notes."));
+    assert!(!content.contains("## Decisions so far"));
+}
+
+#[test]
+fn test_map_status_done_and_rejects_invalid() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Status map"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let map_id = extract_id(&output.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &map_id, "done"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("done"));
+
+    let content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(content.contains("status: done"));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &map_id, "abandoned"])
+        .assert()
+        .success();
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &map_id, "in-progress"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_map_ls_and_show() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Listable map"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let map_id = extract_id(&output.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "maps"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&map_id))
+        .stdout(predicate::str::contains("Listable map"));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &map_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&map_id))
+        .stdout(predicate::str::contains("Listable map"))
+        .stdout(predicate::str::contains("active"))
+        .stdout(predicate::str::contains("Destination"));
+}
+
+#[test]
+fn test_map_check_warns_missing_sections_without_failing() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Incomplete map"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let map_id = extract_id(&output.stdout);
+
+    let path = tmp
+        .path()
+        .join(format!(".markplane/maps/items/{}.md", map_id));
+    let mut content = std::fs::read_to_string(&path).unwrap();
+    // Strip required sections so only Destination remains in body after title
+    let fm_end = content.find("\n---\n").unwrap() + 5;
+    let front = &content[..fm_end];
+    content = format!("{front}\n# Incomplete map\n\n## Destination\n\nOnly this.\n");
+    std::fs::write(&path, &content).unwrap();
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("missing section"))
+        .stdout(predicate::str::contains(&map_id));
+}
+
+#[test]
+fn test_map_wiki_link_resolves() {
+    let tmp = setup_project();
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Linked map"])
+        .output()
+        .unwrap();
+    assert!(map_out.status.success());
+    let map_id = extract_id(&map_out.stdout);
+
+    let task_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Mentions map"])
+        .output()
+        .unwrap();
+    assert!(task_out.status.success());
+    let task_id = extract_id(&task_out.stdout);
+
+    let task_path = tmp
+        .path()
+        .join(format!(".markplane/backlog/items/{}.md", task_id));
+    let mut task_content = std::fs::read_to_string(&task_path).unwrap();
+    task_content.push_str(&format!("\nSee [[{}]] for the route.\n", map_id));
+    std::fs::write(&task_path, task_content).unwrap();
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No broken references"));
+}
+
+#[test]
+fn test_map_sync_generates_index() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Synced map"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let map_id = extract_id(&output.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["sync"])
+        .assert()
+        .success();
+
+    let index = std::fs::read_to_string(tmp.path().join(".markplane/maps/INDEX.md")).unwrap();
+    assert!(index.contains(&map_id));
+    assert!(index.contains("Synced map"));
 }

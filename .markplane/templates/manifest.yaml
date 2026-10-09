@@ -40,3 +40,10 @@ note:
       description: Research note with findings
     analysis:
       description: Analysis note with conclusions
+
+map:
+  default: default
+  templates:
+    default:
+      description: Wayfinder map with Destination and decision sections
+
