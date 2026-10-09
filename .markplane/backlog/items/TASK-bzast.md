@@ -1,7 +1,7 @@
 ---
 id: TASK-bzast
 title: 本仓库运行 my-setup 并合并 AGENTS.md 与 CLAUDE.md
-status: in-progress
+status: done
 priority: medium
 type: chore
 effort: medium
@@ -36,9 +36,9 @@ Markplane 作为 mattpocock skills 的 tracker 后端 [[EPIC-7m4ss]]
 
 ## Acceptance criteria
 
-- [ ] `docs/agents/issue-tracker.md` 存在且可直接使用
-- [ ] `CLAUDE.md` 同时含工作区规则、`## Agent skills` 与 `## Project Management`
-- [ ] `AGENTS.md` 是指向 `CLAUDE.md` 的软链
+- [x] `docs/agents/issue-tracker.md` 存在且可直接使用
+- [x] `CLAUDE.md` 同时含工作区规则、`## Agent skills` 与 `## Project Management`
+- [x] `AGENTS.md` 是指向 `CLAUDE.md` 的软链
 
 ## Blocked by
 
