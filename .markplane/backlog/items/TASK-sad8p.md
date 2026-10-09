@@ -1,9 +1,24 @@
-# 11: 如何持续同步上游 markplane 的更新
+---
+id: TASK-sad8p
+title: 如何持续同步上游 markplane 的更新
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aQ
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: None
-Labels: wayfinder:grilling
+# 如何持续同步上游 markplane 的更新
 
 ## Question
 

@@ -1,9 +1,24 @@
-# 09: 仓库自身的 .markplane 数据如何处理
+---
+id: TASK-wxeah
+title: 仓库自身的 .markplane 数据如何处理
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aO
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: None
-Labels: wayfinder:grilling
+# 仓库自身的 .markplane 数据如何处理
 
 ## Question
 

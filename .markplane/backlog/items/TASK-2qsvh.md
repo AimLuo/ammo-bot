@@ -1,9 +1,26 @@
-# 05: spec 落成 EPIC 和落成 PLAN 时的语义差异
+---
+id: TASK-2qsvh
+title: spec 落成 EPIC 和落成 PLAN 时的语义差异
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on:
+- TASK-3mkf9
+blocks:
+- TASK-9yxpq
+related: []
+assignee: null
+tags: []
+position: aK
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: 01
-Labels: wayfinder:grilling
+# spec 落成 EPIC 和落成 PLAN 时的语义差异
 
 ## Question
 

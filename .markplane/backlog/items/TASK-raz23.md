@@ -1,9 +1,25 @@
-# 02: 把 markplane 拷入仓库根目录并跑通构建和测试
+---
+id: TASK-raz23
+title: 把 markplane 拷入仓库根目录并跑通构建和测试
+status: done
+priority: medium
+type: task
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks:
+- TASK-w5rd5
+related: []
+assignee: null
+tags: []
+position: aH
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: task
-Status: resolved
-Blocked by: None
-Labels: wayfinder:task
+# 把 markplane 拷入仓库根目录并跑通构建和测试
 
 ## Question
 

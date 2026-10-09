@@ -1,9 +1,27 @@
-# 03: MAP 条目的数据模型
+---
+id: TASK-hebkk
+title: MAP 条目的数据模型
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on:
+- TASK-3mkf9
+blocks:
+- TASK-9yxpq
+- TASK-w5rd5
+related: []
+assignee: null
+tags: []
+position: aI
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: 01
-Labels: wayfinder:grilling
+# MAP 条目的数据模型
 
 ## Question
 

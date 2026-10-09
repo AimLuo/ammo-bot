@@ -1,9 +1,26 @@
-# 08: my-* 技能清单和分发安装方式
+---
+id: TASK-j72uw
+title: my-* 技能清单和分发安装方式
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on:
+- TASK-3mkf9
+- TASK-9yxpq
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aN
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: 01, 06
-Labels: wayfinder:grilling
+# my-* 技能清单和分发安装方式
 
 ## Question
 

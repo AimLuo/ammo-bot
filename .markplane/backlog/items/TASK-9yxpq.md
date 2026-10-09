@@ -1,9 +1,28 @@
-# 06: 技能和 markplane 的交互接口
+---
+id: TASK-9yxpq
+title: 技能和 markplane 的交互接口
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on:
+- TASK-hebkk
+- TASK-fv9bd
+- TASK-2qsvh
+blocks:
+- TASK-j72uw
+related: []
+assignee: null
+tags: []
+position: aL
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: 03, 04, 05
-Labels: wayfinder:grilling
+# 技能和 markplane 的交互接口
 
 ## Question
 

@@ -1,9 +1,28 @@
-# 01: 核对各技能对 tracker 的依赖点
+---
+id: TASK-3mkf9
+title: 核对各技能对 tracker 的依赖点
+status: done
+priority: medium
+type: research
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks:
+- TASK-hebkk
+- TASK-fv9bd
+- TASK-2qsvh
+- TASK-j72uw
+related: []
+assignee: null
+tags: []
+position: aG
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: research
-Status: resolved
-Blocked by: None
-Labels: wayfinder:research
+# 核对各技能对 tracker 的依赖点
 
 ## Question
 

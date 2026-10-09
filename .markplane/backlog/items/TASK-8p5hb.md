@@ -1,9 +1,24 @@
-# 13: 新功能的测试策略
+---
+id: TASK-8p5hb
+title: 新功能的测试策略
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aS
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: None
-Labels: wayfinder:grilling
+# 新功能的测试策略
 
 ## Question
 

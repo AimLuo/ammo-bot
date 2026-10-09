@@ -1,9 +1,24 @@
-# 12: README、docs 与 CLAUDE.md 的改写范围
+---
+id: TASK-vk4yg
+title: README、docs 与 CLAUDE.md 的改写范围
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aR
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: None
-Labels: wayfinder:grilling
+# README、docs 与 CLAUDE.md 的改写范围
 
 ## Question
 

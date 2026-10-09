@@ -1,9 +1,24 @@
-# 10: .context 摘要与 MCP resources 如何包含 map
+---
+id: TASK-dugug
+title: .context 摘要与 MCP resources 如何包含 map
+status: done
+priority: medium
+type: grilling
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on: []
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aP
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: grilling
-Status: resolved
-Blocked by: None
-Labels: wayfinder:grilling
+# .context 摘要与 MCP resources 如何包含 map
 
 ## Question
 

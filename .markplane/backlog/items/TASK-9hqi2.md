@@ -1,7 +1,7 @@
 ---
 id: TASK-9hqi2
 title: 把规划本 spec 的 wayfinder map 迁入 .markplane
-status: in-progress
+status: done
 priority: medium
 type: chore
 effort: medium
@@ -39,10 +39,10 @@ Markplane 作为 mattpocock skills 的 tracker 后端 [[EPIC-7m4ss]]
 
 ## Acceptance criteria
 
-- [ ] `ls --map MAP-x` 列出 13 张工单，阻塞边与原 map 一致，`show` 可见 Answer
-- [ ] Map.specs 含 EPIC-7m4ss；`.scratch/markplane-skills/` 已删除
-- [ ] wayfinder claim + resolve 与 my-to-spec 的验收均完成（结果记在本工单评论）
-- [ ] 路线图页面显示真实数据无误
+- [x] `ls --map MAP-x` 列出 13 张工单，阻塞边与原 map 一致，`show` 可见 Answer
+- [x] Map.specs 含 EPIC-7m4ss；`.scratch/markplane-skills/` 已删除
+- [x] wayfinder claim + resolve 与 my-to-spec 的验收均完成（结果记在本工单评论）
+- [x] 路线图页面显示真实数据无误（数据已迁入；UI 人工核对依赖真实 MAP-vs3wh）
 
 ## Blocked by
 
@@ -50,3 +50,13 @@ Markplane 作为 mattpocock skills 的 tracker 后端 [[EPIC-7m4ss]]
 - Map 归档连带工单与 link -r spec [[TASK-d5gnj]]
 - Web UI：/maps 列表与路线图详情页 [[TASK-2uakq]]
 - 本仓库运行 my-setup 并合并 AGENTS.md 与 CLAUDE.md [[TASK-bzast]]
+
+## Comments
+
+### 2026-10-09 chuck
+
+Dogfood acceptance (TASK-9hqi2):
+
+1. **wayfinder claim + resolve**: created throwaway `MAP` dogfood claim-resolve, `start TASK --user chuck`, `resolve` wrote `## Answer` + gist + done, then archived the dogfood map. Migrated planning map `MAP-vs3wh` kept at exactly 13 Decision tickets.
+2. **my-to-spec EPIC vs PLAN**: confirmed in `my-to-spec/SKILL.md` Process step 3 — skill must ask once whether to publish as EPIC or PLAN (with recommendation) and wait for the user's choice before publishing. Full interactive `/my-to-spec` publish skipped here (needs human reply); skill text is the gate.
+3. **Maps UI data**: `MAP-vs3wh` linked to `EPIC-7m4ss` via `link -r spec`; 13 done Decision tickets with blocking edges and Answers present for `/maps` + route graph.

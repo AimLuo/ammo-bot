@@ -1,9 +1,27 @@
-# 07: MAP 页面原型
+---
+id: TASK-w5rd5
+title: MAP 页面原型
+status: done
+priority: medium
+type: prototype
+effort: medium
+epic: null
+plan: null
+map: MAP-vs3wh
+depends_on:
+- TASK-raz23
+- TASK-hebkk
+- TASK-fv9bd
+blocks: []
+related: []
+assignee: null
+tags: []
+position: aM
+created: 2026-10-09
+updated: 2026-10-09
+---
 
-Type: prototype
-Status: resolved
-Blocked by: 02, 03, 04
-Labels: wayfinder:prototype
+# MAP 页面原型
 
 ## Question
 
