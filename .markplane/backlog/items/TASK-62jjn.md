@@ -1,7 +1,7 @@
 ---
 id: TASK-62jjn
 title: Frontier 查询与 cancelled blocker 视为解除
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -13,7 +13,7 @@ blocks:
 - TASK-kjetr
 - TASK-k4tfw
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aC
