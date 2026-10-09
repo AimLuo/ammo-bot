@@ -35,6 +35,10 @@ export function useWebSocket() {
               queryClient.invalidateQueries({ queryKey: [queryPrefix] });
               queryClient.invalidateQueries({ queryKey: ["summary"] });
               queryClient.invalidateQueries({ queryKey: ["graph"] });
+              // Decision tickets live under maps; refresh route graphs on task edits.
+              if (msg.entity === "task") {
+                queryClient.invalidateQueries({ queryKey: ["maps"] });
+              }
               break;
             }
             case "config_changed":

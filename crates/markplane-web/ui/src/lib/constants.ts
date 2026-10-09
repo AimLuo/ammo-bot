@@ -10,7 +10,7 @@ import {
   ThumbsUp,
   Archive,
 } from "lucide-react";
-import type { EpicStatus, Priority, StatusCategory, TaskWorkflow } from "./types";
+import type { EpicStatus, MapStatus, Priority, StatusCategory, TaskWorkflow } from "./types";
 
 /** Fixed config per status category — icon and color for system-level rendering. */
 export const CATEGORY_CONFIG: Record<StatusCategory, { label: string; icon: LucideIcon }> = {
@@ -92,6 +92,12 @@ export const NOTE_STATUS_CONFIG: Record<string, { label: string; icon: LucideIco
   archived: { label: "Archived", icon: Archive },
 };
 
+export const MAP_STATUS_CONFIG: Record<MapStatus, { label: string; color: string }> = {
+  active: { label: "Active", color: "var(--status-now)" },
+  done: { label: "Done", color: "var(--status-done)" },
+  abandoned: { label: "Abandoned", color: "var(--status-cancelled)" },
+};
+
 export const NOTE_TYPE_CONFIG: Record<string, { label: string }> = {
   research: { label: "Research" },
   analysis: { label: "Analysis" },
@@ -105,6 +111,7 @@ export const PREFIX_CONFIG: Record<string, { route: string; apiPath: string; col
   EPIC: { route: "/roadmap", apiPath: "epics", color: "var(--entity-epic)" },
   PLAN: { route: "/plans", apiPath: "plans", color: "var(--entity-plan)" },
   NOTE: { route: "/notes", apiPath: "notes", color: "var(--entity-note)" },
+  MAP: { route: "/maps", apiPath: "maps", color: "var(--entity-map)" },
 };
 
 export const NAV_ITEMS = [
@@ -113,6 +120,7 @@ export const NAV_ITEMS = [
   { href: "/plans", label: "Plans", icon: "FileText" },
   { href: "/notes", label: "Notes", icon: "Lightbulb" },
   { href: "/roadmap", label: "Roadmap", icon: "Map" },
+  { href: "/maps", label: "Maps", icon: "Route" },
   { href: "/graph", label: "Graph", icon: "GitBranch" },
   { href: "/docs", label: "Docs", icon: "BookOpen" },
 ] as const;

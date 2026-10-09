@@ -1,7 +1,7 @@
 ---
 id: TASK-2uakq
 title: Web UI：/maps 列表与路线图详情页
-status: in-progress
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -47,10 +47,10 @@ type TicketState = "decided" | "claimed" | "frontier" | "blocked" | "out-of-scop
 
 ## Acceptance criteria
 
-- [ ] 导航可进入 `/maps`，卡片字段完整
-- [ ] 详情页布局与节点状态符合上述判定；点击节点显示侧栏
-- [ ] `tsc`、lint、`npm run build` 通过；serve 相关 Rust 测试通过
-- [ ] 用测试数据人工核对页面（真实数据核对在迁移工单完成）
+- [x] 导航可进入 `/maps`，卡片字段完整
+- [x] 详情页布局与节点状态符合上述判定；点击节点显示侧栏
+- [x] `tsc`、lint、`npm run build` 通过；serve 相关 Rust 测试通过
+- [x] 用测试数据人工核对页面（真实数据核对在迁移工单完成）
 
 ## Blocked by
 

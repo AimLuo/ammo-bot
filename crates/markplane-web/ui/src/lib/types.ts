@@ -3,10 +3,12 @@ export type StatusCategory = "draft" | "backlog" | "planned" | "active" | "compl
 export type EpicStatus = "now" | "next" | "later" | "done";
 export type PlanStatus = "draft" | "approved" | "in-progress" | "done";
 export type NoteStatus = "draft" | "active" | "archived";
+export type MapStatus = "active" | "done" | "abandoned";
 export type Priority = "critical" | "high" | "medium" | "low" | "someday";
 export type TaskType = string;
 export type Effort = "xs" | "small" | "medium" | "large" | "xl";
 export type NoteType = string;
+export type TicketState = "decided" | "claimed" | "frontier" | "blocked" | "out-of-scope";
 
 export type TaskWorkflow = Record<StatusCategory, string[]>;
 
@@ -101,6 +103,51 @@ export interface Note {
   created: string;
   updated: string;
   body: string;
+}
+
+export interface MapListItem {
+  id: string;
+  title: string;
+  status: MapStatus;
+  specs: string[];
+  related: string[];
+  tags: string[];
+  created: string;
+  updated: string;
+  decided_count: number;
+  total_count: number;
+  frontier_count: number;
+}
+
+export interface MapTicket {
+  id: string;
+  title: string;
+  type: string;
+  status: string;
+  assignee: string | null;
+  depends_on: string[];
+  position: string | null;
+  question: string;
+  answer: string | null;
+}
+
+export interface MapDetail {
+  id: string;
+  title: string;
+  status: MapStatus;
+  specs: string[];
+  related: string[];
+  tags: string[];
+  created: string;
+  updated: string;
+  body: string;
+  destination: string;
+  not_yet_specified: string[];
+  out_of_scope: string[];
+  decided_count: number;
+  total_count: number;
+  frontier_count: number;
+  tickets: MapTicket[];
 }
 
 export interface ProjectSummary {
@@ -204,7 +251,7 @@ export interface ApiListResponse<T> {
 
 export interface GraphNode {
   id: string;
-  type: "task" | "epic" | "plan" | "note";
+  type: "task" | "epic" | "plan" | "note" | "map";
   title: string;
   status: string;
   priority?: string;
@@ -224,7 +271,7 @@ export interface GraphData {
 
 export interface SearchResult {
   id: string;
-  entity_type: "task" | "epic" | "plan" | "note";
+  entity_type: "task" | "epic" | "plan" | "note" | "map";
   title: string;
   status: string;
   priority?: string;
@@ -245,7 +292,7 @@ export interface DocContent {
 }
 
 export type WsEvent =
-  | { type: "file_changed"; entity: "task" | "epic" | "plan" | "note"; id: string; action: "created" | "modified" | "deleted" }
+  | { type: "file_changed"; entity: "task" | "epic" | "plan" | "note" | "map"; id: string; action: "created" | "modified" | "deleted" }
   | { type: "config_changed" }
   | { type: "sync_complete" }
   | { type: "doc_changed"; slug: string }
