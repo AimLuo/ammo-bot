@@ -1,7 +1,7 @@
 ---
 id: TASK-c7x96
 title: Map 条目类型
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium
