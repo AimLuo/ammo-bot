@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useTask, useTasks } from "@/lib/hooks/use-tasks";
 import { useEpics } from "@/lib/hooks/use-epics";
 import { usePlans } from "@/lib/hooks/use-plans";
@@ -38,7 +39,7 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { STATUS_CONFIG, buildStatusConfig, allStatuses, categoryOf } from "@/lib/constants";
 import { useConfig } from "@/lib/hooks/use-config";
-import { Circle, Pencil, Archive, ArchiveRestore } from "lucide-react";
+import { Circle, Pencil, Archive, ArchiveRestore, ArrowUpRight } from "lucide-react";
 import type { Priority, Effort } from "@/lib/types";
 const ALL_PRIORITIES: Priority[] = [
   "critical",
@@ -293,6 +294,23 @@ export function TaskDetailSheet({
                     createNewLabel="Create new plan"
                   />
                 </FieldRow>
+
+                {task.map && (
+                  <FieldRow label="Map">
+                    <Link
+                      href={`/maps?map=${task.map}&node=${task.id}`}
+                      className="inline-flex items-center gap-1 font-mono text-xs px-1.5 py-0.5 rounded no-underline hover:opacity-80 transition-opacity"
+                      style={{
+                        backgroundColor:
+                          "color-mix(in oklch, var(--entity-map) 15%, transparent)",
+                        color: "var(--entity-map)",
+                      }}
+                    >
+                      {task.map}
+                      <ArrowUpRight className="size-3 opacity-70" />
+                    </Link>
+                  </FieldRow>
+                )}
 
                 <FieldRow label="Depends on" editable>
                   <EntityRefEditor

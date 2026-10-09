@@ -44,6 +44,8 @@ import { CreateDialog } from "@/components/domain/create-dialog";
 import { useConfig } from "@/lib/hooks/use-config";
 import { buildStatusConfig, categoryOf } from "@/lib/constants";
 import { generateKeyBetween } from "fractional-indexing";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import type { Task, TaskStatus, Priority, Effort, StatusCategory } from "@/lib/types";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -112,6 +114,7 @@ export function BacklogContent() {
   const [filterEpic, setFilterEpic] = useState<string>("all");
   const [filterAssignee, setFilterAssignee] = useState<string>("all");
   const [filterTag, setFilterTag] = useState<string>("all");
+  const [showDecisionTickets, setShowDecisionTickets] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("manual");
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
@@ -165,6 +168,8 @@ export function BacklogContent() {
     const viewStatuses = view === "board" ? boardStatuses : backlogStatuses;
     return tasks.filter((t) => {
       if (!viewStatuses.has(t.status)) return false;
+      // Decision tickets (map-linked) stay off the board/list unless toggled on.
+      if (!showDecisionTickets && t.map) return false;
       if (view === "backlog" && filterStatus !== "all" && t.status !== filterStatus)
         return false;
       if (filterPriority !== "all" && t.priority !== filterPriority)
@@ -175,7 +180,7 @@ export function BacklogContent() {
       if (filterTag !== "all" && !t.tags.includes(filterTag)) return false;
       return true;
     });
-  }, [tasks, view, filterPriority, filterStatus, filterEpic, filterAssignee, filterTag, boardStatuses, backlogStatuses]);
+  }, [tasks, view, filterPriority, filterStatus, filterEpic, filterAssignee, filterTag, showDecisionTickets, boardStatuses, backlogStatuses]);
 
   const openTask = useCallback(
     (id: string) => {
@@ -270,6 +275,21 @@ export function BacklogContent() {
         </div>
 
         <div className="flex-1" />
+
+        <div className="flex items-center gap-2">
+          <Switch
+            id="show-decision-tickets"
+            size="sm"
+            checked={showDecisionTickets}
+            onCheckedChange={setShowDecisionTickets}
+          />
+          <Label
+            htmlFor="show-decision-tickets"
+            className="text-xs text-muted-foreground cursor-pointer font-normal"
+          >
+            Decision tickets
+          </Label>
+        </div>
 
         <Button
           variant="outline"

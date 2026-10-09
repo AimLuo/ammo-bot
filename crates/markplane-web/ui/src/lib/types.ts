@@ -53,6 +53,8 @@ export interface Task {
   effort: Effort;
   epic: string | null;
   plan: string | null;
+  /** Parent Map ID when this Task is a Decision ticket. Omitted when unset. */
+  map?: string | null;
   depends_on: string[];
   blocks: string[];
   related: string[];

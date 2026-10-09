@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { useMap } from "@/lib/hooks/use-maps";
 import { useConfig } from "@/lib/hooks/use-config";
@@ -70,10 +71,19 @@ function MapStatusPill({ status }: { status: MapStatus }) {
 }
 
 export function MapDetailContent({ mapId }: { mapId: string }) {
+  const searchParams = useSearchParams();
+  // Deep-link from Task detail: /maps?map=…&node=TASK-…
+  const highlightNode = searchParams.get("node");
   const { data: map, isLoading, error, refetch } = useMap(mapId);
   const { data: config } = useConfig();
   const workflow = config?.workflows.task ?? DEFAULT_WORKFLOW;
-  const [focus, setFocus] = useState<string | null>(null);
+  const [focusOverride, setFocusOverride] = useState<string | null>(null);
+  const [syncedNode, setSyncedNode] = useState(highlightNode);
+  if (highlightNode !== syncedNode) {
+    setSyncedNode(highlightNode);
+    setFocusOverride(null);
+  }
+  const focus = focusOverride ?? highlightNode;
 
   const rows = useMemo(() => {
     if (!map) return [];
@@ -208,7 +218,7 @@ export function MapDetailContent({ mapId }: { mapId: string }) {
                         focused={focus === ticket.id}
                         x={p.x}
                         y={p.y}
-                        onFocus={() => setFocus(ticket.id)}
+                        onFocus={() => setFocusOverride(ticket.id)}
                       />
                     );
                   })}
