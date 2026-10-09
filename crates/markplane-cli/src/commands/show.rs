@@ -46,6 +46,9 @@ fn show_task(project: &Project, id: &str) -> anyhow::Result<()> {
     if let Some(ref plan) = fm.plan {
         println!("  Plan:     {}", plan);
     }
+    if let Some(ref map) = fm.map {
+        println!("  Map:      {}", map);
+    }
     if let Some(ref assignee) = fm.assignee {
         println!("  Assignee: {}", assignee);
     }

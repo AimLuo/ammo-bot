@@ -24,6 +24,7 @@ pub struct QueryFilter {
     pub priority: Option<Vec<String>>,
     pub epic: Option<String>,
     pub plan: Option<String>,
+    pub map: Option<String>,
     pub tags: Option<Vec<String>>,
     pub assignee: Option<String>,
     pub item_type: Option<Vec<String>>,
@@ -63,6 +64,13 @@ impl Project {
             if let Some(ref plan) = filter.plan {
                 match &fm.plan {
                     Some(p) if p == plan => {}
+                    _ => return false,
+                }
+            }
+
+            if let Some(ref map) = filter.map {
+                match &fm.map {
+                    Some(m) if m == map => {}
                     _ => return false,
                 }
             }
@@ -110,11 +118,12 @@ impl Project {
     }
 
     /// List frontier tasks: open, unassigned, all `depends_on` closed (completed or
-    /// cancelled), sorted by `position`. Optional `epic` / `plan` scopes the parent.
+    /// cancelled), sorted by `position`. Optional `epic` / `plan` / `map` scopes the parent.
     pub fn list_frontier_tasks(
         &self,
         epic: Option<&str>,
         plan: Option<&str>,
+        map: Option<&str>,
     ) -> Result<Vec<MarkplaneDocument<Task>>> {
         let config = self.load_config()?;
         let all = self.list_tasks(&QueryFilter::default())?;
@@ -129,6 +138,11 @@ impl Project {
                 }
                 if let Some(p) = plan
                     && t.frontmatter.plan.as_deref() != Some(p)
+                {
+                    return false;
+                }
+                if let Some(m) = map
+                    && t.frontmatter.map.as_deref() != Some(m)
                 {
                     return false;
                 }
@@ -323,6 +337,7 @@ mod tests {
                 Priority::Low,
                 Effort::Xs,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -335,6 +350,7 @@ mod tests {
                 Priority::High,
                 Effort::Medium,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -346,6 +362,7 @@ mod tests {
                 "bug",
                 Priority::Critical,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -373,6 +390,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -385,6 +403,7 @@ mod tests {
                 Priority::High,
                 Effort::Medium,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -395,6 +414,7 @@ mod tests {
         project.update_status(&task1.id, "in-progress").unwrap();
 
         let filter = QueryFilter {
+            map: None,
             status: Some(vec!["draft".to_string()]),
             ..Default::default()
         };
@@ -414,6 +434,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -426,6 +447,7 @@ mod tests {
                 Priority::Low,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -433,6 +455,7 @@ mod tests {
             .unwrap();
 
         let filter = QueryFilter {
+            map: None,
             priority: Some(vec!["high".to_string()]),
             ..Default::default()
         };
@@ -452,6 +475,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec!["ui".to_string(), "frontend".to_string()],
                 None,
                 None,
@@ -464,6 +488,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec!["api".to_string()],
                 None,
                 None,
@@ -471,6 +496,7 @@ mod tests {
             .unwrap();
 
         let filter = QueryFilter {
+            map: None,
             tags: Some(vec!["ui".to_string()]),
             ..Default::default()
         };
@@ -539,6 +565,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -550,6 +577,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -577,6 +605,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -589,6 +618,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -598,6 +628,7 @@ mod tests {
         project.archive_item(&task2.id).unwrap();
 
         let filter = QueryFilter {
+            map: None,
             scope: ScanScope::Archived,
             ..Default::default()
         };
@@ -617,6 +648,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -629,6 +661,7 @@ mod tests {
                 Priority::Low,
                 Effort::Medium,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -640,6 +673,7 @@ mod tests {
                 "chore",
                 Priority::Medium,
                 Effort::Xs,
+                None,
                 None,
                 vec![],
                 None,
@@ -657,6 +691,7 @@ mod tests {
         // Archived: task2 and task3
         let archived = project
             .list_tasks(&QueryFilter {
+                map: None,
                 scope: ScanScope::Archived,
                 ..Default::default()
             })

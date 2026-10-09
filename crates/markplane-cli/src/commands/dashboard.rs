@@ -92,6 +92,7 @@ pub fn run() -> anyhow::Result<()> {
         .collect();
     if !now_epics.is_empty() {
         let all_tasks = project.list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })?;

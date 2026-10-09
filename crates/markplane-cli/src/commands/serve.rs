@@ -1008,6 +1008,7 @@ async fn get_summary(
     // All tasks (active + archived) for accurate epic progress
     let all_tasks = project
         .list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })
@@ -1379,6 +1380,7 @@ async fn get_tasks(
         priority: params.priority.map(|s| super::parse_comma_list(&s)),
         epic: params.epic,
         plan: None,
+        map: None,
         tags: params.tags.map(|s| super::parse_comma_list(&s)),
         assignee: params.assignee,
         item_type: params.item_type.map(|s| super::parse_comma_list(&s)),
@@ -1446,6 +1448,7 @@ async fn create_task(
             priority,
             effort,
             body.epic,
+            None,
             body.tags,
             None,
             None,
@@ -1850,6 +1853,7 @@ async fn get_epics(
     let tasks = state
         .project
         .list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })
@@ -1885,6 +1889,7 @@ async fn get_epic(
     let tasks = state
         .project
         .list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })
@@ -2074,6 +2079,7 @@ async fn update_epic(
     let tasks = state
         .project
         .list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })
@@ -2334,6 +2340,7 @@ async fn get_search(
         let archived = state
             .project
             .list_tasks(&QueryFilter {
+                map: None,
                 scope: ScanScope::Archived,
                 ..Default::default()
             })

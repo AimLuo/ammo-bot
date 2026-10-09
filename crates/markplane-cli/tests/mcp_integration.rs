@@ -510,6 +510,7 @@ fn test_tool_query_filter_by_plan() {
             markplane_core::Priority::Medium,
             markplane_core::Effort::Small,
             None,
+            None,
             vec![],
             None,
             None,
@@ -530,6 +531,7 @@ fn test_tool_query_filter_by_plan() {
             "feature",
             markplane_core::Priority::Medium,
             markplane_core::Effort::Small,
+            None,
             None,
             vec![],
             None,
@@ -2007,6 +2009,7 @@ fn test_resource_task_item() {
             markplane_core::Priority::Medium,
             markplane_core::Effort::Small,
             None,
+            None,
             vec![],
             None,
             None,
@@ -2136,6 +2139,7 @@ fn test_resource_plan_wrong_prefix() {
             markplane_core::Priority::Medium,
             markplane_core::Effort::Small,
             None,
+            None,
             vec![],
             None,
             None,
@@ -2197,6 +2201,7 @@ fn test_resource_note_wrong_prefix() {
             "feature",
             markplane_core::Priority::Medium,
             markplane_core::Effort::Small,
+            None,
             None,
             vec![],
             None,
@@ -2618,6 +2623,7 @@ fn create_positioned_task(
             priority,
             markplane_core::Effort::Medium,
             None,
+            None,
             vec![],
             None,
             None,
@@ -2997,6 +3003,7 @@ fn test_tool_plan_with_template() {
             markplane_core::Priority::Medium,
             markplane_core::Effort::Medium,
             None,
+            None,
             vec![],
             None,
             None,
@@ -3223,4 +3230,171 @@ fn test_tool_query_frontier_and_richer_fields() {
     assert_eq!(claimed["assignee"], "alice");
     assert!(claimed.get("depends_on").is_some());
     assert!(claimed.get("tags").is_some());
+}
+
+// ── Tool: markplane_add / query with map (Decision tickets) ──────────────
+
+#[test]
+fn test_tool_add_and_query_map_decision_tickets() {
+    let tmp = setup_project();
+
+    let map_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "kind": "map", "title": "MCP decision map" }
+            }
+        }),
+    );
+    assert!(map_resp["error"].is_null());
+    let map_id = extract_id_from_response(&map_resp);
+
+    let ok = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Grill via MCP",
+                    "map": map_id,
+                    "type": "grilling"
+                }
+            }
+        }),
+    );
+    assert!(ok["error"].is_null(), "{ok}");
+    assert!(!ok["result"]["isError"].as_bool().unwrap_or(false), "{ok}");
+    let task_id = extract_id_from_response(&ok);
+
+    // feature type rejected for decision tickets
+    let bad = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Bad type",
+                    "map": map_id,
+                    "type": "feature"
+                }
+            }
+        }),
+    );
+    assert_tool_error(&bad, "feature type should be rejected for map");
+
+    // map + epic rejected
+    let epic_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "kind": "epic", "title": "MCP epic" }
+            }
+        }),
+    );
+    let epic_id = extract_id_from_response(&epic_resp);
+    let mutex = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Both parents",
+                    "map": map_id,
+                    "epic": epic_id,
+                    "type": "task"
+                }
+            }
+        }),
+    );
+    assert_tool_error(&mutex, "map+epic should be rejected");
+
+    let blocked = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Blocked decision",
+                    "map": map_id,
+                    "type": "research"
+                }
+            }
+        }),
+    );
+    let blocked_id = extract_id_from_response(&blocked);
+
+    send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_link",
+                "arguments": {
+                    "from": task_id,
+                    "to": blocked_id,
+                    "relation": "blocks"
+                }
+            }
+        }),
+    );
+
+    let query = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_query",
+                "arguments": { "map": map_id }
+            }
+        }),
+    );
+    assert!(query["error"].is_null());
+    let text = query["result"]["content"][0]["text"].as_str().unwrap();
+    let items: Vec<Value> = serde_json::from_str(text).unwrap();
+    let ids: Vec<&str> = items.iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&task_id.as_str()));
+    assert!(ids.contains(&blocked_id.as_str()));
+
+    let frontier = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_query",
+                "arguments": { "map": map_id, "frontier": true }
+            }
+        }),
+    );
+    assert!(frontier["error"].is_null());
+    let ftext = frontier["result"]["content"][0]["text"].as_str().unwrap();
+    let fitems: Vec<Value> = serde_json::from_str(ftext).unwrap();
+    let fids: Vec<&str> = fitems.iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert!(fids.contains(&task_id.as_str()));
+    assert!(!fids.contains(&blocked_id.as_str()));
 }

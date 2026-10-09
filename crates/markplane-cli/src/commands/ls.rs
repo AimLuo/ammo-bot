@@ -73,6 +73,7 @@ pub fn run(
     priority: Option<String>,
     epic: Option<String>,
     plan: Option<String>,
+    map: Option<String>,
     tags: Option<String>,
     assignee: Option<String>,
     item_type: Option<String>,
@@ -87,7 +88,8 @@ pub fn run(
         Some(LsKind::Notes) => list_notes(&project, archived),
         Some(LsKind::Maps) => list_maps(&project, archived),
         None => list_tasks(
-            &project, status, priority, epic, plan, tags, assignee, item_type, archived, frontier,
+            &project, status, priority, epic, plan, map, tags, assignee, item_type, archived,
+            frontier,
         ),
     }
 }
@@ -99,6 +101,7 @@ fn list_tasks(
     priority: Option<String>,
     epic: Option<String>,
     plan: Option<String>,
+    map: Option<String>,
     tags: Option<String>,
     assignee: Option<String>,
     item_type: Option<String>,
@@ -111,13 +114,14 @@ fn list_tasks(
         if archived {
             anyhow::bail!("--frontier cannot be combined with --archived");
         }
-        project.list_frontier_tasks(epic.as_deref(), plan.as_deref())?
+        project.list_frontier_tasks(epic.as_deref(), plan.as_deref(), map.as_deref())?
     } else {
         let filter = QueryFilter {
             status: status.map(|s| parse_comma_list(&s)),
             priority: priority.map(|s| parse_comma_list(&s)),
             epic,
             plan,
+            map,
             tags: tags.map(|s| parse_comma_list(&s)),
             assignee,
             item_type: item_type.map(|s| parse_comma_list(&s)),

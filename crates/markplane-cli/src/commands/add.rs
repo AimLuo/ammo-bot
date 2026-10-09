@@ -10,13 +10,19 @@ pub fn run(
     effort: String,
     epic: Option<String>,
     plan: Option<String>,
+    map: Option<String>,
     tags: Option<String>,
     template: Option<String>,
     body_file: Option<String>,
 ) -> anyhow::Result<()> {
     let project = Project::from_current_dir()?;
     let config = project.load_config()?;
-    let item_type = item_type.as_deref().unwrap_or(config.default_task_type());
+    // Decision tickets default to wayfinder type "task" when --type is omitted.
+    let item_type = item_type.as_deref().unwrap_or(if map.is_some() {
+        "task"
+    } else {
+        config.default_task_type()
+    });
 
     let priority: Priority = priority.parse()?;
     let effort: Effort = effort.parse()?;
@@ -26,12 +32,18 @@ pub fn run(
         None => None,
     };
 
+    // Core rejects map+epic; reject map+plan before create so we fail cleanly.
+    if map.is_some() && plan.is_some() {
+        anyhow::bail!("A Decision ticket (map) cannot also have an epic or plan");
+    }
+
     let item = project.create_task(
         &title,
         item_type,
         priority,
         effort,
         epic,
+        map,
         tags,
         template.as_deref(),
         body.as_deref(),

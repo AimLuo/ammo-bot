@@ -430,6 +430,34 @@ impl Project {
         }
     }
 
+    /// Validate a Decision ticket type (built-in wayfinder types; skips config.task_types).
+    pub fn validate_decision_ticket_type(&self, item_type: &str) -> Result<()> {
+        if DECISION_TICKET_TYPES.contains(&item_type) {
+            Ok(())
+        } else {
+            Err(MarkplaneError::Config(format!(
+                "Unknown decision ticket type: '{}'. Valid types: {}",
+                item_type,
+                DECISION_TICKET_TYPES.join(", ")
+            )))
+        }
+    }
+
+    /// Reject Task.map together with epic or plan.
+    pub fn validate_map_parent_mutex(
+        &self,
+        epic: Option<&str>,
+        plan: Option<&str>,
+        map: Option<&str>,
+    ) -> Result<()> {
+        if map.is_some() && (epic.is_some() || plan.is_some()) {
+            return Err(MarkplaneError::Config(
+                "A Decision ticket (map) cannot also have an epic or plan".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate that a note type is in the configured list.
     pub fn validate_note_type(&self, note_type: &str) -> Result<()> {
         let config = self.load_config()?;
@@ -477,6 +505,11 @@ impl Project {
     }
 
     /// Create a new task.
+    ///
+    /// When `map` is set the Task is a Decision ticket: `item_type` must be one of
+    /// the built-in wayfinder types (skips `config.task_types`), priority defaults
+    /// to [`DECISION_TICKET_DEFAULT_PRIORITY`], and map is mutually exclusive with
+    /// epic/plan.
     #[allow(clippy::too_many_arguments)]
     pub fn create_task(
         &self,
@@ -485,15 +518,36 @@ impl Project {
         priority: Priority,
         effort: Effort,
         epic: Option<String>,
+        map: Option<String>,
         tags: Vec<String>,
         template: Option<&str>,
         body: Option<&str>,
     ) -> Result<Task> {
         validate_title_length(title)?;
-        self.validate_task_type(item_type)?;
+        self.validate_map_parent_mutex(epic.as_deref(), None, map.as_deref())?;
+        if map.is_some() {
+            self.validate_decision_ticket_type(item_type)?;
+            if let Some(ref map_id) = map {
+                let (prefix, _) = parse_id(map_id)?;
+                if prefix != IdPrefix::Map {
+                    return Err(MarkplaneError::Config(format!(
+                        "map parent must be a MAP id, got {}",
+                        map_id
+                    )));
+                }
+                self.item_path(map_id)?;
+            }
+        } else {
+            self.validate_task_type(item_type)?;
+        }
         let config = self.load_config()?;
         let id = self.next_id(&IdPrefix::Task)?;
         let today = Local::now().date_naive();
+        let priority = if map.is_some() {
+            DECISION_TICKET_DEFAULT_PRIORITY
+        } else {
+            priority
+        };
         let position = self.append_position(&priority)?;
 
         let task = Task {
@@ -506,6 +560,7 @@ impl Project {
             tags,
             epic,
             plan: None,
+            map,
             depends_on: vec![],
             blocks: vec![],
             related: vec![],
@@ -877,7 +932,11 @@ impl Project {
             fm.effort = effort.parse()?;
         }
         if let Some(ref item_type) = u.item_type {
-            self.validate_task_type(item_type)?;
+            if fm.map.is_some() {
+                self.validate_decision_ticket_type(item_type)?;
+            } else {
+                self.validate_task_type(item_type)?;
+            }
             fm.item_type = item_type.clone();
         }
         match &u.assignee {
@@ -1248,6 +1307,7 @@ impl Project {
 
         // Get all tasks in the same priority group, sorted by position
         let filter = crate::query::QueryFilter {
+            map: None,
             priority: Some(vec![priority.to_string()]),
             ..Default::default()
         };
@@ -1416,6 +1476,9 @@ impl Project {
             }
             if fm.plan.as_deref() == Some(target_id) {
                 refs.push((fm.id.clone(), LinkRelation::Plan, LinkAction::Remove));
+            }
+            if fm.map.as_deref() == Some(target_id) {
+                refs.push((fm.id.clone(), LinkRelation::Map, LinkAction::Remove));
             }
             if fm.related.iter().any(|r| r == target_id) {
                 refs.push((fm.id.clone(), LinkRelation::Related, LinkAction::Remove));
@@ -1696,6 +1759,7 @@ impl Project {
             Priority::Medium,
             Effort::Small,
             Some(epic_id.clone()),
+            None,
             vec!["onboarding".to_string()],
             None,
             None,
@@ -1709,6 +1773,7 @@ impl Project {
             Priority::Medium,
             Effort::Medium,
             Some(epic_id.clone()),
+            None,
             vec!["onboarding".to_string()],
             None,
             None,
@@ -1995,6 +2060,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec!["auth".to_string()],
                 None,
                 None,
@@ -2038,6 +2104,7 @@ mod tests {
                 "feature",
                 Priority::High,
                 Effort::Medium,
+                None,
                 None,
                 vec![],
                 None,
@@ -2088,6 +2155,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2110,6 +2178,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2129,6 +2198,7 @@ mod tests {
                 "chore",
                 Priority::Low,
                 Effort::Xs,
+                None,
                 None,
                 vec![],
                 None,
@@ -2180,6 +2250,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2224,6 +2295,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec!["auth".to_string(), "urgent".to_string()],
                 None,
                 None,
@@ -2364,6 +2436,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2375,6 +2448,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2400,6 +2474,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2411,6 +2486,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2442,6 +2518,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2453,6 +2530,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2486,6 +2564,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2497,6 +2576,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2533,6 +2613,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2544,6 +2625,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2579,6 +2661,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2591,6 +2674,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2602,6 +2686,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2644,6 +2729,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2655,6 +2741,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2688,6 +2775,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2700,6 +2788,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2711,6 +2800,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -2769,6 +2859,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -2811,6 +2902,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3000,6 +3092,7 @@ mod tests {
                 Priority::Low,
                 Effort::Xs,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -3027,6 +3120,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -3048,6 +3142,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3110,6 +3205,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -3139,6 +3235,7 @@ mod tests {
                 "feature",
                 Priority::Low,
                 Effort::Small,
+                None,
                 None,
                 vec!["old".to_string()],
                 None,
@@ -3178,6 +3275,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3221,6 +3319,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3317,6 +3416,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3431,6 +3531,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -3508,6 +3609,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3612,6 +3714,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 Some("bug"),
                 None,
@@ -3684,6 +3787,7 @@ mod tests {
                 "feature",
                 priority,
                 Effort::Medium,
+                None,
                 None,
                 vec![],
                 None,
@@ -3801,6 +3905,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -3813,6 +3918,7 @@ mod tests {
                 "feature",
                 Priority::High,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -3980,6 +4086,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -4010,6 +4117,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -4035,6 +4143,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,

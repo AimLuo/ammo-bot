@@ -94,6 +94,10 @@ pub fn list_tools(project: &Project) -> Value {
                             "type": "string",
                             "description": "Filter by plan ID (e.g. PLAN-001). Tasks only."
                         },
+                        "map": {
+                            "type": "string",
+                            "description": "Filter by map ID (e.g. MAP-abc12). Tasks only."
+                        },
                         "tags": {
                             "type": "array",
                             "items": { "type": "string" },
@@ -158,6 +162,10 @@ pub fn list_tools(project: &Project) -> Value {
                         "epic": {
                             "type": "string",
                             "description": "Parent epic ID (e.g. EPIC-001). Tasks only."
+                        },
+                        "map": {
+                            "type": "string",
+                            "description": "Parent Map ID (e.g. MAP-abc12). Creates a Decision ticket. Tasks only. Mutually exclusive with epic/plan. Type must be research|prototype|grilling|task."
                         },
                         "note_type": {
                             "type": "string",
@@ -358,7 +366,7 @@ pub fn list_tools(project: &Project) -> Value {
             },
             {
                 "name": "markplane_link",
-                "description": "Link two items with a typed relationship (blocks, depends_on, epic, plan, implements, related).",
+                "description": "Link two items with a typed relationship (blocks, depends_on, epic, plan, implements, map, related).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -372,8 +380,8 @@ pub fn list_tools(project: &Project) -> Value {
                         },
                         "relation": {
                             "type": "string",
-                            "enum": ["blocks", "depends_on", "epic", "plan", "implements", "related"],
-                            "description": "Relationship type: blocks, depends_on, epic, plan, implements, or related"
+                            "enum": ["blocks", "depends_on", "epic", "plan", "implements", "map", "related"],
+                            "description": "Relationship type: blocks, depends_on, epic, plan, implements, map, or related"
                         },
                         "remove": {
                             "type": "boolean",
@@ -556,6 +564,10 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
                 .get("plan")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let map = args
+                .get("map")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let frontier = args
                 .get("frontier")
                 .and_then(|v| v.as_bool())
@@ -566,7 +578,7 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
                     return Err("--frontier cannot be combined with archived".into());
                 }
                 project
-                    .list_frontier_tasks(epic.as_deref(), plan.as_deref())
+                    .list_frontier_tasks(epic.as_deref(), plan.as_deref(), map.as_deref())
                     .map_err(|e| e.to_string())?
             } else {
                 let filter = QueryFilter {
@@ -578,6 +590,7 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
                         .and_then(|v| serde_json::from_value(v.clone()).ok()),
                     epic,
                     plan,
+                    map,
                     tags: args
                         .get("tags")
                         .and_then(|v| serde_json::from_value(v.clone()).ok()),
@@ -719,10 +732,18 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
     match kind {
         "task" => {
             let config = project.load_config().map_err(|e| e.to_string())?;
+            let map = args
+                .get("map")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let item_type = args
                 .get("type")
                 .and_then(|v| v.as_str())
-                .unwrap_or(config.default_task_type());
+                .unwrap_or(if map.is_some() {
+                    "task"
+                } else {
+                    config.default_task_type()
+                });
 
             let priority: Priority = args
                 .get("priority")
@@ -750,7 +771,7 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
 
             let item = project
                 .create_task(
-                    title, item_type, priority, effort, epic, tags, template, body,
+                    title, item_type, priority, effort, epic, map, tags, template, body,
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -1106,6 +1127,7 @@ fn handle_promote(project: &Project, args: &Value) -> Result<String, String> {
             config.default_task_type(),
             priority,
             effort,
+            None,
             None,
             note_doc.frontmatter.tags.clone(),
             None,

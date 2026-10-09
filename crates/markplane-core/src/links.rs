@@ -24,6 +24,8 @@ pub enum LinkRelation {
     Plan,
     /// Plan implements Task (reciprocal: task.plan)
     Implements,
+    /// Task belongs to Map as a Decision ticket (no reciprocal; Task-side only)
+    Map,
     /// Any item can be related to any other item (bidirectional)
     Related,
 }
@@ -38,9 +40,10 @@ impl FromStr for LinkRelation {
             "epic" => Ok(LinkRelation::Epic),
             "plan" => Ok(LinkRelation::Plan),
             "implements" => Ok(LinkRelation::Implements),
+            "map" => Ok(LinkRelation::Map),
             "related" => Ok(LinkRelation::Related),
             _ => Err(MarkplaneError::InvalidLink(format!(
-                "Unknown link relation: {}. Use blocks, depends_on, epic, plan, implements, or related.",
+                "Unknown link relation: {}. Use blocks, depends_on, epic, plan, implements, map, or related.",
                 s
             ))),
         }
@@ -55,6 +58,7 @@ impl fmt::Display for LinkRelation {
             LinkRelation::Epic => write!(f, "epic"),
             LinkRelation::Plan => write!(f, "plan"),
             LinkRelation::Implements => write!(f, "implements"),
+            LinkRelation::Map => write!(f, "map"),
             LinkRelation::Related => write!(f, "related"),
         }
     }
@@ -355,6 +359,11 @@ impl Project {
                 let mut doc: MarkplaneDocument<Task> = self.read_item(from)?;
                 match action {
                     LinkAction::Add => {
+                        self.validate_map_parent_mutex(
+                            Some(to),
+                            doc.frontmatter.plan.as_deref(),
+                            doc.frontmatter.map.as_deref(),
+                        )?;
                         doc.frontmatter.epic = Some(to.to_string());
                     }
                     LinkAction::Remove => {
@@ -376,6 +385,11 @@ impl Project {
 
                 match action {
                     LinkAction::Add => {
+                        self.validate_map_parent_mutex(
+                            task_doc.frontmatter.epic.as_deref(),
+                            Some(to),
+                            task_doc.frontmatter.map.as_deref(),
+                        )?;
                         // If task already has a different plan, clean up old plan
                         if let Some(ref old_plan_id) = task_doc.frontmatter.plan
                             && old_plan_id != to
@@ -412,6 +426,11 @@ impl Project {
 
                 match action {
                     LinkAction::Add => {
+                        self.validate_map_parent_mutex(
+                            task_doc.frontmatter.epic.as_deref(),
+                            Some(from),
+                            task_doc.frontmatter.map.as_deref(),
+                        )?;
                         // If task already has a different plan, clean up old plan
                         if let Some(ref old_plan_id) = task_doc.frontmatter.plan
                             && old_plan_id != from
@@ -437,6 +456,32 @@ impl Project {
                 task_doc.frontmatter.updated = today;
                 self.write_item(from, &plan_doc)?;
                 self.write_item(to, &task_doc)?;
+            }
+
+            LinkRelation::Map => {
+                require_prefix(from, &from_prefix, &[IdPrefix::Task])?;
+                require_prefix(to, &to_prefix, &[IdPrefix::Map])?;
+
+                let mut doc: MarkplaneDocument<Task> = self.read_item(from)?;
+                match action {
+                    LinkAction::Add => {
+                        self.validate_map_parent_mutex(
+                            doc.frontmatter.epic.as_deref(),
+                            doc.frontmatter.plan.as_deref(),
+                            Some(to),
+                        )?;
+                        // Becoming / staying a Decision ticket: type must be wayfinder-built-in.
+                        self.validate_decision_ticket_type(&doc.frontmatter.item_type)?;
+                        doc.frontmatter.map = Some(to.to_string());
+                    }
+                    LinkAction::Remove => {
+                        if doc.frontmatter.map.as_deref() == Some(to) {
+                            doc.frontmatter.map = None;
+                        }
+                    }
+                }
+                doc.frontmatter.updated = today;
+                self.write_item(from, &doc)?;
             }
 
             LinkRelation::Related => {
@@ -469,6 +514,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Medium,
+                None,
                 None,
                 vec![],
                 None,

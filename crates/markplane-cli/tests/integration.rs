@@ -3259,3 +3259,357 @@ fn test_map_sync_generates_index() {
     assert!(index.contains(&map_id));
     assert!(index.contains("Synced map"));
 }
+
+// ── Decision tickets (Task.map) ──────────────────────────────────────────
+
+#[test]
+fn test_add_map_accepts_wayfinder_types_rejects_feature() {
+    let tmp = setup_project();
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Decision map"])
+        .output()
+        .unwrap();
+    assert!(map_out.status.success());
+    let map_id = extract_id(&map_out.stdout);
+
+    let ok = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Grill this",
+            "--map",
+            &map_id,
+            "--type",
+            "grilling",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        ok.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let task_id = extract_id(&ok.stdout);
+    let content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    assert!(content.contains(&format!("map: {}", map_id)));
+    assert!(content.contains("type: grilling"));
+    assert!(content.contains("priority: medium"));
+    assert!(content.contains("epic: null"));
+    assert!(content.contains("plan: null"));
+
+    let bad = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Not a decision", "--map", &map_id, "--type", "feature"])
+        .output()
+        .unwrap();
+    assert!(
+        !bad.status.success(),
+        "feature type should be rejected for decision tickets"
+    );
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        stderr.contains("research") || stderr.contains("grilling") || stderr.contains("type"),
+        "stderr should mention valid decision types: {}",
+        stderr
+    );
+
+    // prototype and task also accepted without config changes
+    for ty in ["research", "prototype", "task"] {
+        let out = cmd()
+            .current_dir(tmp.path())
+            .args(["add", &format!("Ticket {ty}"), "--map", &map_id, "--type", ty])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "type {ty} should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn test_map_mutex_with_epic_and_plan_on_add_and_link() {
+    let tmp = setup_project();
+
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Mutex map"])
+        .output()
+        .unwrap();
+    assert!(map_out.status.success());
+    let map_id = extract_id(&map_out.stdout);
+
+    let epic_out = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Mutex epic"])
+        .output()
+        .unwrap();
+    assert!(epic_out.status.success());
+    let epic_id = extract_id(&epic_out.stdout);
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Mutex plan"])
+        .output()
+        .unwrap();
+    assert!(plan_out.status.success());
+    let plan_id = extract_id(&plan_out.stdout);
+
+    // add --map + --epic rejected
+    let map_epic = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Both",
+            "--map",
+            &map_id,
+            "--epic",
+            &epic_id,
+            "--type",
+            "grilling",
+        ])
+        .output()
+        .unwrap();
+    assert!(!map_epic.status.success());
+
+    // add --map + --plan rejected
+    let map_plan = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Both plan",
+            "--map",
+            &map_id,
+            "--plan",
+            &plan_id,
+            "--type",
+            "research",
+        ])
+        .output()
+        .unwrap();
+    assert!(!map_plan.status.success());
+
+    // Decision ticket cannot gain epic via link
+    let dec_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Decision", "--map", &map_id, "--type", "task"])
+        .output()
+        .unwrap();
+    assert!(dec_out.status.success());
+    let dec_id = extract_id(&dec_out.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &dec_id, &epic_id, "-r", "epic"])
+        .assert()
+        .failure();
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &dec_id, &plan_id, "-r", "plan"])
+        .assert()
+        .failure();
+
+    // Implementation ticket cannot gain map via link
+    let impl_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Impl", "--epic", &epic_id])
+        .output()
+        .unwrap();
+    assert!(impl_out.status.success());
+    let impl_id = extract_id(&impl_out.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &impl_id, &map_id, "-r", "map"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_link_map_sets_and_reparents() {
+    let tmp = setup_project();
+
+    let map1_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Map one"])
+        .output()
+        .unwrap();
+    let map1 = extract_id(&map1_out.stdout);
+
+    let map2_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Map two"])
+        .output()
+        .unwrap();
+    let map2 = extract_id(&map2_out.stdout);
+
+    let dec_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Reparent me", "--map", &map1, "--type", "grilling"])
+        .output()
+        .unwrap();
+    assert!(dec_out.status.success());
+    let dec_id = extract_id(&dec_out.stdout);
+
+    let content1 = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", dec_id)),
+    )
+    .unwrap();
+    assert!(content1.contains(&format!("map: {}", map1)));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &dec_id, &map2, "-r", "map"])
+        .assert()
+        .success();
+
+    let content2 = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", dec_id)),
+    )
+    .unwrap();
+    assert!(content2.contains(&format!("map: {}", map2)));
+    assert!(!content2.contains(&format!("map: {}", map1)));
+
+    // Relation is Task-side only: Map frontmatter does not list child tickets
+    let map2_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map2)),
+    )
+    .unwrap();
+    let map2_fm = map2_body.split("---").nth(1).unwrap_or("");
+    assert!(!map2_fm.contains(&dec_id));
+}
+
+#[test]
+fn test_ls_map_and_frontier() {
+    let tmp = setup_project();
+
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Frontier map"])
+        .output()
+        .unwrap();
+    let map_id = extract_id(&map_out.stdout);
+
+    let other_map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Other map"])
+        .output()
+        .unwrap();
+    let other_map = extract_id(&other_map_out.stdout);
+
+    let blocker_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Blocker", "--map", &map_id, "--type", "research"])
+        .output()
+        .unwrap();
+    let blocker_id = extract_id(&blocker_out.stdout);
+
+    let dependent_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Dependent", "--map", &map_id, "--type", "grilling"])
+        .output()
+        .unwrap();
+    let dependent_id = extract_id(&dependent_out.stdout);
+
+    let claimed_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Claimed", "--map", &map_id, "--type", "task"])
+        .output()
+        .unwrap();
+    let claimed_id = extract_id(&claimed_out.stdout);
+
+    let outsider_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Outsider", "--map", &other_map, "--type", "prototype"])
+        .output()
+        .unwrap();
+    let outsider_id = extract_id(&outsider_out.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &blocker_id, &dependent_id, "-r", "blocks"])
+        .assert()
+        .success();
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["start", &claimed_id, "--user", "alice"])
+        .assert()
+        .success();
+
+    // ls --map lists all tickets on the map
+    let ls_all = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--map", &map_id])
+        .output()
+        .unwrap();
+    assert!(ls_all.status.success());
+    let all_stdout = String::from_utf8_lossy(&ls_all.stdout);
+    assert!(all_stdout.contains(&blocker_id));
+    assert!(all_stdout.contains(&dependent_id));
+    assert!(all_stdout.contains(&claimed_id));
+    assert!(!all_stdout.contains(&outsider_id));
+
+    // While blocker open, dependent not on frontier; claimed/outsider excluded
+    let blocked = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--map", &map_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(blocked.status.success());
+    let blocked_stdout = String::from_utf8_lossy(&blocked.stdout);
+    assert!(blocked_stdout.contains(&blocker_id));
+    assert!(!blocked_stdout.contains(&dependent_id));
+    assert!(!blocked_stdout.contains(&claimed_id));
+    assert!(!blocked_stdout.contains(&outsider_id));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &blocker_id, "cancelled"])
+        .assert()
+        .success();
+
+    let frontier = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--map", &map_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(
+        frontier.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&frontier.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&frontier.stdout);
+    assert!(stdout.contains(&dependent_id));
+    assert!(!stdout.contains(&blocker_id));
+    assert!(!stdout.contains(&claimed_id));
+    assert!(!stdout.contains(&outsider_id));
+
+    let later_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Later open", "--map", &map_id, "--type", "task"])
+        .output()
+        .unwrap();
+    let later_id = extract_id(&later_out.stdout);
+
+    let ordered = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--map", &map_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(ordered.status.success());
+    let ordered_stdout = String::from_utf8_lossy(&ordered.stdout);
+    let dep_pos = ordered_stdout.find(&dependent_id).unwrap();
+    let later_pos = ordered_stdout.find(&later_id).unwrap();
+    assert!(dep_pos < later_pos, "frontier should be sorted by position");
+}

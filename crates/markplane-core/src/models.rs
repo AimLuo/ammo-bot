@@ -394,6 +394,10 @@ pub fn default_task_types() -> Vec<String> {
     ]
 }
 
+/// Built-in Decision ticket types (wayfinder). Validated when Task.map is set;
+/// not added to `config.task_types`.
+pub const DECISION_TICKET_TYPES: &[&str] = &["research", "prototype", "grilling", "task"];
+
 /// Default note types when not configured.
 pub fn default_note_types() -> Vec<String> {
     vec![
@@ -414,6 +418,9 @@ pub enum Priority {
     Low,
     Someday,
 }
+
+/// Default priority for Decision tickets.
+pub const DECISION_TICKET_DEFAULT_PRIORITY: Priority = Priority::Medium;
 
 impl fmt::Display for Priority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -497,6 +504,9 @@ pub struct Task {
     pub epic: Option<String>,
     #[serde(default)]
     pub plan: Option<String>,
+    /// Parent Map ID when this Task is a Decision ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map: Option<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]

@@ -91,6 +91,7 @@ pub fn run() -> anyhow::Result<()> {
     // Epic progress (uses all tasks including archived for accurate counts)
     if !epics.is_empty() {
         let all_tasks = project.list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })?;

@@ -50,7 +50,8 @@ pub enum Commands {
     Add {
         /// Title of the item
         title: String,
-        /// Task type (configurable in config.yaml, default: first in task_types list)
+        /// Task type (configurable in config.yaml, default: first in task_types list).
+        /// With --map: research, prototype, grilling, or task (built-in; skips config).
         #[arg(long)]
         r#type: Option<String>,
         /// Priority level
@@ -65,6 +66,9 @@ pub enum Commands {
         /// Parent plan ID
         #[arg(long)]
         plan: Option<String>,
+        /// Parent Map ID (creates a Decision ticket)
+        #[arg(long)]
+        map: Option<String>,
         /// Comma-separated tags
         #[arg(long)]
         tags: Option<String>,
@@ -115,6 +119,9 @@ pub enum Commands {
         /// Filter by plan ID
         #[arg(long)]
         plan: Option<String>,
+        /// Filter by map ID
+        #[arg(long)]
+        map: Option<String>,
         /// Filter by tags (comma-separated)
         #[arg(long)]
         tags: Option<String>,
@@ -303,7 +310,7 @@ pub enum Commands {
         from: String,
         /// Target item ID
         to: String,
-        /// Relationship type: blocks, depends-on, epic, plan, implements, related
+        /// Relationship type: blocks, depends-on, epic, plan, implements, map, related
         #[arg(long, short = 'r')]
         relation: String,
         /// Remove the link instead of adding it
@@ -418,11 +425,12 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             effort,
             epic,
             plan,
+            map,
             tags,
             template,
             body_file,
         } => add::run(
-            title, r#type, priority, effort, epic, plan, tags, template, body_file,
+            title, r#type, priority, effort, epic, plan, map, tags, template, body_file,
         ),
         Commands::Show { id } => show::run(id),
         Commands::Comment { id, body_file } => comment::run(id, body_file),
@@ -433,13 +441,14 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             priority,
             epic,
             plan,
+            map,
             tags,
             assignee,
             r#type,
             archived,
             frontier,
         } => ls::run(
-            kind, status, priority, epic, plan, tags, assignee, r#type, archived, frontier,
+            kind, status, priority, epic, plan, map, tags, assignee, r#type, archived, frontier,
         ),
         Commands::Status { id, new_status } => status::run(id, new_status),
         Commands::Sync { normalize } => sync::run(normalize),

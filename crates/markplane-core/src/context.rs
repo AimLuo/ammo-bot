@@ -50,6 +50,7 @@ impl Project {
 
         // All tasks (active + archived) for accurate epic progress
         let all_tasks = self.list_tasks(&QueryFilter {
+            map: None,
             scope: ScanScope::All,
             ..Default::default()
         })?;
@@ -480,6 +481,7 @@ impl Project {
             .collect();
         if !epics.is_empty() {
             let all_tasks = self.list_tasks(&QueryFilter {
+                map: None,
                 scope: ScanScope::All,
                 ..Default::default()
             })?;
@@ -640,6 +642,7 @@ mod tests {
                 Priority::High,
                 Effort::Medium,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -653,6 +656,7 @@ mod tests {
                 "feature",
                 Priority::Medium,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -687,6 +691,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -702,6 +707,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -717,6 +723,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -746,6 +753,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -760,6 +768,7 @@ mod tests {
                 "feature",
                 Priority::High,
                 Effort::Medium,
+                None,
                 None,
                 vec![],
                 None,
@@ -796,6 +805,7 @@ mod tests {
                 Priority::Critical,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -828,6 +838,7 @@ mod tests {
                 Priority::High,
                 Effort::Small,
                 None,
+                None,
                 vec![],
                 None,
                 None,
@@ -839,6 +850,7 @@ mod tests {
                 "feature",
                 Priority::High,
                 Effort::Medium,
+                None,
                 None,
                 vec![],
                 None,
@@ -869,6 +881,7 @@ mod tests {
                 Priority::High,
                 Effort::Medium,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -880,6 +893,7 @@ mod tests {
                 "bug",
                 Priority::Critical,
                 Effort::Small,
+                None,
                 None,
                 vec![],
                 None,
@@ -913,6 +927,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -928,6 +943,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -943,6 +959,7 @@ mod tests {
                 Priority::Medium,
                 Effort::Small,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
@@ -986,6 +1003,7 @@ mod tests {
                 Priority::High,
                 Effort::Medium,
                 Some(epic.id.clone()),
+                None,
                 vec![],
                 None,
                 None,
