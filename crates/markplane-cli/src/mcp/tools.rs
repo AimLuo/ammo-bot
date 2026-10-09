@@ -90,6 +90,10 @@ pub fn list_tools(project: &Project) -> Value {
                             "type": "string",
                             "description": "Filter by epic ID (e.g. EPIC-001)"
                         },
+                        "plan": {
+                            "type": "string",
+                            "description": "Filter by plan ID (e.g. PLAN-001). Tasks only."
+                        },
                         "tags": {
                             "type": "array",
                             "items": { "type": "string" },
@@ -133,7 +137,7 @@ pub fn list_tools(project: &Project) -> Value {
                         },
                         "kind": {
                             "type": "string",
-                            "description": "Item kind: task (default), epic, or note"
+                            "description": "Item kind: task (default), epic, plan, or note"
                         },
                         "type": {
                             "type": "string",
@@ -158,11 +162,11 @@ pub fn list_tools(project: &Project) -> Value {
                         "tags": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Tags for the item. Tasks and notes."
+                            "description": "Tags for the item. Tasks, notes, epics, and plans."
                         },
                         "template": {
                             "type": "string",
-                            "description": "Template name override (e.g. 'bug', 'refactor', 'research'). Uses type-based or kind defaults if omitted."
+                            "description": "Template name override (e.g. 'bug', 'refactor', 'research', 'spec'). Uses type-based or kind defaults if omitted."
                         },
                         "body": {
                             "type": "string",
@@ -528,6 +532,10 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
                     .get("epic")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                plan: args
+                    .get("plan")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 tags: args
                     .get("tags")
                     .and_then(|v| serde_json::from_value(v.clone()).ok()),
@@ -694,11 +702,29 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
                 .parse()
                 .map_err(|e: markplane_core::MarkplaneError| e.to_string())?;
 
+            let tags: Vec<String> = args
+                .get("tags")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
             let epic = project
-                .create_epic(title, priority, template, body)
+                .create_epic(title, priority, tags, template, body)
                 .map_err(|e| e.to_string())?;
 
             let result = json!({ "id": epic.id, "title": epic.title });
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "plan" => {
+            let tags: Vec<String> = args
+                .get("tags")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            let plan = project
+                .create_plan(title, vec![], tags, template, body)
+                .map_err(|e| e.to_string())?;
+
+            let result = json!({ "id": plan.id, "title": plan.title });
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "note" => {
@@ -721,7 +747,7 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         _ => Err(format!(
-            "Unknown kind: {}. Expected task, epic, or note",
+            "Unknown kind: {}. Expected task, epic, plan, or note",
             kind
         )),
     }
@@ -1038,7 +1064,7 @@ fn handle_plan(project: &Project, args: &Value) -> Result<String, String> {
     let template = args.get("template").and_then(|v| v.as_str());
 
     let plan = project
-        .create_plan(title, vec![], template, None)
+        .create_plan(title, vec![], vec![], template, None)
         .map_err(|e| e.to_string())?;
 
     // Link the plan to the task via the centralized link system

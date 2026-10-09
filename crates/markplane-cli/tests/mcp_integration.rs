@@ -453,6 +453,123 @@ fn test_tool_add_note() {
 }
 
 #[test]
+fn test_tool_add_plan_standalone() {
+    let tmp = setup_project();
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Standalone MCP plan",
+                    "kind": "plan",
+                    "tags": ["ready-for-agent"]
+                }
+            }
+        }),
+    );
+
+    assert!(response["error"].is_null());
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    let result: Value = serde_json::from_str(text).unwrap();
+    let id = result["id"].as_str().unwrap();
+    assert!(
+        id.starts_with("PLAN-"),
+        "ID should start with PLAN-, got: {}",
+        id
+    );
+    assert_eq!(result["title"], "Standalone MCP plan");
+
+    let content =
+        std::fs::read_to_string(tmp.path().join(format!(".markplane/plans/items/{}.md", id)))
+            .unwrap();
+    assert!(content.contains("ready-for-agent"));
+}
+
+#[test]
+fn test_tool_query_filter_by_plan() {
+    let tmp = setup_project();
+    let root = tmp.path().join(".markplane");
+    let project = markplane_core::Project::new(root);
+
+    let plan = project
+        .create_plan("Query plan", vec![], vec![], None, None)
+        .unwrap();
+    let other = project
+        .create_plan("Other plan", vec![], vec![], None, None)
+        .unwrap();
+
+    let task_a = project
+        .create_task(
+            "Under plan",
+            "feature",
+            markplane_core::Priority::Medium,
+            markplane_core::Effort::Small,
+            None,
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
+    project
+        .link_items(
+            &task_a.id,
+            &plan.id,
+            markplane_core::LinkRelation::Plan,
+            markplane_core::LinkAction::Add,
+        )
+        .unwrap();
+
+    let task_b = project
+        .create_task(
+            "Under other",
+            "feature",
+            markplane_core::Priority::Medium,
+            markplane_core::Effort::Small,
+            None,
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
+    project
+        .link_items(
+            &task_b.id,
+            &other.id,
+            markplane_core::LinkRelation::Plan,
+            markplane_core::LinkAction::Add,
+        )
+        .unwrap();
+
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 26,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_query",
+                "arguments": {
+                    "kind": "tasks",
+                    "plan": plan.id
+                }
+            }
+        }),
+    );
+
+    assert!(response["error"].is_null());
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    let results: Value = serde_json::from_str(text).unwrap();
+    let arr = results.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], task_a.id);
+    assert_eq!(arr[0]["title"], "Under plan");
+}
+
+#[test]
 fn test_tool_add_invalid_kind() {
     let tmp = setup_project();
     let response = send_request(
@@ -1773,6 +1890,7 @@ fn test_resource_epic_item() {
         .create_epic(
             "Epic resource test",
             markplane_core::Priority::High,
+            vec![],
             None,
             None,
         )
@@ -1839,7 +1957,7 @@ fn test_resource_plan_item() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let plan = project
-        .create_plan("Plan resource test", vec![], None, None)
+        .create_plan("Plan resource test", vec![], vec![], None, None)
         .unwrap();
 
     let response = send_request(
@@ -2176,6 +2294,7 @@ fn test_tool_update_epic_priority_and_tags() {
         .create_epic(
             "Epic update test",
             markplane_core::Priority::Medium,
+            vec![],
             None,
             None,
         )
@@ -2638,7 +2757,7 @@ fn test_tool_move_non_task_error() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let epic = project
-        .create_epic("Epic", markplane_core::Priority::High, None, None)
+        .create_epic("Epic", markplane_core::Priority::High, vec![], None, None)
         .unwrap();
 
     let response = send_request(
@@ -2662,7 +2781,7 @@ fn test_tool_update_rejects_invalid_field_for_type() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let plan = project
-        .create_plan("Test plan", vec![], None, None)
+        .create_plan("Test plan", vec![], vec![], None, None)
         .unwrap();
 
     // priority is not valid for plans

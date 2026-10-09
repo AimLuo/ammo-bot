@@ -83,7 +83,9 @@ pub fn builtin_template(kind: &str, name: &str) -> &'static str {
     match (kind, name) {
         ("task", "bug") => templates::TASK_BUG_TEMPLATE,
         ("task", _) => templates::TASK_TEMPLATE,
+        ("epic", "spec") => templates::SPEC_TEMPLATE,
         ("epic", _) => templates::EPIC_TEMPLATE,
+        ("plan", "spec") => templates::SPEC_TEMPLATE,
         ("plan", "refactor") => templates::PLAN_REFACTOR_TEMPLATE,
         ("plan", _) => templates::PLAN_IMPLEMENTATION_TEMPLATE,
         ("note", "research") => templates::NOTE_RESEARCH_TEMPLATE,
@@ -113,6 +115,8 @@ epic:
   templates:
     default:
       description: Standard epic template
+    spec:
+      description: Spec template (Problem Statement through Further Notes)
 
 plan:
   default: implementation
@@ -123,6 +127,8 @@ plan:
       description: Implementation plan with phases
     refactor:
       description: Refactor plan with migration steps
+    spec:
+      description: Spec template (Problem Statement through Further Notes)
 
 note:
   default: default
@@ -196,6 +202,7 @@ mod tests {
             builtin_template("epic", "default"),
             templates::EPIC_TEMPLATE
         );
+        assert_eq!(builtin_template("epic", "spec"), templates::SPEC_TEMPLATE);
         assert_eq!(
             builtin_template("epic", "anything"),
             templates::EPIC_TEMPLATE
@@ -216,6 +223,7 @@ mod tests {
             builtin_template("plan", "refactor"),
             templates::PLAN_REFACTOR_TEMPLATE
         );
+        assert_eq!(builtin_template("plan", "spec"), templates::SPEC_TEMPLATE);
     }
 
     #[test]

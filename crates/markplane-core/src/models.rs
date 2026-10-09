@@ -504,6 +504,8 @@ pub struct Plan {
     pub implements: Vec<String>,
     #[serde(default)]
     pub related: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub created: NaiveDate,
     pub updated: NaiveDate,
 }
@@ -783,6 +785,7 @@ title: "Dark mode implementation"
 status: in-progress
 implements: [TASK-042, TASK-043]
 related: []
+tags: [ready-for-agent]
 created: 2026-02-01
 updated: 2026-02-09
 "#;
@@ -790,6 +793,7 @@ updated: 2026-02-09
         assert_eq!(plan.id, "PLAN-012");
         assert_eq!(plan.status, PlanStatus::InProgress);
         assert_eq!(plan.implements, vec!["TASK-042", "TASK-043"]);
+        assert_eq!(plan.tags, vec!["ready-for-agent"]);
     }
 
     #[test]

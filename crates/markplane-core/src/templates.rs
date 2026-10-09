@@ -80,6 +80,38 @@ pub const EPIC_TEMPLATE: &str = r#"# {TITLE}
 [Strategic context, dependencies on external work, risks.]
 "#;
 
+/// Shared EPIC / PLAN spec body (to-spec seven-section structure).
+pub const SPEC_TEMPLATE: &str = r#"# {TITLE}
+
+## Problem Statement
+
+[What problem are we solving? Why does it matter now?]
+
+## Solution
+
+[High-level approach and what success looks like.]
+
+## User Stories
+
+1. As a [role], I want [capability], so that [outcome].
+
+## Implementation Decisions
+
+[Key design choices, constraints, and non-obvious tradeoffs.]
+
+## Testing Decisions
+
+[How we verify this: seams, coverage expectations, what is out of automated test scope.]
+
+## Out of Scope
+
+[Explicitly excluded work for this spec.]
+
+## Further Notes
+
+[Links, open questions, migration notes.]
+"#;
+
 pub const PLAN_IMPLEMENTATION_TEMPLATE: &str = r#"# {TITLE} Implementation Plan
 
 <!-- PLAN AUTHORING GUIDANCE — delete this comment when filling in the template.

@@ -629,7 +629,7 @@ mod tests {
     fn test_generate_context_summary_with_items() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project.update_status(&epic.id, "now").unwrap();
 
@@ -675,7 +675,7 @@ mod tests {
     fn test_generate_context_summary_includes_archived_in_epic_progress() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Test Epic", Priority::High, None, None)
+            .create_epic("Test Epic", Priority::High, vec![], None, None)
             .unwrap();
         project.update_status(&epic.id, "now").unwrap();
 
@@ -860,7 +860,7 @@ mod tests {
     fn test_generate_context_metrics() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project
             .create_task(
@@ -902,7 +902,7 @@ mod tests {
     fn test_generate_context_metrics_includes_archived_in_epic_progress() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Test Epic", Priority::High, None, None)
+            .create_epic("Test Epic", Priority::High, vec![], None, None)
             .unwrap();
 
         // 2 done+archived, 1 active
@@ -977,7 +977,7 @@ mod tests {
     fn test_sync_all() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project
             .create_task(

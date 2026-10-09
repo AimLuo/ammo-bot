@@ -2436,3 +2436,202 @@ fn test_note_with_template_research() {
     assert!(content.contains("## Findings"));
     assert!(content.contains("## Recommendations"));
 }
+
+// ── Standalone plan / Plan.tags / spec template / --plan ─────────────
+
+#[test]
+fn test_standalone_plan_with_tags() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "plan",
+            "--title",
+            "Standalone refactor",
+            "--tags",
+            "ready-for-agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan_id = extract_id(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Created"));
+    assert!(stdout.contains("Standalone refactor"));
+    assert!(!stdout.contains("Linked to"));
+
+    let content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    assert!(content.contains("tags:"));
+    assert!(content.contains("ready-for-agent"));
+    assert!(content.contains("implements: []") || content.contains("implements:"));
+}
+
+#[test]
+fn test_epic_with_tags() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Tagged epic", "--tags", "ready-for-agent,core"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let epic_id = extract_id(&output.stdout);
+
+    let content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/roadmap/items/{}.md", epic_id)),
+    )
+    .unwrap();
+    assert!(content.contains("ready-for-agent"));
+    assert!(content.contains("core"));
+}
+
+#[test]
+fn test_add_and_ls_plan() {
+    let tmp = setup_project();
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Parent plan"])
+        .output()
+        .unwrap();
+    assert!(plan_out.status.success());
+    let plan_id = extract_id(&plan_out.stdout);
+
+    let other_plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Other plan"])
+        .output()
+        .unwrap();
+    assert!(other_plan_out.status.success());
+    let other_plan_id = extract_id(&other_plan_out.stdout);
+
+    let task_a = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Task A", "--plan", &plan_id])
+        .output()
+        .unwrap();
+    assert!(
+        task_a.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&task_a.stderr)
+    );
+    let task_a_id = extract_id(&task_a.stdout);
+
+    let task_b = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Task B", "--plan", &other_plan_id])
+        .output()
+        .unwrap();
+    assert!(task_b.status.success());
+    let task_b_id = extract_id(&task_b.stdout);
+
+    let task_a_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_a_id)),
+    )
+    .unwrap();
+    assert!(task_a_content.contains(&format!("plan: {plan_id}")));
+
+    let plan_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    assert!(plan_content.contains(&task_a_id));
+
+    let ls_out = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--plan", &plan_id])
+        .output()
+        .unwrap();
+    assert!(
+        ls_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ls_out.stderr)
+    );
+    let ls_stdout = String::from_utf8_lossy(&ls_out.stdout);
+    assert!(ls_stdout.contains(&task_a_id));
+    assert!(ls_stdout.contains("Task A"));
+    assert!(!ls_stdout.contains(&task_b_id));
+    assert!(!ls_stdout.contains("Task B"));
+}
+
+#[test]
+fn test_epic_and_plan_with_spec_template() {
+    let tmp = setup_project();
+
+    let epic_out = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Spec epic", "--template", "spec"])
+        .output()
+        .unwrap();
+    assert!(
+        epic_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&epic_out.stderr)
+    );
+    let epic_id = extract_id(&epic_out.stdout);
+    let epic_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/roadmap/items/{}.md", epic_id)),
+    )
+    .unwrap();
+    for section in [
+        "## Problem Statement",
+        "## Solution",
+        "## User Stories",
+        "## Implementation Decisions",
+        "## Testing Decisions",
+        "## Out of Scope",
+        "## Further Notes",
+    ] {
+        assert!(
+            epic_content.contains(section),
+            "epic missing section {section}"
+        );
+    }
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Spec plan", "--template", "spec"])
+        .output()
+        .unwrap();
+    assert!(
+        plan_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&plan_out.stderr)
+    );
+    let plan_id = extract_id(&plan_out.stdout);
+    let plan_content = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    for section in [
+        "## Problem Statement",
+        "## Solution",
+        "## User Stories",
+        "## Implementation Decisions",
+        "## Testing Decisions",
+        "## Out of Scope",
+        "## Further Notes",
+    ] {
+        assert!(
+            plan_content.contains(section),
+            "plan missing section {section}"
+        );
+    }
+}

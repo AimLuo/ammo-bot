@@ -62,6 +62,7 @@ pub fn run(
     status: Option<String>,
     priority: Option<String>,
     epic: Option<String>,
+    plan: Option<String>,
     tags: Option<String>,
     assignee: Option<String>,
     item_type: Option<String>,
@@ -74,7 +75,7 @@ pub fn run(
         Some(LsKind::Plans) => list_plans(&project, archived),
         Some(LsKind::Notes) => list_notes(&project, archived),
         None => list_tasks(
-            &project, status, priority, epic, tags, assignee, item_type, archived,
+            &project, status, priority, epic, plan, tags, assignee, item_type, archived,
         ),
     }
 }
@@ -85,6 +86,7 @@ fn list_tasks(
     status: Option<String>,
     priority: Option<String>,
     epic: Option<String>,
+    plan: Option<String>,
     tags: Option<String>,
     assignee: Option<String>,
     item_type: Option<String>,
@@ -95,6 +97,7 @@ fn list_tasks(
         status: status.map(|s| parse_comma_list(&s)),
         priority: priority.map(|s| parse_comma_list(&s)),
         epic,
+        plan,
         tags: tags.map(|s| parse_comma_list(&s)),
         assignee,
         item_type: item_type.map(|s| parse_comma_list(&s)),

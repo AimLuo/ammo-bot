@@ -60,6 +60,9 @@ pub enum Commands {
         /// Parent epic ID
         #[arg(long)]
         epic: Option<String>,
+        /// Parent plan ID
+        #[arg(long)]
+        plan: Option<String>,
         /// Comma-separated tags
         #[arg(long)]
         tags: Option<String>,
@@ -98,6 +101,9 @@ pub enum Commands {
         /// Filter by epic ID
         #[arg(long)]
         epic: Option<String>,
+        /// Filter by plan ID
+        #[arg(long)]
+        plan: Option<String>,
         /// Filter by tags (comma-separated)
         #[arg(long)]
         tags: Option<String>,
@@ -154,14 +160,17 @@ pub enum Commands {
         effort: String,
     },
 
-    /// Create a linked implementation plan for a task
+    /// Create a plan (standalone, or linked to a task)
     Plan {
-        /// Task ID (e.g. TASK-042)
-        id: String,
-        /// Plan title (defaults to "Implementation plan for <item title>")
+        /// Task ID to link (omit for a standalone plan)
+        id: Option<String>,
+        /// Plan title (required for standalone; defaults to "Implementation plan for <item title>" when linked)
         #[arg(long)]
         title: Option<String>,
-        /// Template name override (e.g. "refactor", "implementation")
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// Template name override (e.g. "refactor", "implementation", "spec")
         #[arg(long)]
         template: Option<String>,
         /// Read body from file (or "-" for stdin); placed after the title heading
@@ -176,6 +185,12 @@ pub enum Commands {
         /// Priority level
         #[arg(long, default_value = "medium")]
         priority: String,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// Template name override (e.g. "spec")
+        #[arg(long)]
+        template: Option<String>,
         /// Read body from file (or "-" for stdin); placed after the title heading
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
@@ -371,11 +386,12 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             priority,
             effort,
             epic,
+            plan,
             tags,
             template,
             body_file,
         } => add::run(
-            title, r#type, priority, effort, epic, tags, template, body_file,
+            title, r#type, priority, effort, epic, plan, tags, template, body_file,
         ),
         Commands::Show { id } => show::run(id),
         Commands::Edit { id } => edit::run(id),
@@ -384,12 +400,13 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             status,
             priority,
             epic,
+            plan,
             tags,
             assignee,
             r#type,
             archived,
         } => ls::run(
-            kind, status, priority, epic, tags, assignee, r#type, archived,
+            kind, status, priority, epic, plan, tags, assignee, r#type, archived,
         ),
         Commands::Status { id, new_status } => status::run(id, new_status),
         Commands::Sync { normalize } => sync::run(normalize),
@@ -403,14 +420,17 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
         Commands::Plan {
             id,
             title,
+            tags,
             template,
             body_file,
-        } => plan::run(id, title, template, body_file),
+        } => plan::run(id, title, tags, template, body_file),
         Commands::Epic {
             title,
             priority,
+            tags,
+            template,
             body_file,
-        } => epic::run(title, priority, body_file),
+        } => epic::run(title, priority, tags, template, body_file),
         Commands::Note {
             title,
             r#type,

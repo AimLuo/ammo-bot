@@ -1377,6 +1377,7 @@ async fn get_tasks(
         status: params.status.map(|s| super::parse_comma_list(&s)),
         priority: params.priority.map(|s| super::parse_comma_list(&s)),
         epic: params.epic,
+        plan: None,
         tags: params.tags.map(|s| super::parse_comma_list(&s)),
         assignee: params.assignee,
         item_type: params.item_type.map(|s| super::parse_comma_list(&s)),
@@ -1472,7 +1473,7 @@ async fn create_epic(
 
     let epic = state
         .project
-        .create_epic(&body.title, priority, None, None)
+        .create_epic(&body.title, priority, vec![], None, None)
         .map_err(map_core_error)?;
 
     let doc: MarkplaneDocument<Epic> = state.project.read_item(&epic.id).map_err(map_core_error)?;
@@ -1524,7 +1525,7 @@ async fn create_plan(
 
     let plan = state
         .project
-        .create_plan(&body.title, implements, None, None)
+        .create_plan(&body.title, implements, vec![], None, None)
         .map_err(map_core_error)?;
 
     // If task_id provided, link the plan back to the task
@@ -2110,6 +2111,7 @@ async fn update_plan(
                     title: body.title,
                     status: body.status,
                     body: body.body,
+                    ..Default::default()
                 },
             )
             .map_err(map_core_error)?;

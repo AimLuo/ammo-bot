@@ -1,4 +1,4 @@
-use markplane_core::{Effort, Priority, Project};
+use markplane_core::{Effort, LinkAction, LinkRelation, Priority, Project};
 
 use super::{parse_comma_list, read_body_file};
 
@@ -9,6 +9,7 @@ pub fn run(
     priority: String,
     effort: String,
     epic: Option<String>,
+    plan: Option<String>,
     tags: Option<String>,
     template: Option<String>,
     body_file: Option<String>,
@@ -35,6 +36,10 @@ pub fn run(
         template.as_deref(),
         body.as_deref(),
     )?;
+
+    if let Some(plan_id) = plan {
+        project.link_items(&item.id, &plan_id, LinkRelation::Plan, LinkAction::Add)?;
+    }
 
     println!("Created {} — {}", item.id, item.title);
 

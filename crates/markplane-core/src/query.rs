@@ -23,6 +23,7 @@ pub struct QueryFilter {
     pub status: Option<Vec<String>>,
     pub priority: Option<Vec<String>>,
     pub epic: Option<String>,
+    pub plan: Option<String>,
     pub tags: Option<Vec<String>>,
     pub assignee: Option<String>,
     pub item_type: Option<Vec<String>>,
@@ -55,6 +56,13 @@ impl Project {
             if let Some(ref epic) = filter.epic {
                 match &fm.epic {
                     Some(e) if e == epic => {}
+                    _ => return false,
+                }
+            }
+
+            if let Some(ref plan) = filter.plan {
+                match &fm.plan {
+                    Some(p) if p == plan => {}
                     _ => return false,
                 }
             }
@@ -429,10 +437,10 @@ mod tests {
         let (_tmp, project) = setup_project();
 
         project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project
-            .create_epic("Phase 2", Priority::Medium, None, None)
+            .create_epic("Phase 2", Priority::Medium, vec![], None, None)
             .unwrap();
 
         let epics = project.list_epics().unwrap();
@@ -445,8 +453,12 @@ mod tests {
     fn test_list_plans() {
         let (_tmp, project) = setup_project();
 
-        project.create_plan("Plan A", vec![], None, None).unwrap();
-        project.create_plan("Plan B", vec![], None, None).unwrap();
+        project
+            .create_plan("Plan A", vec![], vec![], None, None)
+            .unwrap();
+        project
+            .create_plan("Plan B", vec![], vec![], None, None)
+            .unwrap();
 
         let plans = project.list_plans().unwrap();
         assert_eq!(plans.len(), 2);
@@ -610,10 +622,10 @@ mod tests {
         let (_tmp, project) = setup_project();
 
         let epic1 = project
-            .create_epic("Active epic", Priority::High, None, None)
+            .create_epic("Active epic", Priority::High, vec![], None, None)
             .unwrap();
         let epic2 = project
-            .create_epic("Done epic", Priority::Medium, None, None)
+            .create_epic("Done epic", Priority::Medium, vec![], None, None)
             .unwrap();
 
         project.archive_item(&epic2.id).unwrap();
@@ -632,10 +644,10 @@ mod tests {
         let (_tmp, project) = setup_project();
 
         project
-            .create_plan("Active plan", vec![], None, None)
+            .create_plan("Active plan", vec![], vec![], None, None)
             .unwrap();
         let plan2 = project
-            .create_plan("Done plan", vec![], None, None)
+            .create_plan("Done plan", vec![], vec![], None, None)
             .unwrap();
 
         project.archive_item(&plan2.id).unwrap();

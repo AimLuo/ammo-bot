@@ -1118,7 +1118,9 @@ mod tests {
                 None,
             )
             .unwrap();
-        let plan = project.create_plan("Plan", vec![], None, None).unwrap();
+        let plan = project
+            .create_plan("Plan", vec![], vec![], None, None)
+            .unwrap();
 
         // Create proper link
         project
@@ -1216,7 +1218,9 @@ mod tests {
                 None,
             )
             .unwrap();
-        let plan = project.create_plan("Plan", vec![], None, None).unwrap();
+        let plan = project
+            .create_plan("Plan", vec![], vec![], None, None)
+            .unwrap();
         let note = project
             .create_note("Note", "idea", vec![], None, None)
             .unwrap();

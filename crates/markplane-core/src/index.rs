@@ -604,7 +604,7 @@ mod tests {
     fn test_generate_root_index_with_items() {
         let (_tmp, project) = setup_project();
         project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project
             .create_task(
@@ -739,7 +739,7 @@ mod tests {
     fn test_generate_backlog_index_shows_epic_column() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project
             .create_task(
@@ -1017,11 +1017,11 @@ mod tests {
     fn test_generate_roadmap_index() {
         let (_tmp, project) = setup_project();
         let now_epic = project
-            .create_epic("Now Epic", Priority::High, None, None)
+            .create_epic("Now Epic", Priority::High, vec![], None, None)
             .unwrap();
         project.update_status(&now_epic.id, "now").unwrap();
         let later_epic = project
-            .create_epic("Later Epic", Priority::Medium, None, None)
+            .create_epic("Later Epic", Priority::Medium, vec![], None, None)
             .unwrap();
 
         // Add a task linked to the now epic
@@ -1058,7 +1058,7 @@ mod tests {
     fn test_generate_roadmap_index_epic_with_items_table() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Test Epic", Priority::High, None, None)
+            .create_epic("Test Epic", Priority::High, vec![], None, None)
             .unwrap();
         project.update_status(&epic.id, "now").unwrap();
 
@@ -1109,7 +1109,7 @@ mod tests {
     fn test_generate_roadmap_index_done_epics() {
         let (_tmp, project) = setup_project();
         let done_epic = project
-            .create_epic("Done Epic", Priority::High, None, None)
+            .create_epic("Done Epic", Priority::High, vec![], None, None)
             .unwrap();
         let task_a = project
             .create_task(
@@ -1127,7 +1127,7 @@ mod tests {
         project.update_status(&done_epic.id, "done").unwrap();
 
         let now_epic = project
-            .create_epic("Now Epic", Priority::Medium, None, None)
+            .create_epic("Now Epic", Priority::Medium, vec![], None, None)
             .unwrap();
         project.update_status(&now_epic.id, "now").unwrap();
 
@@ -1143,7 +1143,7 @@ mod tests {
     fn test_generate_roadmap_index_includes_archived_tasks_in_progress() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Test Epic", Priority::High, None, None)
+            .create_epic("Test Epic", Priority::High, vec![], None, None)
             .unwrap();
         project.update_status(&epic.id, "now").unwrap();
 
@@ -1199,7 +1199,7 @@ mod tests {
     fn test_generate_roadmap_index_no_done_section_when_empty() {
         let (_tmp, project) = setup_project();
         project
-            .create_epic("Later Epic", Priority::High, None, None)
+            .create_epic("Later Epic", Priority::High, vec![], None, None)
             .unwrap();
 
         project.generate_roadmap_index().unwrap();
@@ -1224,10 +1224,10 @@ mod tests {
             )
             .unwrap();
         let active_plan = project
-            .create_plan("Active Plan", vec![task.id.clone()], None, None)
+            .create_plan("Active Plan", vec![task.id.clone()], vec![], None, None)
             .unwrap();
         let done_plan = project
-            .create_plan("Done Plan", vec![], None, None)
+            .create_plan("Done Plan", vec![], vec![], None, None)
             .unwrap();
         project.update_status(&done_plan.id, "done").unwrap();
 
@@ -1273,7 +1273,7 @@ mod tests {
     fn test_sync_all_indexes() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None, None)
+            .create_epic("Phase 1", Priority::High, vec![], None, None)
             .unwrap();
         project
             .create_task(
