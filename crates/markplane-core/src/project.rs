@@ -1823,17 +1823,13 @@ fn validate_title_length(title: &str) -> Result<()> {
 }
 
 /// Find tasks that are blocked (have unresolved dependencies).
-/// An item is blocked if it's not done/cancelled and has at least one
-/// dependency that isn't done.
+/// An item is blocked if it's open (not completed/cancelled) and has at least
+/// one dependency that is not closed. Closed = StatusCategory Completed or
+/// Cancelled (cancelled blockers count as resolved).
 pub fn find_blocked_items<'a>(
     items: &'a [MarkplaneDocument<Task>],
     workflow: &TaskWorkflow,
 ) -> Vec<&'a MarkplaneDocument<Task>> {
-    let completed_statuses: HashSet<&str> = workflow
-        .statuses_in(StatusCategory::Completed)
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
     let closed_statuses: HashSet<&str> = workflow
         .statuses_in(StatusCategory::Completed)
         .iter()
@@ -1841,9 +1837,9 @@ pub fn find_blocked_items<'a>(
         .map(|s| s.as_str())
         .collect();
 
-    let done_ids: HashSet<&str> = items
+    let closed_ids: HashSet<&str> = items
         .iter()
-        .filter(|i| completed_statuses.contains(i.frontmatter.status.as_str()))
+        .filter(|i| closed_statuses.contains(i.frontmatter.status.as_str()))
         .map(|i| i.frontmatter.id.as_str())
         .collect();
 
@@ -1855,9 +1851,52 @@ pub fn find_blocked_items<'a>(
                 && i.frontmatter
                     .depends_on
                     .iter()
-                    .any(|dep| !done_ids.contains(dep.as_str()))
+                    .any(|dep| !closed_ids.contains(dep.as_str()))
         })
         .collect()
+}
+
+/// Frontier: open tasks with no assignee whose `depends_on` are all closed
+/// (completed or cancelled per StatusCategory), sorted by `position`.
+pub fn find_frontier_items<'a>(
+    items: &'a [MarkplaneDocument<Task>],
+    workflow: &TaskWorkflow,
+) -> Vec<&'a MarkplaneDocument<Task>> {
+    let closed_statuses: HashSet<&str> = workflow
+        .statuses_in(StatusCategory::Completed)
+        .iter()
+        .chain(workflow.statuses_in(StatusCategory::Cancelled).iter())
+        .map(|s| s.as_str())
+        .collect();
+
+    let closed_ids: HashSet<&str> = items
+        .iter()
+        .filter(|i| closed_statuses.contains(i.frontmatter.status.as_str()))
+        .map(|i| i.frontmatter.id.as_str())
+        .collect();
+
+    let mut frontier: Vec<_> = items
+        .iter()
+        .filter(|i| {
+            !closed_statuses.contains(i.frontmatter.status.as_str())
+                && i.frontmatter.assignee.is_none()
+                && i.frontmatter
+                    .depends_on
+                    .iter()
+                    .all(|dep| closed_ids.contains(dep.as_str()))
+        })
+        .collect();
+
+    frontier.sort_by(
+        |a, b| match (&a.frontmatter.position, &b.frontmatter.position) {
+            (Some(ap), Some(bp)) => ap.cmp(bp),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.frontmatter.id.cmp(&b.frontmatter.id),
+        },
+    );
+
+    frontier
 }
 
 #[cfg(test)]
@@ -2435,6 +2474,289 @@ mod tests {
             .unwrap();
         let blocked = find_blocked_items(&items, &config.workflows.task);
         assert!(blocked.is_empty()); // No longer blocked
+    }
+
+    #[test]
+    fn test_find_blocked_items_cancelled_dependency() {
+        let (_tmp, project) = setup_project();
+        let blocker = project
+            .create_task(
+                "Blocker",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let blocked_task = project
+            .create_task(
+                "Blocked",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut doc: MarkplaneDocument<Task> = project.read_item(&blocked_task.id).unwrap();
+        doc.frontmatter.depends_on = vec![blocker.id.clone()];
+        project.write_item(&blocked_task.id, &doc).unwrap();
+
+        project.update_status(&blocker.id, "cancelled").unwrap();
+
+        let config = project.load_config().unwrap();
+        let items = project
+            .list_tasks(&crate::query::QueryFilter::default())
+            .unwrap();
+        let blocked = find_blocked_items(&items, &config.workflows.task);
+        assert!(
+            blocked.is_empty(),
+            "cancelled blockers should count as resolved"
+        );
+    }
+
+    // ── find_frontier_items ──────────────────────────────────────────────
+
+    #[test]
+    fn test_frontier_includes_unblocked_unassigned_open_tasks() {
+        let (_tmp, project) = setup_project();
+        let open = project
+            .create_task(
+                "Open",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        project
+            .create_task(
+                "Done task",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let done_id = project
+            .list_tasks(&crate::query::QueryFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|t| t.frontmatter.title == "Done task")
+            .unwrap()
+            .frontmatter
+            .id;
+        project.update_status(&done_id, "done").unwrap();
+
+        let config = project.load_config().unwrap();
+        let items = project
+            .list_tasks(&crate::query::QueryFilter::default())
+            .unwrap();
+        let frontier = find_frontier_items(&items, &config.workflows.task);
+        let ids: Vec<_> = frontier.iter().map(|t| t.frontmatter.id.as_str()).collect();
+        assert_eq!(ids, vec![open.id.as_str()]);
+    }
+
+    #[test]
+    fn test_frontier_excludes_claimed_and_blocked() {
+        let (_tmp, project) = setup_project();
+        let blocker = project
+            .create_task(
+                "Blocker",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let blocked = project
+            .create_task(
+                "Blocked",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let claimed = project
+            .create_task(
+                "Claimed",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut doc: MarkplaneDocument<Task> = project.read_item(&blocked.id).unwrap();
+        doc.frontmatter.depends_on = vec![blocker.id.clone()];
+        project.write_item(&blocked.id, &doc).unwrap();
+
+        project
+            .update_task(
+                &claimed.id,
+                &TaskUpdate {
+                    assignee: Patch::Set("alice".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let config = project.load_config().unwrap();
+        let items = project
+            .list_tasks(&crate::query::QueryFilter::default())
+            .unwrap();
+        let frontier = find_frontier_items(&items, &config.workflows.task);
+        let ids: Vec<_> = frontier.iter().map(|t| t.frontmatter.id.as_str()).collect();
+        assert!(ids.contains(&blocker.id.as_str()));
+        assert!(!ids.contains(&blocked.id.as_str()));
+        assert!(!ids.contains(&claimed.id.as_str()));
+    }
+
+    #[test]
+    fn test_frontier_cancelled_blocker_unblocks_dependent() {
+        let (_tmp, project) = setup_project();
+        let blocker = project
+            .create_task(
+                "Blocker",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let dependent = project
+            .create_task(
+                "Dependent",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut doc: MarkplaneDocument<Task> = project.read_item(&dependent.id).unwrap();
+        doc.frontmatter.depends_on = vec![blocker.id.clone()];
+        project.write_item(&dependent.id, &doc).unwrap();
+
+        project.update_status(&blocker.id, "cancelled").unwrap();
+
+        let config = project.load_config().unwrap();
+        let items = project
+            .list_tasks(&crate::query::QueryFilter::default())
+            .unwrap();
+        let frontier = find_frontier_items(&items, &config.workflows.task);
+        let ids: Vec<_> = frontier.iter().map(|t| t.frontmatter.id.as_str()).collect();
+        assert_eq!(ids, vec![dependent.id.as_str()]);
+        assert!(find_blocked_items(&items, &config.workflows.task).is_empty());
+    }
+
+    #[test]
+    fn test_frontier_sorted_by_position() {
+        let (_tmp, project) = setup_project();
+        let first = project
+            .create_task(
+                "First",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let second = project
+            .create_task(
+                "Second",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let third = project
+            .create_task(
+                "Third",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Swap order via explicit positions: third, first, second
+        project
+            .update_task(
+                &third.id,
+                &TaskUpdate {
+                    position: Patch::Set("a".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        project
+            .update_task(
+                &first.id,
+                &TaskUpdate {
+                    position: Patch::Set("b".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        project
+            .update_task(
+                &second.id,
+                &TaskUpdate {
+                    position: Patch::Set("c".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let config = project.load_config().unwrap();
+        let items = project
+            .list_tasks(&crate::query::QueryFilter::default())
+            .unwrap();
+        let frontier = find_frontier_items(&items, &config.workflows.task);
+        let titles: Vec<_> = frontier
+            .iter()
+            .map(|t| t.frontmatter.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["Third", "First", "Second"]);
     }
 
     #[test]

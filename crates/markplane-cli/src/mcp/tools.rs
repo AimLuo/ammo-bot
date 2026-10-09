@@ -106,6 +106,10 @@ pub fn list_tools(project: &Project) -> Value {
                         "archived": {
                             "type": "boolean",
                             "description": "If true, query archived items instead of active ones"
+                        },
+                        "frontier": {
+                            "type": "boolean",
+                            "description": "If true, return only frontier tasks (open, unblocked, unassigned), sorted by position. Tasks only."
                         }
                     },
                     "required": []
@@ -544,37 +548,53 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
 
     let results: Vec<Value> = match kind {
         "tasks" => {
-            let filter = QueryFilter {
-                status: args
-                    .get("status")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                priority: args
-                    .get("priority")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                epic: args
-                    .get("epic")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                plan: args
-                    .get("plan")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                tags: args
-                    .get("tags")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                assignee: args
-                    .get("assignee")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                item_type: None,
-                scope: if archived {
-                    ScanScope::Archived
-                } else {
-                    ScanScope::Active
-                },
+            let epic = args
+                .get("epic")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let plan = args
+                .get("plan")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let frontier = args
+                .get("frontier")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let items = if frontier {
+                if archived {
+                    return Err("--frontier cannot be combined with archived".into());
+                }
+                project
+                    .list_frontier_tasks(epic.as_deref(), plan.as_deref())
+                    .map_err(|e| e.to_string())?
+            } else {
+                let filter = QueryFilter {
+                    status: args
+                        .get("status")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    priority: args
+                        .get("priority")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    epic,
+                    plan,
+                    tags: args
+                        .get("tags")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    assignee: args
+                        .get("assignee")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    item_type: None,
+                    scope: if archived {
+                        ScanScope::Archived
+                    } else {
+                        ScanScope::Active
+                    },
+                };
+                project.list_tasks(&filter).map_err(|e| e.to_string())?
             };
 
-            let items = project.list_tasks(&filter).map_err(|e| e.to_string())?;
             items
                 .iter()
                 .map(|doc| {
@@ -586,6 +606,9 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
                         "priority": fm.priority.to_string(),
                         "effort": fm.effort.to_string(),
                         "updated": fm.updated.to_string(),
+                        "assignee": fm.assignee,
+                        "depends_on": fm.depends_on,
+                        "tags": fm.tags,
                     })
                 })
                 .collect()

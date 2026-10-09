@@ -77,6 +77,7 @@ pub fn run(
     assignee: Option<String>,
     item_type: Option<String>,
     archived: bool,
+    frontier: bool,
 ) -> anyhow::Result<()> {
     let project = Project::from_current_dir()?;
 
@@ -86,7 +87,7 @@ pub fn run(
         Some(LsKind::Notes) => list_notes(&project, archived),
         Some(LsKind::Maps) => list_maps(&project, archived),
         None => list_tasks(
-            &project, status, priority, epic, plan, tags, assignee, item_type, archived,
+            &project, status, priority, epic, plan, tags, assignee, item_type, archived, frontier,
         ),
     }
 }
@@ -102,24 +103,32 @@ fn list_tasks(
     assignee: Option<String>,
     item_type: Option<String>,
     archived: bool,
+    frontier: bool,
 ) -> anyhow::Result<()> {
     let config = project.load_config()?;
-    let filter = QueryFilter {
-        status: status.map(|s| parse_comma_list(&s)),
-        priority: priority.map(|s| parse_comma_list(&s)),
-        epic,
-        plan,
-        tags: tags.map(|s| parse_comma_list(&s)),
-        assignee,
-        item_type: item_type.map(|s| parse_comma_list(&s)),
-        scope: if archived {
-            ScanScope::Archived
-        } else {
-            ScanScope::Active
-        },
-    };
 
-    let items = project.list_tasks(&filter)?;
+    let items = if frontier {
+        if archived {
+            anyhow::bail!("--frontier cannot be combined with --archived");
+        }
+        project.list_frontier_tasks(epic.as_deref(), plan.as_deref())?
+    } else {
+        let filter = QueryFilter {
+            status: status.map(|s| parse_comma_list(&s)),
+            priority: priority.map(|s| parse_comma_list(&s)),
+            epic,
+            plan,
+            tags: tags.map(|s| parse_comma_list(&s)),
+            assignee,
+            item_type: item_type.map(|s| parse_comma_list(&s)),
+            scope: if archived {
+                ScanScope::Archived
+            } else {
+                ScanScope::Active
+            },
+        };
+        project.list_tasks(&filter)?
+    };
 
     if items.is_empty() {
         println!("No tasks found.");
