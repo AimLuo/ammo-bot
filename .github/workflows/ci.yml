@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.0'
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting is platform-independent — checking it once is enough.
+      - name: Rustfmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace
+
+      # The frontend build is platform-independent and slow; Linux only.
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version-file: crates/markplane-web/ui/.nvmrc
+          cache: npm
+          cache-dependency-path: crates/markplane-web/ui/package-lock.json
+
+      - name: Frontend lint & build
+        if: runner.os == 'Linux'
+        working-directory: crates/markplane-web/ui
+        run: |
+          npm ci
+          npm run lint
+          npm run build

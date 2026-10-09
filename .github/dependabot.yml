@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    target-branch: master
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /crates/markplane-web/ui
+    schedule:
+      interval: weekly
+    target-branch: master
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    ignore:
+      # Blocked upstream: typescript-eslint (via eslint-config-next) caps TS at <6.1.0. See TASK-75fk6.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # Blocked upstream: eslint-plugin-react (via eslint-config-next) crashes on ESLint 10. See TASK-zesq4.
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 10
