@@ -1,7 +1,7 @@
 ---
 id: TASK-kjdag
 title: 独立 PLAN、Plan tags 与 spec 模板
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium
