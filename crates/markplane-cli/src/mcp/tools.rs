@@ -449,6 +449,28 @@ pub fn list_tools(project: &Project) -> Value {
                     },
                     "required": ["id", "body"]
                 }
+            },
+            {
+                "name": "markplane_resolve",
+                "description": "Resolve a Decision ticket: write ## Answer, mark done, append Map Decisions so far line.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Decision ticket ID (TASK with a map)"
+                        },
+                        "answer": {
+                            "type": "string",
+                            "description": "Answer body written under ## Answer"
+                        },
+                        "gist": {
+                            "type": "string",
+                            "description": "One-line gist for the Map Decisions so far entry"
+                        }
+                    },
+                    "required": ["id", "answer", "gist"]
+                }
             }
         ]
     })
@@ -473,6 +495,7 @@ pub fn call_tool(id: Value, project: &Project, name: &str, args: Value) -> JsonR
         "markplane_archive" => handle_archive(project, &args),
         "markplane_unarchive" => handle_unarchive(project, &args),
         "markplane_comment" => handle_comment(project, &args),
+        "markplane_resolve" => handle_resolve(project, &args),
         _ => {
             return JsonRpcResponse::error(id, METHOD_NOT_FOUND, format!("Unknown tool: {}", name));
         }
@@ -1329,5 +1352,32 @@ fn handle_comment(project: &Project, args: &Value) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let result = json!({ "success": true, "id": id });
+    serde_json::to_string(&result).map_err(|e| e.to_string())
+}
+
+fn handle_resolve(project: &Project, args: &Value) -> Result<String, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: id".to_string())?;
+    let answer = args
+        .get("answer")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: answer".to_string())?;
+    let gist = args
+        .get("gist")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: gist".to_string())?;
+
+    let outcome = project
+        .resolve_decision(id, answer, gist)
+        .map_err(|e| e.to_string())?;
+
+    let result = json!({
+        "success": true,
+        "id": id,
+        "map_id": outcome.map_id,
+        "map_has_no_open_tickets": outcome.map_has_no_open_tickets
+    });
     serde_json::to_string(&result).map_err(|e| e.to_string())
 }

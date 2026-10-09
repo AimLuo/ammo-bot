@@ -15,7 +15,17 @@ use crate::links::{LinkAction, LinkRelation};
 use crate::manifest;
 use crate::models::*;
 use crate::query::QueryFilter;
+use crate::sections::{append_line_to_section, set_answer_section};
 use crate::templates::{self, render_template};
+
+/// Outcome of resolving a Decision ticket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveOutcome {
+    /// Parent Map ID.
+    pub map_id: String,
+    /// True when the Map has no remaining open Decision tickets.
+    pub map_has_no_open_tickets: bool,
+}
 
 // ── Patch<T> ────────────────────────────────────────────────────────────────
 
@@ -862,6 +872,85 @@ impl Project {
         Ok(())
     }
 
+    /// Resolve a Decision ticket: write `## Answer`, mark completed, append a
+    /// Decisions so far line on the parent Map. Atomic under locks on both items.
+    ///
+    /// Returns whether the Map has no open Decision tickets left (caller may
+    /// print a hint; Map status is not changed).
+    pub fn resolve_decision(&self, id: &str, answer: &str, gist: &str) -> Result<ResolveOutcome> {
+        let (prefix, _) = parse_id(id)?;
+        if prefix != IdPrefix::Task {
+            return Err(MarkplaneError::Config(
+                "resolve only applies to Decision tickets (Tasks with a map)".into(),
+            ));
+        }
+
+        let config = self.load_config()?;
+        let done_status = config
+            .workflows
+            .task
+            .statuses_in(StatusCategory::Completed)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "done".to_string());
+
+        // Read task without lock first to learn the map id for dual-locking.
+        let peek: MarkplaneDocument<Task> = self.read_item(id)?;
+        let map_id = peek.frontmatter.map.clone().ok_or_else(|| {
+            MarkplaneError::Config(
+                "resolve only applies to Decision tickets (Tasks with a map)".into(),
+            )
+        })?;
+        let title = peek.frontmatter.title.clone();
+
+        let mut ids = [id, map_id.as_str()];
+        let _locks = self.lock_items(&mut ids)?;
+
+        let mut task: MarkplaneDocument<Task> = self.read_item(id)?;
+        if task.frontmatter.map.as_deref() != Some(map_id.as_str()) {
+            return Err(MarkplaneError::Config(
+                "resolve only applies to Decision tickets (Tasks with a map)".into(),
+            ));
+        }
+
+        let today = Local::now().date_naive();
+        task.body = set_answer_section(&task.body, answer);
+        task.frontmatter.status = done_status;
+        task.frontmatter.updated = today;
+        self.write_item(id, &task)?;
+
+        let decision_line = format!("- {title} [[{id}]]: {gist}");
+        let mut map_doc: MarkplaneDocument<Map> = self.read_item(&map_id)?;
+        map_doc.body = append_line_to_section(&map_doc.body, "Decisions so far", &decision_line);
+        map_doc.frontmatter.updated = today;
+        self.write_item(&map_id, &map_doc)?;
+
+        let open_left = self.count_open_decision_tickets(&map_id)?;
+        Ok(ResolveOutcome {
+            map_id,
+            map_has_no_open_tickets: open_left == 0,
+        })
+    }
+
+    /// Count Decision tickets on `map_id` that are still open (not completed/cancelled).
+    fn count_open_decision_tickets(&self, map_id: &str) -> Result<usize> {
+        let config = self.load_config()?;
+        let workflow = &config.workflows.task;
+        let tasks = self.list_tasks(&QueryFilter {
+            map: Some(map_id.to_string()),
+            ..QueryFilter::default()
+        })?;
+        Ok(tasks
+            .iter()
+            .filter(|t| {
+                workflow
+                    .category_of(&t.frontmatter.status)
+                    .map(|c| c.is_open())
+                    .unwrap_or(true)
+            })
+            .count())
+    }
+
     /// Append a comment under `## Comments` on any item (creates the section if needed).
     ///
     /// Holds an advisory file lock for the full read-modify-write cycle.
@@ -1531,6 +1620,9 @@ impl Project {
             if fm.id == target_id {
                 continue;
             }
+            if fm.specs.iter().any(|s| s == target_id) {
+                refs.push((fm.id.clone(), LinkRelation::Spec, LinkAction::Remove));
+            }
             if fm.related.iter().any(|r| r == target_id) {
                 refs.push((fm.id.clone(), LinkRelation::Related, LinkAction::Remove));
             }
@@ -1543,6 +1635,9 @@ impl Project {
     ///
     /// Also cleans up inbound references from active items so they don't
     /// point to an archived item.
+    ///
+    /// Archiving a Map also archives all of its Decision tickets first.
+    /// Map status changes do not trigger this — only an explicit archive.
     pub fn archive_item(&self, id: &str) -> Result<()> {
         let (prefix, _) = parse_id(id)?;
         let source = self.item_path(id)?;
@@ -1554,6 +1649,24 @@ impl Project {
                 id
             )));
         }
+
+        // Cascade: archive Decision tickets before the Map so their `map`
+        // field is preserved (archiving the Map would otherwise strip it).
+        if prefix == IdPrefix::Map {
+            let children = self.list_tasks(&QueryFilter {
+                map: Some(id.to_string()),
+                ..Default::default()
+            })?;
+            for child in &children {
+                let child_id = &child.frontmatter.id;
+                if !self.is_archived(child_id)? {
+                    self.archive_item(child_id)?;
+                }
+            }
+        }
+
+        // Re-resolve path after cascade (Map itself is still active).
+        let source = self.item_path(id)?;
 
         // Find inbound references before archiving
         let inbound_refs = self.find_inbound_references(id)?;

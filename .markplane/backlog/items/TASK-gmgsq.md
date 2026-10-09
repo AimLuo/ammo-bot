@@ -1,7 +1,7 @@
 ---
 id: TASK-gmgsq
 title: resolve 命令
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium

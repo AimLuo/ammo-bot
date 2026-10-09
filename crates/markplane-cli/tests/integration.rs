@@ -3622,6 +3622,442 @@ fn test_ls_map_and_frontier() {
 }
 
 #[test]
+fn test_archive_map_cascades_decision_tickets() {
+    let tmp = setup_project();
+
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Archive me"])
+        .output()
+        .unwrap();
+    let map_id = extract_id(&map_out.stdout);
+
+    let d1_out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Decision one",
+            "--map",
+            &map_id,
+            "--type",
+            "research",
+        ])
+        .output()
+        .unwrap();
+    let d1 = extract_id(&d1_out.stdout);
+
+    let d2_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Decision two", "--map", &map_id, "--type", "task"])
+        .output()
+        .unwrap();
+    let d2 = extract_id(&d2_out.stdout);
+
+    // Status change alone must not archive Decision tickets
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &map_id, "done"])
+        .assert()
+        .success();
+
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d1))
+            .is_file()
+    );
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d2))
+            .is_file()
+    );
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["archive", &map_id])
+        .assert()
+        .success();
+
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/maps/archive/{}.md", map_id))
+            .is_file()
+    );
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/archive/{}.md", d1))
+            .is_file()
+    );
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/archive/{}.md", d2))
+            .is_file()
+    );
+    assert!(
+        !tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d1))
+            .exists()
+    );
+    assert!(
+        !tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d2))
+            .exists()
+    );
+
+    let ls = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--map", &map_id])
+        .output()
+        .unwrap();
+    assert!(ls.status.success());
+    let ls_stdout = String::from_utf8_lossy(&ls.stdout);
+    assert!(!ls_stdout.contains(&d1));
+    assert!(!ls_stdout.contains(&d2));
+}
+
+#[test]
+fn test_link_spec_maintains_map_specs() {
+    let tmp = setup_project();
+
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Spec map"])
+        .output()
+        .unwrap();
+    let map_id = extract_id(&map_out.stdout);
+
+    let epic_out = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Published epic"])
+        .output()
+        .unwrap();
+    let epic_id = extract_id(&epic_out.stdout);
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Published plan"])
+        .output()
+        .unwrap();
+    let plan_id = extract_id(&plan_out.stdout);
+
+    let task_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Not a spec"])
+        .output()
+        .unwrap();
+    let task_id = extract_id(&task_out.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &epic_id, "-r", "spec"])
+        .assert()
+        .success();
+
+    let map_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(map_body.contains(&format!("- {}", epic_id)) || map_body.contains(&epic_id));
+    let map_fm = map_body.split("---").nth(1).unwrap_or("");
+    assert!(map_fm.contains("specs:"));
+    assert!(map_fm.contains(&epic_id));
+
+    // EPIC gains no reverse field
+    let epic_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/roadmap/items/{}.md", epic_id)),
+    )
+    .unwrap();
+    let epic_fm = epic_body.split("---").nth(1).unwrap_or("");
+    assert!(!epic_fm.contains(&map_id));
+    assert!(!epic_fm.contains("specs:"));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &plan_id, "-r", "spec"])
+        .assert()
+        .success();
+
+    let map_body2 = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    let map_fm2 = map_body2.split("---").nth(1).unwrap_or("");
+    assert!(map_fm2.contains(&epic_id));
+    assert!(map_fm2.contains(&plan_id));
+
+    // PLAN gains no reverse field
+    let plan_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    let plan_fm = plan_body.split("---").nth(1).unwrap_or("");
+    assert!(!plan_fm.contains(&map_id));
+
+    // Reject TASK targets
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &task_id, "-r", "spec"])
+        .assert()
+        .failure();
+
+    // --remove clears the specs entry
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &epic_id, "-r", "spec", "--remove"])
+        .assert()
+        .success();
+
+    let map_body3 = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    let map_fm3 = map_body3.split("---").nth(1).unwrap_or("");
+    assert!(!map_fm3.contains(&epic_id));
+    assert!(map_fm3.contains(&plan_id));
+}
+
+// ── Resolve ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_resolve_writes_answer_marks_done_appends_decision() {
+    let tmp = setup_project();
+    let map_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["map", "Resolve map"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    // Keep a second open ticket so the map-cleared hint is not printed.
+    let _other = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["add", "Still open", "--map", &map_id, "--type", "task"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args([
+                "add",
+                "Pick the path",
+                "--map",
+                &map_id,
+                "--type",
+                "grilling",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, "We take the left fork.\n").unwrap();
+
+    let out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            "left fork",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.to_lowercase().contains("no open") && !stdout.contains("status"),
+        "should not hint map done while another ticket is open: {}",
+        stdout
+    );
+
+    let task_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    assert!(
+        task_file.contains("status: done"),
+        "task should be done:\n{}",
+        task_file
+    );
+    let task_body = task_file.splitn(3, "---").nth(2).unwrap_or("");
+    assert!(
+        task_body.contains("## Answer"),
+        "expected ## Answer:\n{}",
+        task_body
+    );
+    assert!(
+        task_body.contains("We take the left fork."),
+        "expected answer content:\n{}",
+        task_body
+    );
+
+    let map_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(
+        map_file.contains("status: active"),
+        "map status must stay active:\n{}",
+        map_file
+    );
+    let expected_line = format!("- Pick the path [[{}]]: left fork", task_id);
+    assert!(
+        map_file.contains(&expected_line),
+        "expected decision line {:?}:\n{}",
+        expected_line,
+        map_file
+    );
+}
+
+#[test]
+fn test_resolve_last_open_prints_hint_map_status_unchanged() {
+    let tmp = setup_project();
+    let map_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["map", "Last ticket map"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args([
+                "add",
+                "Final decision",
+                "--map",
+                &map_id,
+                "--type",
+                "research",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, "Ship it.\n").unwrap();
+
+    let out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            "ship it",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&map_id),
+        "hint should mention map id: {}",
+        stdout
+    );
+    assert!(
+        stdout.to_lowercase().contains("no open") || stdout.contains("status"),
+        "hint should mention no open tickets / status: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("done"),
+        "hint should mention marking done: {}",
+        stdout
+    );
+
+    let map_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(
+        map_file.contains("status: active"),
+        "map must remain active (not auto-done):\n{}",
+        map_file
+    );
+}
+
+#[test]
+fn test_resolve_rejects_non_decision_ticket() {
+    let tmp = setup_project();
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["add", "Regular implementation task"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, "Nope.\n").unwrap();
+
+    let out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            "nope",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "resolve on non-Decision ticket should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("decision") || stderr.contains("map"),
+        "stderr should mention Decision ticket / map: {}",
+        stderr
+    );
+
+    let task_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    assert!(
+        !task_file.contains("status: done"),
+        "non-decision resolve must not mark done:\n{}",
+        task_file
+    );
+    assert!(
+        !task_file.contains("## Answer"),
+        "non-decision resolve must not write Answer:\n{}",
+        task_file
+    );
+}
+
+#[test]
 fn test_claude_md_includes_maps_paths() {
     let tmp = setup_project();
     // Seed a local CLAUDE.md so walk-up does not pick a parent repo file.

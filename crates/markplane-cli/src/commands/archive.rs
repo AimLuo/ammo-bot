@@ -90,6 +90,10 @@ pub fn run(id: Option<String>, all_done: bool, dry_run: bool) -> anyhow::Result<
     } else {
         let count = to_archive.len();
         for (id, _) in &to_archive {
+            // Map cascade may have already archived Decision tickets listed here.
+            if project.is_archived(id)? {
+                continue;
+            }
             project.archive_item(id)?;
             println!("  {} Archived {}", "✓".green(), id);
         }

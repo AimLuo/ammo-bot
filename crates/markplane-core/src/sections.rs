@@ -64,6 +64,165 @@ pub fn missing_map_sections(body: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Set or replace a `## Answer` section. Inserts before `## Comments` when
+/// present; otherwise appends at the end.
+pub fn set_answer_section(body: &str, answer: &str) -> String {
+    let answer = answer.trim_end();
+    let section = if answer.is_empty() {
+        "## Answer\n".to_string()
+    } else {
+        format!("## Answer\n\n{answer}\n")
+    };
+
+    if let Some(replaced) = replace_section_content(body, "Answer", answer) {
+        return replaced;
+    }
+
+    let mut result = body.trim_end().to_string();
+    let comments_heading = result.lines().position(|line| line.trim() == "## Comments");
+    if let Some(idx) = comments_heading {
+        let lines: Vec<&str> = result.lines().collect();
+        let mut out = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i == idx {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if !out.ends_with("\n\n") && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&section);
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    } else {
+        if !result.is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str(&section);
+        result
+    }
+}
+
+/// Append a line to a named `##` section (creates the section at end if missing).
+pub fn append_line_to_section(body: &str, section_title: &str, line: &str) -> String {
+    let line = line.trim_end();
+    let heading = format!("## {section_title}");
+    let lines: Vec<&str> = body.lines().collect();
+    let mut heading_idx = None;
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim() == heading {
+            heading_idx = Some(i);
+            break;
+        }
+    }
+
+    let Some(start) = heading_idx else {
+        let mut result = body.trim_end().to_string();
+        if !result.is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str(&heading);
+        result.push_str("\n\n");
+        result.push_str(line);
+        result.push('\n');
+        return result;
+    };
+
+    let mut end = lines.len();
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        let trimmed = l.trim_end();
+        if trimmed.starts_with("## ") && !trimmed.starts_with("###") {
+            end = i;
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i == end {
+            // Ensure a blank line before the new entry if section has content.
+            if !out.ends_with("\n\n") {
+                if out.ends_with('\n') {
+                    out.push('\n');
+                } else {
+                    out.push_str("\n\n");
+                }
+            }
+            out.push_str(line);
+            out.push('\n');
+            if end < lines.len() {
+                out.push('\n');
+            }
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    if end == lines.len() {
+        if !out.ends_with("\n\n") {
+            if out.ends_with('\n') {
+                out.push('\n');
+            } else {
+                out.push_str("\n\n");
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Replace content under `## {title}`; returns None if the heading is absent.
+fn replace_section_content(body: &str, title: &str, new_content: &str) -> Option<String> {
+    let heading = format!("## {title}");
+    let lines: Vec<&str> = body.lines().collect();
+    let mut start = None;
+    for (i, l) in lines.iter().enumerate() {
+        if l.trim() == heading {
+            start = Some(i);
+            break;
+        }
+    }
+    let start = start?;
+    let mut end = lines.len();
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        let trimmed = l.trim_end();
+        if trimmed.starts_with("## ") && !trimmed.starts_with("###") {
+            end = i;
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i == start {
+            out.push_str(&heading);
+            out.push('\n');
+            if !new_content.is_empty() {
+                out.push('\n');
+                out.push_str(new_content);
+                out.push('\n');
+            }
+            if end < lines.len() {
+                out.push('\n');
+            }
+            continue;
+        }
+        if i > start && i < end {
+            continue;
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
