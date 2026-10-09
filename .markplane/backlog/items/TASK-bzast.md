@@ -1,7 +1,7 @@
 ---
 id: TASK-bzast
 title: 本仓库运行 my-setup 并合并 AGENTS.md 与 CLAUDE.md
-status: backlog
+status: in-progress
 priority: medium
 type: chore
 effort: medium
@@ -13,7 +13,7 @@ depends_on:
 blocks:
 - TASK-9hqi2
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aD

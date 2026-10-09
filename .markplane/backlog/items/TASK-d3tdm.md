@@ -1,7 +1,7 @@
 ---
 id: TASK-d3tdm
 title: 文档：README、docs 更新与 skills-workflow.md
-status: backlog
+status: in-progress
 priority: medium
 type: chore
 effort: medium
@@ -13,7 +13,7 @@ depends_on:
 - TASK-k4tfw
 blocks: []
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aF
