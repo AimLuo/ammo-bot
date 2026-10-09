@@ -2,6 +2,7 @@ mod add;
 mod archive;
 mod check;
 mod claude_md;
+mod comment;
 mod context;
 mod dashboard;
 mod done;
@@ -78,6 +79,15 @@ pub enum Commands {
     Show {
         /// Item ID (e.g. TASK-042)
         id: String,
+    },
+
+    /// Append a comment under ## Comments
+    Comment {
+        /// Item ID (e.g. TASK-042, EPIC-001, PLAN-003, NOTE-007)
+        id: String,
+        /// Read comment body from file (or "-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        body_file: String,
     },
 
     /// Open an item in $EDITOR
@@ -394,6 +404,7 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             title, r#type, priority, effort, epic, plan, tags, template, body_file,
         ),
         Commands::Show { id } => show::run(id),
+        Commands::Comment { id, body_file } => comment::run(id, body_file),
         Commands::Edit { id } => edit::run(id),
         Commands::Ls {
             kind,

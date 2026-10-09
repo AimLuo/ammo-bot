@@ -2192,6 +2192,229 @@ fn test_full_workflow() {
         .success();
 }
 
+// ── Comments ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_comment_on_task_appends_under_comments() {
+    let tmp = setup_project();
+    let add_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Commentable task"])
+        .output()
+        .unwrap();
+    assert!(add_out.status.success());
+    let task_id = extract_id(&add_out.stdout);
+
+    let body_path = tmp.path().join("comment.md");
+    std::fs::write(&body_path, "First discussion point.\n").unwrap();
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let comment_out = cmd()
+        .current_dir(tmp.path())
+        .env("USER", "alice")
+        .args([
+            "comment",
+            &task_id,
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        comment_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&comment_out.stderr)
+    );
+
+    let file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    let body = file.splitn(3, "---").nth(2).unwrap_or("");
+    assert!(
+        body.contains("## Comments"),
+        "expected ## Comments section, got:\n{}",
+        body
+    );
+    let heading = format!("### {} alice", today);
+    assert!(
+        body.contains(&heading),
+        "expected heading {:?}, got:\n{}",
+        heading,
+        body
+    );
+    assert!(body.contains("First discussion point."));
+
+    // show includes comments
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &task_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Comments"))
+        .stdout(predicate::str::contains(&heading))
+        .stdout(predicate::str::contains("First discussion point."));
+}
+
+#[test]
+fn test_comment_accumulates_and_works_on_all_kinds() {
+    let tmp = setup_project();
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let comment_path = tmp.path().join("c.md");
+
+    // TASK: two comments accumulate in order
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["add", "Multi-comment task"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    std::fs::write(&comment_path, "Comment one.\n").unwrap();
+    cmd()
+        .current_dir(tmp.path())
+        .env("USER", "alice")
+        .args([
+            "comment",
+            &task_id,
+            "--body-file",
+            comment_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    std::fs::write(&comment_path, "Comment two.\n").unwrap();
+    cmd()
+        .current_dir(tmp.path())
+        .env("USER", "bob")
+        .args([
+            "comment",
+            &task_id,
+            "--body-file",
+            comment_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let task_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    let task_body = task_file.splitn(3, "---").nth(2).unwrap_or("");
+    let one_pos = task_body
+        .find("Comment one.")
+        .expect("first comment missing");
+    let two_pos = task_body
+        .find("Comment two.")
+        .expect("second comment missing");
+    assert!(one_pos < two_pos, "comments should accumulate in order");
+    assert!(task_body.contains(&format!("### {} alice", today)));
+    assert!(task_body.contains(&format!("### {} bob", today)));
+    assert_eq!(
+        task_body.matches("## Comments").count(),
+        1,
+        "should have a single Comments section"
+    );
+
+    // EPIC
+    let epic_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["epic", "Comment epic"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    std::fs::write(&comment_path, "Epic comment.\n").unwrap();
+    cmd()
+        .current_dir(tmp.path())
+        .env("USER", "carol")
+        .args([
+            "comment",
+            &epic_id,
+            "--body-file",
+            comment_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &epic_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Comments"))
+        .stdout(predicate::str::contains(format!("### {} carol", today)))
+        .stdout(predicate::str::contains("Epic comment."));
+
+    // PLAN
+    let plan_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["plan", &task_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    std::fs::write(&comment_path, "Plan comment.\n").unwrap();
+    cmd()
+        .current_dir(tmp.path())
+        .env("USER", "dave")
+        .args([
+            "comment",
+            &plan_id,
+            "--body-file",
+            comment_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &plan_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Comments"))
+        .stdout(predicate::str::contains(format!("### {} dave", today)))
+        .stdout(predicate::str::contains("Plan comment."));
+
+    // NOTE
+    let note_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["note", "Comment note"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    std::fs::write(&comment_path, "Note comment.\n").unwrap();
+    cmd()
+        .current_dir(tmp.path())
+        .env("USER", "erin")
+        .args([
+            "comment",
+            &note_id,
+            "--body-file",
+            comment_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &note_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Comments"))
+        .stdout(predicate::str::contains(format!("### {} erin", today)))
+        .stdout(predicate::str::contains("Note comment."));
+}
+
 // ── Body file ────────────────────────────────────────────────────────
 
 #[test]

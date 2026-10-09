@@ -246,14 +246,15 @@ fn test_tools_list() {
     assert!(tool_names.contains(&"markplane_archive"));
     assert!(tool_names.contains(&"markplane_unarchive"));
     assert!(tool_names.contains(&"markplane_move"));
+    assert!(tool_names.contains(&"markplane_comment"));
     assert!(
         !tool_names.contains(&"markplane_stale"),
         "markplane_stale should be removed"
     );
     assert_eq!(
         tool_names.len(),
-        15,
-        "Expected 15 tools, got: {:?}",
+        16,
+        "Expected 16 tools, got: {:?}",
         tool_names
     );
 }
@@ -654,6 +655,114 @@ fn test_tool_add_with_body_matches_cli() {
     let mcp_body = mcp_file.splitn(3, "---").nth(2).unwrap_or("").trim();
     assert_eq!(cli_body, mcp_body);
     assert!(cli_body.contains("Shared body content for parity."));
+}
+
+// ── Tool: markplane_comment ──────────────────────────────────────────────
+
+#[test]
+fn test_tool_comment_matches_cli() {
+    let tmp = setup_project();
+    let comment_text = "Parity comment body.\n";
+
+    let cli_add = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .args(["add", "Comment parity A"])
+        .output()
+        .unwrap();
+    assert!(cli_add.status.success());
+    let cli_id = String::from_utf8_lossy(&cli_add.stdout)
+        .split_whitespace()
+        .find(|w| w.starts_with("TASK-"))
+        .expect("CLI ID")
+        .to_string();
+
+    let mcp_add = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 27,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "title": "Comment parity B" }
+            }
+        }),
+    );
+    assert!(mcp_add["error"].is_null());
+    let mcp_id = extract_id_from_response(&mcp_add);
+
+    let body_path = tmp.path().join("comment.md");
+    std::fs::write(&body_path, comment_text).unwrap();
+
+    let cli_comment = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .env("USER", "alice")
+        .args([
+            "comment",
+            &cli_id,
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli_comment.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&cli_comment.stderr)
+    );
+
+    let mcp_response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 28,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_comment",
+                "arguments": {
+                    "id": mcp_id,
+                    "body": comment_text,
+                    "author": "alice"
+                }
+            }
+        }),
+    );
+    assert!(
+        mcp_response["error"].is_null(),
+        "MCP error: {}",
+        mcp_response
+    );
+    assert_ne!(
+        mcp_response["result"]["isError"], true,
+        "tool error: {}",
+        mcp_response["result"]["content"][0]["text"]
+    );
+
+    let cli_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", cli_id)),
+    )
+    .unwrap();
+    let mcp_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", mcp_id)),
+    )
+    .unwrap();
+
+    let cli_body = cli_file.splitn(3, "---").nth(2).unwrap_or("").trim();
+    let mcp_body = mcp_file.splitn(3, "---").nth(2).unwrap_or("").trim();
+
+    // Strip the title line (# Comment parity A/B) so remaining body including comments matches.
+    let normalize = |body: &str| -> String {
+        let mut lines = body.lines();
+        let _title = lines.next();
+        lines.collect::<Vec<_>>().join("\n").trim().to_string()
+    };
+    assert_eq!(normalize(cli_body), normalize(mcp_body));
+    assert!(cli_body.contains("## Comments"));
+    assert!(cli_body.contains("### "));
+    assert!(cli_body.contains("alice"));
+    assert!(cli_body.contains("Parity comment body."));
 }
 
 // ── Tool: markplane_show ─────────────────────────────────────────────────
