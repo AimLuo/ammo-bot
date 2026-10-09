@@ -1,7 +1,7 @@
 ---
 id: TASK-c6zs9
 title: 评论：comment 命令与 show 展示评论
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -12,7 +12,7 @@ depends_on:
 blocks:
 - TASK-k4tfw
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aA

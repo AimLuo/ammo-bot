@@ -1,7 +1,7 @@
 ---
 id: TASK-c7x96
 title: Map 条目类型
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -12,7 +12,7 @@ depends_on:
 blocks:
 - TASK-kjetr
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aD

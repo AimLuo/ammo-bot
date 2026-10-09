@@ -1,7 +1,7 @@
 ---
 id: TASK-kjdag
 title: 独立 PLAN、Plan tags 与 spec 模板
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -13,7 +13,7 @@ blocks:
 - TASK-62jjn
 - TASK-u34gh
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aB
