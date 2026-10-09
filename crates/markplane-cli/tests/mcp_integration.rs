@@ -286,6 +286,7 @@ fn test_resources_list() {
     assert!(uris.contains(&"markplane://summary"));
     assert!(uris.contains(&"markplane://active-work"));
     assert!(uris.contains(&"markplane://blocked"));
+    assert!(uris.contains(&"markplane://maps"));
 
     // PLAN and NOTE resource templates should be present
     let templates = &response["result"]["resourceTemplates"];
@@ -300,6 +301,7 @@ fn test_resources_list() {
     assert!(template_uris.contains(&"markplane://epic/{id}"));
     assert!(template_uris.contains(&"markplane://plan/{id}"));
     assert!(template_uris.contains(&"markplane://note/{id}"));
+    assert!(template_uris.contains(&"markplane://map/{id}"));
 }
 
 // ── Tool: markplane_summary ──────────────────────────────────────────────
@@ -2225,6 +2227,98 @@ fn test_resource_note_wrong_prefix() {
             .as_str()
             .unwrap()
             .contains("Expected NOTE-")
+    );
+}
+
+#[test]
+fn test_resource_maps() {
+    let tmp = setup_project();
+    let root = tmp.path().join(".markplane");
+    let project = markplane_core::Project::new(root);
+    let map = project.create_map("MCP Map", vec![], None, None).unwrap();
+    project.generate_context_maps().unwrap();
+
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 220,
+            "method": "resources/read",
+            "params": { "uri": "markplane://maps" }
+        }),
+    );
+
+    assert!(response["error"].is_null());
+    let contents = &response["result"]["contents"];
+    assert_eq!(contents[0]["uri"], "markplane://maps");
+    assert_eq!(contents[0]["mimeType"], "text/markdown");
+    let text = contents[0]["text"].as_str().unwrap();
+    assert!(text.contains("Active Maps"));
+    assert!(text.contains(&map.id));
+    assert!(text.contains("MCP Map"));
+}
+
+#[test]
+fn test_resource_map_item() {
+    let tmp = setup_project();
+    let root = tmp.path().join(".markplane");
+    let project = markplane_core::Project::new(root);
+    let map = project
+        .create_map("Map resource test", vec![], None, None)
+        .unwrap();
+
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 221,
+            "method": "resources/read",
+            "params": { "uri": format!("markplane://map/{}", map.id) }
+        }),
+    );
+
+    assert!(response["error"].is_null());
+    let text = response["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(text.contains(&map.id));
+    assert!(text.contains("Map resource test"));
+    assert!(text.contains("## Destination"));
+}
+
+#[test]
+fn test_resource_map_wrong_prefix() {
+    let tmp = setup_project();
+    let root = tmp.path().join(".markplane");
+    let project = markplane_core::Project::new(root);
+    let task = project
+        .create_task(
+            "Not a map",
+            "feature",
+            markplane_core::Priority::Medium,
+            markplane_core::Effort::Small,
+            None,
+            None,
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
+
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 222,
+            "method": "resources/read",
+            "params": { "uri": format!("markplane://map/{}", task.id) }
+        }),
+    );
+
+    assert!(response["error"].is_object());
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Expected MAP-")
     );
 }
 

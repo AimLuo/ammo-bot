@@ -34,6 +34,12 @@ pub fn list_resources() -> Value {
                 "name": "Template Manifest",
                 "description": "Template configuration showing available templates for each item kind",
                 "mimeType": "text/yaml"
+            },
+            {
+                "uri": "markplane://maps",
+                "name": "Active Maps",
+                "description": "Context summary of active maps (.context/maps.md)",
+                "mimeType": "text/markdown"
             }
         ],
         "resourceTemplates": [
@@ -60,6 +66,12 @@ pub fn list_resources() -> Value {
                 "name": "Note",
                 "description": "Full content of a note by ID",
                 "mimeType": "text/markdown"
+            },
+            {
+                "uriTemplate": "markplane://map/{id}",
+                "name": "Map",
+                "description": "Full content of a map by ID",
+                "mimeType": "text/markdown"
             }
         ]
     })
@@ -72,6 +84,7 @@ pub fn read_resource(id: Value, project: &Project, uri: &str) -> JsonRpcResponse
         "markplane://active-work" => read_active_work(project),
         "markplane://blocked" => read_blocked(project),
         "markplane://templates" => read_templates(project),
+        "markplane://maps" => read_maps(project),
         _ if uri.starts_with("markplane://task/") => {
             let item_id = &uri["markplane://task/".len()..];
             if item_id.is_empty() {
@@ -115,6 +128,17 @@ pub fn read_resource(id: Value, project: &Project, uri: &str) -> JsonRpcResponse
                 );
             }
             read_note_item(project, item_id)
+        }
+        _ if uri.starts_with("markplane://map/") => {
+            let item_id = &uri["markplane://map/".len()..];
+            if item_id.is_empty() {
+                return JsonRpcResponse::error(
+                    id,
+                    INVALID_PARAMS,
+                    "Missing item ID in resource URI: markplane://map/{id}".to_string(),
+                );
+            }
+            read_map_item(project, item_id)
         }
         _ => {
             return JsonRpcResponse::error(
@@ -290,6 +314,24 @@ fn read_note_item(project: &Project, item_id: &str) -> Result<String, String> {
     let (prefix, _) = parse_id(item_id).map_err(|e| e.to_string())?;
     if prefix != IdPrefix::Note {
         return Err(format!("Expected NOTE- ID, got: {}", item_id));
+    }
+    let path = project.item_path(item_id).map_err(|e| e.to_string())?;
+    fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+fn read_maps(project: &Project) -> Result<String, String> {
+    let maps_path = project.root().join(".context/maps.md");
+    if let Ok(content) = fs::read_to_string(&maps_path) {
+        return Ok(content);
+    }
+    project.generate_context_maps().map_err(|e| e.to_string())?;
+    fs::read_to_string(&maps_path).map_err(|e| e.to_string())
+}
+
+fn read_map_item(project: &Project, item_id: &str) -> Result<String, String> {
+    let (prefix, _) = parse_id(item_id).map_err(|e| e.to_string())?;
+    if prefix != IdPrefix::Map {
+        return Err(format!("Expected MAP- ID, got: {}", item_id));
     }
     let path = project.item_path(item_id).map_err(|e| e.to_string())?;
     fs::read_to_string(&path).map_err(|e| e.to_string())

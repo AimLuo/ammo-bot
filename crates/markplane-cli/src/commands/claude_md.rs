@@ -10,6 +10,8 @@ This project uses Markplane for project management. Key files:
 - `.markplane/.context/summary.md` - Current project state
 - `.markplane/backlog/INDEX.md` - All work items
 - `.markplane/plans/INDEX.md` - Implementation plans
+- `.markplane/maps/INDEX.md` - Active wayfinder maps
+- `.context/maps.md` - Active maps context for agents
 When working on a task, read the relevant task item and its linked plan first."#;
 
 pub fn run() -> anyhow::Result<()> {

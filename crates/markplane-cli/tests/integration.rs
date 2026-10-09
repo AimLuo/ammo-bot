@@ -3275,14 +3275,7 @@ fn test_add_map_accepts_wayfinder_types_rejects_feature() {
 
     let ok = cmd()
         .current_dir(tmp.path())
-        .args([
-            "add",
-            "Grill this",
-            "--map",
-            &map_id,
-            "--type",
-            "grilling",
-        ])
+        .args(["add", "Grill this", "--map", &map_id, "--type", "grilling"])
         .output()
         .unwrap();
     assert!(
@@ -3304,7 +3297,14 @@ fn test_add_map_accepts_wayfinder_types_rejects_feature() {
 
     let bad = cmd()
         .current_dir(tmp.path())
-        .args(["add", "Not a decision", "--map", &map_id, "--type", "feature"])
+        .args([
+            "add",
+            "Not a decision",
+            "--map",
+            &map_id,
+            "--type",
+            "feature",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -3322,7 +3322,14 @@ fn test_add_map_accepts_wayfinder_types_rejects_feature() {
     for ty in ["research", "prototype", "task"] {
         let out = cmd()
             .current_dir(tmp.path())
-            .args(["add", &format!("Ticket {ty}"), "--map", &map_id, "--type", ty])
+            .args([
+                "add",
+                &format!("Ticket {ty}"),
+                "--map",
+                &map_id,
+                "--type",
+                ty,
+            ])
             .output()
             .unwrap();
         assert!(
@@ -3365,14 +3372,7 @@ fn test_map_mutex_with_epic_and_plan_on_add_and_link() {
     let map_epic = cmd()
         .current_dir(tmp.path())
         .args([
-            "add",
-            "Both",
-            "--map",
-            &map_id,
-            "--epic",
-            &epic_id,
-            "--type",
-            "grilling",
+            "add", "Both", "--map", &map_id, "--epic", &epic_id, "--type", "grilling",
         ])
         .output()
         .unwrap();
@@ -3530,7 +3530,14 @@ fn test_ls_map_and_frontier() {
 
     let outsider_out = cmd()
         .current_dir(tmp.path())
-        .args(["add", "Outsider", "--map", &other_map, "--type", "prototype"])
+        .args([
+            "add",
+            "Outsider",
+            "--map",
+            &other_map,
+            "--type",
+            "prototype",
+        ])
         .output()
         .unwrap();
     let outsider_id = extract_id(&outsider_out.stdout);
@@ -3612,4 +3619,21 @@ fn test_ls_map_and_frontier() {
     let dep_pos = ordered_stdout.find(&dependent_id).unwrap();
     let later_pos = ordered_stdout.find(&later_id).unwrap();
     assert!(dep_pos < later_pos, "frontier should be sorted by position");
+}
+
+#[test]
+fn test_claude_md_includes_maps_paths() {
+    let tmp = setup_project();
+    // Seed a local CLAUDE.md so walk-up does not pick a parent repo file.
+    std::fs::write(tmp.path().join("CLAUDE.md"), "# Fixture\n").unwrap();
+    cmd()
+        .current_dir(tmp.path())
+        .args(["claude-md"])
+        .assert()
+        .success();
+
+    let content = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+    assert!(content.contains("## Project Management"));
+    assert!(content.contains(".markplane/maps/INDEX.md"));
+    assert!(content.contains(".context/maps.md"));
 }
