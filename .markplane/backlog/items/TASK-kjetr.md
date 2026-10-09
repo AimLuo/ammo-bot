@@ -1,7 +1,7 @@
 ---
 id: TASK-kjetr
 title: Decision ticket：add --map 与 ls --map
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium
