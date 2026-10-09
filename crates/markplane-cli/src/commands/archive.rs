@@ -1,5 +1,5 @@
 use colored::Colorize;
-use markplane_core::{EpicStatus, NoteStatus, PlanStatus, Project, QueryFilter};
+use markplane_core::{EpicStatus, MapStatus, NoteStatus, PlanStatus, Project, QueryFilter};
 
 pub fn run(id: Option<String>, all_done: bool, dry_run: bool) -> anyhow::Result<()> {
     let project = Project::from_current_dir()?;
@@ -59,6 +59,15 @@ pub fn run(id: Option<String>, all_done: bool, dry_run: bool) -> anyhow::Result<
     for doc in &notes {
         let fm = &doc.frontmatter;
         if fm.status == NoteStatus::Archived {
+            to_archive.push((fm.id.clone(), format!("{} ({})", fm.title, fm.status)));
+        }
+    }
+
+    // Maps: done or abandoned
+    let maps = project.list_maps()?;
+    for doc in &maps {
+        let fm = &doc.frontmatter;
+        if matches!(fm.status, MapStatus::Done | MapStatus::Abandoned) {
             to_archive.push((fm.id.clone(), format!("{} ({})", fm.title, fm.status)));
         }
     }

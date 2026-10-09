@@ -31,6 +31,7 @@ pub fn run(name: Option<String>, description: String, empty: bool) -> anyhow::Re
         println!("  ├── backlog/          (TASK-NNN)");
         println!("  ├── plans/            (PLAN-NNN)");
         println!("  ├── notes/            (NOTE-NNN)");
+        println!("  ├── maps/             (MAP-NNN)");
         println!("  ├── templates/");
         println!("  └── .context/");
         println!();
@@ -50,6 +51,7 @@ pub fn run(name: Option<String>, description: String, empty: bool) -> anyhow::Re
         println!("  ├── backlog/          (TASK-NNN)");
         println!("  ├── plans/            (PLAN-NNN)");
         println!("  ├── notes/            (NOTE-NNN)");
+        println!("  ├── maps/             (MAP-NNN)");
         println!("  ├── templates/");
         println!("  └── .context/");
         println!();

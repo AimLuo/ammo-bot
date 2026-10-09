@@ -19,6 +19,7 @@ impl Project {
         let epics = self.list_epics()?;
         let plans = self.list_plans()?;
         let notes = self.list_notes()?;
+        let maps = self.list_maps()?;
 
         let active_epics = epics
             .iter()
@@ -42,6 +43,10 @@ impl Project {
             .iter()
             .filter(|n| n.frontmatter.status != NoteStatus::Archived)
             .count();
+        let active_maps = maps
+            .iter()
+            .filter(|m| m.frontmatter.status == MapStatus::Active)
+            .count();
 
         let mut content = format!(
             "{}\n# Markplane Project Index\n\n\
@@ -52,11 +57,18 @@ impl Project {
              | Backlog | [backlog/](backlog/INDEX.md) | All work items | {} open items |\n\
              | Plans | [plans/](plans/INDEX.md) | Implementation details | {} active plans |\n\
              | Notes | [notes/](notes/INDEX.md) | Research & ideas | {} active notes |\n\
+             | Maps | [maps/](maps/INDEX.md) | Wayfinder routes | {} active maps |\n\
              | AI Context | [.context/](.context/summary.md) | Generated summaries | Auto-updated |\n\n\
              ## System Info\n\
              - Last sync: {}\n\
              - Config: [config.yaml](config.yaml)\n",
-            GENERATED_HEADER, active_epics, open_backlog, active_plans, active_notes, now,
+            GENERATED_HEADER,
+            active_epics,
+            open_backlog,
+            active_plans,
+            active_notes,
+            active_maps,
+            now,
         );
 
         // Project Documentation section (from configured documentation_paths)
@@ -459,6 +471,58 @@ impl Project {
         Ok(())
     }
 
+    /// Regenerate maps/INDEX.md.
+    pub fn generate_maps_index(&self) -> Result<()> {
+        let maps = self.list_maps()?;
+
+        let mut content = format!("{}\n# Maps Index\n\n", GENERATED_HEADER);
+
+        let active_maps: Vec<_> = maps
+            .iter()
+            .filter(|m| m.frontmatter.status == MapStatus::Active)
+            .collect();
+        if !active_maps.is_empty() {
+            content.push_str("## Active Maps\n\n");
+            content.push_str("| Map | Status | Tags |\n");
+            content.push_str("|-----|--------|------|\n");
+            for map in &active_maps {
+                let tags_str = if map.frontmatter.tags.is_empty() {
+                    "—".to_string()
+                } else {
+                    map.frontmatter.tags.join(", ")
+                };
+                content.push_str(&format!(
+                    "| {} {} | {} | {} |\n",
+                    item_link(&map.frontmatter.id),
+                    map.frontmatter.title,
+                    map.frontmatter.status,
+                    tags_str
+                ));
+            }
+            content.push('\n');
+        }
+
+        let closed_maps: Vec<_> = maps
+            .iter()
+            .filter(|m| matches!(m.frontmatter.status, MapStatus::Done | MapStatus::Abandoned))
+            .collect();
+        if !closed_maps.is_empty() {
+            content.push_str("## Closed Maps\n\n");
+            for map in &closed_maps {
+                content.push_str(&format!(
+                    "- {} {} ({})\n",
+                    item_link(&map.frontmatter.id),
+                    map.frontmatter.title,
+                    map.frontmatter.status
+                ));
+            }
+            content.push('\n');
+        }
+
+        fs::write(self.root().join("maps/INDEX.md"), content)?;
+        Ok(())
+    }
+
     /// Regenerate all INDEX.md files.
     pub fn sync_all_indexes(&self) -> Result<()> {
         self.generate_root_index()?;
@@ -466,6 +530,7 @@ impl Project {
         self.generate_roadmap_index()?;
         self.generate_plans_index()?;
         self.generate_notes_index()?;
+        self.generate_maps_index()?;
         Ok(())
     }
 }
@@ -490,6 +555,7 @@ fn cross_link(id: &str) -> String {
         Some("TASK") => "backlog",
         Some("PLAN") => "plans",
         Some("NOTE") => "notes",
+        Some("MAP") => "maps",
         _ => return id.to_string(),
     };
     format!("[{}](../{}/items/{}.md)", id, dir, id)

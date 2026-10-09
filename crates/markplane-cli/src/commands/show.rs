@@ -1,5 +1,5 @@
 use colored::Colorize;
-use markplane_core::{Epic, IdPrefix, MarkplaneDocument, Note, Plan, Project, Task, parse_id};
+use markplane_core::{Epic, IdPrefix, Map, MarkplaneDocument, Note, Plan, Project, Task, parse_id};
 
 use super::formatting::{colorize_priority, colorize_status};
 
@@ -12,6 +12,7 @@ pub fn run(id: String) -> anyhow::Result<()> {
         IdPrefix::Epic => show_epic(&project, &id)?,
         IdPrefix::Plan => show_plan(&project, &id)?,
         IdPrefix::Note => show_note(&project, &id)?,
+        IdPrefix::Map => show_map(&project, &id)?,
     }
 
     Ok(())
@@ -154,6 +155,39 @@ fn show_note(project: &Project, id: &str) -> anyhow::Result<()> {
 
     if !fm.tags.is_empty() {
         println!("  Tags:    {}", fm.tags.join(", "));
+    }
+    if !fm.related.is_empty() {
+        println!("  Related: {}", fm.related.join(", "));
+    }
+    println!("  Created: {}", fm.created);
+    println!("  Updated: {}", fm.updated);
+
+    if !doc.body.trim().is_empty() {
+        println!();
+        println!("{}", "─".repeat(60).dimmed());
+        println!("{}", doc.body.trim());
+    }
+
+    Ok(())
+}
+
+fn show_map(project: &Project, id: &str) -> anyhow::Result<()> {
+    let doc: MarkplaneDocument<Map> = project.read_item(id)?;
+    let fm = &doc.frontmatter;
+
+    println!("{}", fm.id.bold());
+    println!("{}", fm.title.bold().white());
+    println!();
+    println!(
+        "  Status:  {}",
+        colorize_status(&fm.status.to_string(), None)
+    );
+
+    if !fm.tags.is_empty() {
+        println!("  Tags:    {}", fm.tags.join(", "));
+    }
+    if !fm.specs.is_empty() {
+        println!("  Specs:   {}", fm.specs.join(", "));
     }
     if !fm.related.is_empty() {
         println!("  Related: {}", fm.related.join(", "));

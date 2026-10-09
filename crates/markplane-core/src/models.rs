@@ -17,7 +17,7 @@ pub const RANDOM_ID_ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
 /// Length of the random suffix in generated IDs.
 pub const RANDOM_ID_LENGTH: usize = 5;
 
-/// Prefix for Markplane item IDs: EPIC, TASK, PLAN, NOTE.
+/// Prefix for Markplane item IDs: EPIC, TASK, PLAN, NOTE, MAP.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum IdPrefix {
@@ -25,6 +25,7 @@ pub enum IdPrefix {
     Task,
     Plan,
     Note,
+    Map,
 }
 
 impl IdPrefix {
@@ -35,6 +36,7 @@ impl IdPrefix {
             IdPrefix::Task => "TASK",
             IdPrefix::Plan => "PLAN",
             IdPrefix::Note => "NOTE",
+            IdPrefix::Map => "MAP",
         }
     }
 
@@ -45,6 +47,7 @@ impl IdPrefix {
             IdPrefix::Task => "backlog",
             IdPrefix::Plan => "plans",
             IdPrefix::Note => "notes",
+            IdPrefix::Map => "maps",
         }
     }
 
@@ -55,6 +58,7 @@ impl IdPrefix {
             "TASK" => Ok(IdPrefix::Task),
             "PLAN" => Ok(IdPrefix::Plan),
             "NOTE" => Ok(IdPrefix::Note),
+            "MAP" => Ok(IdPrefix::Map),
             _ => Err(MarkplaneError::InvalidId(format!("Unknown prefix: {}", s))),
         }
     }
@@ -344,6 +348,38 @@ impl FromStr for NoteStatus {
     }
 }
 
+/// Fixed statuses for Map items (not configurable).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MapStatus {
+    Active,
+    Done,
+    Abandoned,
+}
+
+impl fmt::Display for MapStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MapStatus::Active => write!(f, "active"),
+            MapStatus::Done => write!(f, "done"),
+            MapStatus::Abandoned => write!(f, "abandoned"),
+        }
+    }
+}
+
+impl FromStr for MapStatus {
+    type Err = MarkplaneError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "active" => Ok(MapStatus::Active),
+            "done" => Ok(MapStatus::Done),
+            "abandoned" => Ok(MapStatus::Abandoned),
+            _ => Err(MarkplaneError::InvalidStatus(s.into())),
+        }
+    }
+}
+
 // ── Classification Types ──────────────────────────────────────────────────
 
 /// Default task types when not configured.
@@ -517,6 +553,21 @@ pub struct Note {
     pub status: NoteStatus,
     #[serde(rename = "type")]
     pub note_type: String,
+    #[serde(default)]
+    pub related: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub created: NaiveDate,
+    pub updated: NaiveDate,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Map {
+    pub id: String,
+    pub title: String,
+    pub status: MapStatus,
+    #[serde(default)]
+    pub specs: Vec<String>,
     #[serde(default)]
     pub related: Vec<String>,
     #[serde(default)]
@@ -877,6 +928,7 @@ updated: 2026-02-09
             ("TASK-042", IdPrefix::Task, "042"),
             ("PLAN-003", IdPrefix::Plan, "003"),
             ("NOTE-007", IdPrefix::Note, "007"),
+            ("MAP-k7x9m", IdPrefix::Map, "k7x9m"),
             ("TASK-k7x9m", IdPrefix::Task, "k7x9m"),
         ];
         for (input, expected_prefix, expected_suffix) in cases {

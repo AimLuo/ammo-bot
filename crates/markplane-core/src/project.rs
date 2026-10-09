@@ -82,6 +82,16 @@ pub struct NoteUpdate {
     pub body: Option<String>,
 }
 
+/// Fields that can be updated on a Map.
+#[derive(Clone, Debug, Default)]
+pub struct MapUpdate {
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub add_tags: Vec<String>,
+    pub remove_tags: Vec<String>,
+    pub body: Option<String>,
+}
+
 /// Generic union of all per-type update fields, for MCP/CLI dispatch.
 /// Positioning directive for `move_item()`.
 #[derive(Clone, Debug)]
@@ -211,6 +221,9 @@ const LAYOUT_DIRS: &[&str] = &[
     "notes",
     "notes/items",
     "notes/archive",
+    "maps",
+    "maps/items",
+    "maps/archive",
     ".context",
 ];
 
@@ -637,6 +650,44 @@ impl Project {
         Ok(note)
     }
 
+    /// Create a new map.
+    pub fn create_map(
+        &self,
+        title: &str,
+        tags: Vec<String>,
+        template: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<Map> {
+        validate_title_length(title)?;
+        let id = self.next_id(&IdPrefix::Map)?;
+        let today = Local::now().date_naive();
+
+        let map = Map {
+            id,
+            title: title.to_string(),
+            status: MapStatus::Active,
+            specs: vec![],
+            tags,
+            related: vec![],
+            created: today,
+            updated: today,
+        };
+
+        let body = self.resolve_create_body("map", title, template, None, body)?;
+        let doc = MarkplaneDocument {
+            frontmatter: &map,
+            body,
+        };
+        let content = write_frontmatter(&doc)?;
+
+        let items_dir = self.item_dir(&IdPrefix::Map).join("items");
+        fs::create_dir_all(&items_dir)?;
+        let path = items_dir.join(format!("{}.md", map.id));
+        write_new_file(&path, &content)?;
+
+        Ok(map)
+    }
+
     /// Read any item by ID, deserializing the frontmatter into type `T`.
     pub fn read_item<T: DeserializeOwned>(&self, id: &str) -> Result<MarkplaneDocument<T>> {
         let path = self.item_path(id)?;
@@ -745,6 +796,12 @@ impl Project {
                 doc.frontmatter.updated = today;
                 self.write_item(id, &doc)?;
             }
+            IdPrefix::Map => {
+                let mut doc: MarkplaneDocument<Map> = self.read_item(id)?;
+                doc.frontmatter.status = new_status.parse()?;
+                doc.frontmatter.updated = today;
+                self.write_item(id, &doc)?;
+            }
         }
 
         Ok(())
@@ -780,6 +837,12 @@ impl Project {
             }
             IdPrefix::Note => {
                 let mut doc: MarkplaneDocument<Note> = self.read_item(id)?;
+                doc.body = append_comment_to_body(&doc.body, &date, author, text);
+                doc.frontmatter.updated = today;
+                self.write_item(id, &doc)?;
+            }
+            IdPrefix::Map => {
+                let mut doc: MarkplaneDocument<Map> = self.read_item(id)?;
                 doc.body = append_comment_to_body(&doc.body, &date, author, text);
                 doc.frontmatter.updated = today;
                 self.write_item(id, &doc)?;
@@ -912,6 +975,29 @@ impl Project {
         if let Some(ref note_type) = u.note_type {
             self.validate_note_type(note_type)?;
             fm.note_type = note_type.clone();
+        }
+        apply_tag_changes(&mut fm.tags, &u.add_tags, &u.remove_tags);
+        if let Some(ref new_body) = u.body {
+            doc.body = new_body.clone();
+        }
+        fm.updated = Local::now().date_naive();
+        self.write_item(id, &doc)
+    }
+
+    /// Update properties on a Map.
+    ///
+    /// Holds an advisory file lock for the full read-modify-write cycle.
+    pub fn update_map(&self, id: &str, u: &MapUpdate) -> Result<()> {
+        let _lock = self.lock_item(id)?;
+        let mut doc: MarkplaneDocument<Map> = self.read_item(id)?;
+        let fm = &mut doc.frontmatter;
+
+        if let Some(ref title) = u.title {
+            validate_title_length(title)?;
+            fm.title = title.clone();
+        }
+        if let Some(ref status) = u.status {
+            fm.status = status.parse()?;
         }
         apply_tag_changes(&mut fm.tags, &u.add_tags, &u.remove_tags);
         if let Some(ref new_body) = u.body {
@@ -1080,6 +1166,55 @@ impl Project {
                         title: fields.title,
                         status: fields.status,
                         note_type: fields.note_type,
+                        add_tags: fields.add_tags,
+                        remove_tags: fields.remove_tags,
+                        body: None,
+                    },
+                )
+            }
+            IdPrefix::Map => {
+                if fields.priority.is_some() {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support the priority field".into(),
+                    ));
+                }
+                if fields.effort.is_some() {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support the effort field".into(),
+                    ));
+                }
+                if fields.item_type.is_some() {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support the type field".into(),
+                    ));
+                }
+                if fields.note_type.is_some() {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support the note_type field".into(),
+                    ));
+                }
+                if !matches!(fields.assignee, Patch::Unchanged) {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support the assignee field".into(),
+                    ));
+                }
+                if !matches!(fields.position, Patch::Unchanged) {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support the position field".into(),
+                    ));
+                }
+                if !matches!(fields.started, Patch::Unchanged)
+                    || !matches!(fields.target, Patch::Unchanged)
+                {
+                    return Err(MarkplaneError::Config(
+                        "Maps do not support started/target fields".into(),
+                    ));
+                }
+                self.update_map(
+                    id,
+                    &MapUpdate {
+                        title: fields.title,
+                        status: fields.status,
                         add_tags: fields.add_tags,
                         remove_tags: fields.remove_tags,
                         body: None,
@@ -1326,6 +1461,18 @@ impl Project {
             }
         }
 
+        // Scan maps for references to target_id
+        let maps = self.list_maps()?;
+        for doc in &maps {
+            let fm = &doc.frontmatter;
+            if fm.id == target_id {
+                continue;
+            }
+            if fm.related.iter().any(|r| r == target_id) {
+                refs.push((fm.id.clone(), LinkRelation::Related, LinkAction::Remove));
+            }
+        }
+
         Ok(refs)
     }
 
@@ -1478,6 +1625,7 @@ impl Project {
         )?;
         fs::write(root.join("plans/INDEX.md"), templates::PLANS_INDEX_TEMPLATE)?;
         fs::write(root.join("notes/INDEX.md"), templates::NOTES_INDEX_TEMPLATE)?;
+        fs::write(root.join("maps/INDEX.md"), templates::MAPS_INDEX_TEMPLATE)?;
         // Write special note files
         fs::write(root.join("notes/ideas.md"), templates::IDEAS_TEMPLATE)?;
         fs::write(
@@ -1524,6 +1672,7 @@ impl Project {
             root.join("templates/note-analysis.md"),
             templates::NOTE_ANALYSIS_TEMPLATE,
         )?;
+        fs::write(root.join("templates/map.md"), templates::MAP_TEMPLATE)?;
 
         Ok(Project::new(root))
     }

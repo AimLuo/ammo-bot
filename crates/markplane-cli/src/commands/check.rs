@@ -1,7 +1,7 @@
 use colored::Colorize;
 use markplane_core::{
-    LinkAction, LinkRelation, Project, detect_cycles, find_orphans, validate_reciprocal_links,
-    validate_references, validate_task_statuses,
+    LinkAction, LinkRelation, Project, detect_cycles, find_orphans, missing_map_sections,
+    validate_reciprocal_links, validate_references, validate_task_statuses,
 };
 
 fn field_to_relation(forward_field: &str) -> Option<LinkRelation> {
@@ -136,6 +136,32 @@ pub fn run(orphans: bool, fix: bool) -> anyhow::Result<()> {
             for id in &orphan_list {
                 println!("  {}", id);
             }
+        }
+    }
+
+    // Map section warnings (never fail the exit code)
+    let maps = project.list_maps()?;
+    let mut map_warnings: Vec<(String, Vec<&'static str>)> = Vec::new();
+    for doc in &maps {
+        let missing = missing_map_sections(&doc.body);
+        if !missing.is_empty() {
+            map_warnings.push((doc.frontmatter.id.clone(), missing));
+        }
+    }
+    if map_warnings.is_empty() {
+        println!("{} All maps have required sections.", "✓".green());
+    } else {
+        println!(
+            "\n{} {} map(s) with missing section(s):\n",
+            "!".yellow(),
+            map_warnings.len()
+        );
+        for (id, missing) in &map_warnings {
+            println!(
+                "  {} missing section(s): {}",
+                id.dimmed(),
+                missing.join(", ")
+            );
         }
     }
 

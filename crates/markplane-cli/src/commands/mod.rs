@@ -13,6 +13,7 @@ mod graph;
 mod init;
 mod link;
 mod ls;
+mod map;
 mod mcp;
 mod metrics;
 mod note;
@@ -98,7 +99,7 @@ pub enum Commands {
 
     /// List items
     Ls {
-        /// Item kind to list: tasks (default), epics, plans, notes
+        /// Item kind to list: tasks (default), epics, plans, notes, maps
         #[command(subcommand)]
         kind: Option<LsKind>,
 
@@ -227,9 +228,24 @@ pub enum Commands {
         body_file: Option<String>,
     },
 
+    /// Create a new map
+    Map {
+        /// Map title
+        title: String,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// Template name override
+        #[arg(long)]
+        template: Option<String>,
+        /// Read body from file (or "-" for stdin); placed after the title heading
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+    },
+
     /// Update properties on any item
     Update {
-        /// Item ID (e.g. TASK-042, EPIC-001, PLAN-003, NOTE-007)
+        /// Item ID (e.g. TASK-042, EPIC-001, PLAN-003, NOTE-007, MAP-x)
         id: String,
         /// New title
         #[arg(long)]
@@ -384,6 +400,8 @@ pub enum LsKind {
     Plans,
     /// List notes
     Notes,
+    /// List maps
+    Maps,
 }
 
 pub fn execute(cmd: Commands) -> anyhow::Result<()> {
@@ -453,6 +471,12 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             template,
             body_file,
         } => note::run(title, r#type, tags, template, body_file),
+        Commands::Map {
+            title,
+            tags,
+            template,
+            body_file,
+        } => map::run(title, tags, template, body_file),
         Commands::Update {
             id,
             title,

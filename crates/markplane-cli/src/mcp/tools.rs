@@ -53,8 +53,8 @@ pub fn list_tools(project: &Project) -> Value {
             "Filter by status (draft, backlog, planned, in-progress, done, cancelled)".to_string()
         });
     let update_status_desc = config.as_ref()
-        .map(|c| format!("New status value. Task: {}. Epic: now/next/later/done. Plan: draft/approved/in-progress/done. Note: draft/active/archived.", c.workflows.task.all_statuses().join("/")))
-        .unwrap_or_else(|| "New status value. Task: draft/backlog/planned/in-progress/done/cancelled. Epic: now/next/later/done. Plan: draft/approved/in-progress/done. Note: draft/active/archived.".to_string());
+        .map(|c| format!("New status value. Task: {}. Epic: now/next/later/done. Plan: draft/approved/in-progress/done. Note: draft/active/archived. Map: active/done/abandoned.", c.workflows.task.all_statuses().join("/")))
+        .unwrap_or_else(|| "New status value. Task: draft/backlog/planned/in-progress/done/cancelled. Epic: now/next/later/done. Plan: draft/approved/in-progress/done. Note: draft/active/archived. Map: active/done/abandoned.".to_string());
     json!({
         "tools": [
             {
@@ -74,7 +74,7 @@ pub fn list_tools(project: &Project) -> Value {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "Item kind to query: tasks (default), epics, plans, or notes"
+                            "description": "Item kind to query: tasks (default), epics, plans, notes, or maps"
                         },
                         "status": {
                             "type": "array",
@@ -141,7 +141,7 @@ pub fn list_tools(project: &Project) -> Value {
                         },
                         "kind": {
                             "type": "string",
-                            "description": "Item kind: task (default), epic, plan, or note"
+                            "description": "Item kind: task (default), epic, plan, note, or map"
                         },
                         "type": {
                             "type": "string",
@@ -667,9 +667,26 @@ fn handle_query(project: &Project, args: &Value) -> Result<String, String> {
                 })
                 .collect()
         }
+        "maps" => {
+            let items = project
+                .list_maps_filtered(archived)
+                .map_err(|e| e.to_string())?;
+            items
+                .iter()
+                .map(|doc| {
+                    let fm = &doc.frontmatter;
+                    json!({
+                        "id": fm.id,
+                        "title": fm.title,
+                        "status": fm.status.to_string(),
+                        "updated": fm.updated.to_string(),
+                    })
+                })
+                .collect()
+        }
         _ => {
             return Err(format!(
-                "Unknown kind: {}. Expected tasks, epics, plans, or notes",
+                "Unknown kind: {}. Expected tasks, epics, plans, notes, or maps",
                 kind
             ));
         }
@@ -792,8 +809,21 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
             let result = json!({ "id": note.id, "title": note.title });
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
+        "map" => {
+            let tags: Vec<String> = args
+                .get("tags")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            let map = project
+                .create_map(title, tags, template, body)
+                .map_err(|e| e.to_string())?;
+
+            let result = json!({ "id": map.id, "title": map.title });
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
         _ => Err(format!(
-            "Unknown kind: {}. Expected task, epic, plan, or note",
+            "Unknown kind: {}. Expected task, epic, plan, note, or map",
             kind
         )),
     }
