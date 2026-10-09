@@ -1,7 +1,7 @@
 ---
 id: TASK-d3tdm
 title: 文档：README、docs 更新与 skills-workflow.md
-status: in-progress
+status: done
 priority: medium
 type: chore
 effort: medium
