@@ -1,7 +1,7 @@
 ---
 id: TASK-mbc9k
 title: Web UI：Backlog 隐藏 Decision ticket 与 Task→Map 跳转
-status: backlog
+status: in-progress
 priority: medium
 type: feature
 effort: medium
@@ -12,7 +12,7 @@ depends_on:
 blocks:
 - TASK-d3tdm
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aA
