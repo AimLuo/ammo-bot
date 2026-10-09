@@ -692,6 +692,8 @@ struct TaskResponse {
     tags: Vec<String>,
     epic: Option<String>,
     plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    map: Option<String>,
     depends_on: Vec<String>,
     blocks: Vec<String>,
     related: Vec<String>,
@@ -714,6 +716,7 @@ fn task_to_response(doc: &MarkplaneDocument<Task>) -> TaskResponse {
         tags: fm.tags.clone(),
         epic: fm.epic.clone(),
         plan: fm.plan.clone(),
+        map: fm.map.clone(),
         depends_on: fm.depends_on.clone(),
         blocks: fm.blocks.clone(),
         related: fm.related.clone(),

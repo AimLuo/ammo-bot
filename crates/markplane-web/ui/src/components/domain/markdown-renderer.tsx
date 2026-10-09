@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import { WikiLinkChip } from "./wiki-link-chip";
 import type { ReactNode } from "react";
 
-const WIKI_LINK_REGEX = /\[\[(TASK|EPIC|PLAN|NOTE)-\d{3,}\]\]/g;
+const WIKI_LINK_REGEX = /\[\[((?:TASK|EPIC|PLAN|NOTE|MAP)-[A-Za-z0-9]+)\]\]/g;
 
 function processWikiLinks(text: string): ReactNode[] {
   const parts: ReactNode[] = [];

@@ -14,13 +14,14 @@ import { Node, mergeAttributes } from "@tiptap/core";
  * - Serialize: state.write() outputs [[ID]] directly, bypassing text escaping
  */
 
-const WIKI_LINK_RE = /\[\[((?:TASK|EPIC|PLAN|NOTE)-\d{3,})\]\]/;
+const WIKI_LINK_RE = /\[\[((?:TASK|EPIC|PLAN|NOTE|MAP)-[A-Za-z0-9]+)\]\]/;
 
 const PREFIX_COLORS: Record<string, string> = {
   TASK: "var(--entity-task)",
   EPIC: "var(--entity-epic)",
   PLAN: "var(--entity-plan)",
   NOTE: "var(--entity-note)",
+  MAP: "var(--entity-map)",
 };
 
 export const WikiLink = Node.create({
