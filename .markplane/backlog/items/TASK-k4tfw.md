@@ -1,7 +1,7 @@
 ---
 id: TASK-k4tfw
 title: my-setup-matt-pocock-skills、Markplane tracker 文档与 link-skills.sh
-status: backlog
+status: in-progress
 priority: medium
 type: feature
 effort: medium
@@ -16,7 +16,7 @@ blocks:
 - TASK-bzast
 - TASK-d3tdm
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aC
