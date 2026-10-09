@@ -1,7 +1,7 @@
 ---
 id: TASK-c6zs9
 title: 评论：comment 命令与 show 展示评论
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium
