@@ -1,7 +1,7 @@
 ---
 id: TASK-pd65d
 title: 仓库接上游并清理上游 .markplane 数据
-status: backlog
+status: in-progress
 priority: high
 type: chore
 effort: medium
@@ -11,7 +11,7 @@ depends_on: []
 blocks:
 - TASK-bzast
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: a8

@@ -1,7 +1,7 @@
 ---
 id: TASK-ywvnb
 title: 创建类命令支持 --body-file
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -13,7 +13,7 @@ blocks:
 - TASK-kjdag
 - TASK-c7x96
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: a9
