@@ -1,3 +1,19 @@
+## 主空间
+
+=agent-space；勿改兄弟项目
+
+## 资料
+
+`research/`：开发中采集的资料。点名再读；清理由用户决定
+
+`docs/`：成稿文档（调研落地、PRD 等）
+
+`.tmp/`：临时文件；用户不必看，用完可删，agent 可复用
+
+## Git
+
+仅本地提交，不 push
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -57,6 +73,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed patterns, error handling, co
 - [Web UI Guide](docs/web-ui-guide.md) — Dashboard usage and development workflow
 - [Getting Started](docs/getting-started.md) — Step-by-step tutorial
 - [Releasing](docs/releasing.md) — Release process and versioning
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in Markplane (markplane CLI, .markplane/). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default triage roles map 1:1 to same-named Markplane tags. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
 
 ## Project Management
 
