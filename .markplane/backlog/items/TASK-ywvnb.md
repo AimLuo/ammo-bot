@@ -1,7 +1,7 @@
 ---
 id: TASK-ywvnb
 title: 创建类命令支持 --body-file
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium
