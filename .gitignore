@@ -1,13 +1,6 @@
 node_modules
 dist
 
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
 # misc
 .DS_Store
 *.pem
@@ -21,13 +14,6 @@ bun-debug.log*
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
-
-# Beads / Dolt
-.beads/
-.dolt/
-*.db
-.beads-credential-key
 
 .tmp/
 .worktrees/
