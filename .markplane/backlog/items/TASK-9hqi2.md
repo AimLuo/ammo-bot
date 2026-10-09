@@ -1,7 +1,7 @@
 ---
 id: TASK-9hqi2
 title: 把规划本 spec 的 wayfinder map 迁入 .markplane
-status: backlog
+status: in-progress
 priority: medium
 type: chore
 effort: medium
@@ -14,7 +14,7 @@ depends_on:
 - TASK-bzast
 blocks: []
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aE
