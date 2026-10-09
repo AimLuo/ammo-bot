@@ -1,7 +1,7 @@
 ---
 id: TASK-pd65d
 title: 仓库接上游并清理上游 .markplane 数据
-status: in-progress
+status: done
 priority: high
 type: chore
 effort: medium
