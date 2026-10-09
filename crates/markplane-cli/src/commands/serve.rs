@@ -20,9 +20,10 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use markplane_core::{
-    Effort, Epic, EpicStatus, EpicUpdate, LinkAction, LinkRelation, MarkplaneDocument,
+    Effort, Epic, EpicStatus, EpicUpdate, LinkAction, LinkRelation, Map, MarkplaneDocument,
     MarkplaneError, Note, NoteUpdate, Patch, Plan, PlanUpdate, Priority, Project, QueryFilter,
-    ScanScope, StatusCategory, Task, TaskUpdate, find_blocked_items, parse_id,
+    ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow, find_blocked_items,
+    find_frontier_items, parse_id, split_markdown_sections,
 };
 
 #[cfg(feature = "embed-ui")]
@@ -123,6 +124,8 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
         .route("/api/plans/{id}", get(get_plan).patch(update_plan))
         .route("/api/notes", get(get_notes).post(create_note))
         .route("/api/notes/{id}", get(get_note).patch(update_note))
+        .route("/api/maps", get(get_maps))
+        .route("/api/maps/{id}", get(get_map))
         .route("/api/items/{id}/archive", post(post_archive_item))
         .route("/api/items/{id}/unarchive", post(post_unarchive_item))
         .route("/api/link", post(post_link))
@@ -950,6 +953,216 @@ fn note_to_response(doc: &MarkplaneDocument<Note>) -> NoteResponse {
         created: fm.created.to_string(),
         updated: fm.updated.to_string(),
         body: doc.body.clone(),
+    }
+}
+
+// ── Map API types ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct MapListItemResponse {
+    id: String,
+    title: String,
+    status: String,
+    specs: Vec<String>,
+    related: Vec<String>,
+    tags: Vec<String>,
+    created: String,
+    updated: String,
+    decided_count: usize,
+    total_count: usize,
+    frontier_count: usize,
+}
+
+#[derive(Serialize)]
+struct MapTicketResponse {
+    id: String,
+    title: String,
+    #[serde(rename = "type")]
+    item_type: String,
+    status: String,
+    assignee: Option<String>,
+    depends_on: Vec<String>,
+    position: Option<String>,
+    question: String,
+    answer: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MapDetailResponse {
+    id: String,
+    title: String,
+    status: String,
+    specs: Vec<String>,
+    related: Vec<String>,
+    tags: Vec<String>,
+    created: String,
+    updated: String,
+    body: String,
+    destination: String,
+    not_yet_specified: Vec<String>,
+    out_of_scope: Vec<String>,
+    decided_count: usize,
+    total_count: usize,
+    frontier_count: usize,
+    tickets: Vec<MapTicketResponse>,
+}
+
+/// Parse markdown bullet lines from a Map body section.
+fn parse_section_bullets(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| {
+            let text = l
+                .strip_prefix("- ")
+                .or_else(|| l.strip_prefix("* "))
+                .or_else(|| l.strip_prefix("+ "))
+                .unwrap_or(l)
+                .trim();
+            if text.is_empty() {
+                return None;
+            }
+            // Skip template placeholders like "[Open questions…]"
+            if text.starts_with('[') && text.ends_with(']') {
+                return None;
+            }
+            Some(text.to_string())
+        })
+        .collect()
+}
+
+/// Extract Question / Answer from a Decision ticket body.
+fn ticket_question_answer(body: &str) -> (String, Option<String>) {
+    let sections = split_markdown_sections(body);
+    let answer = sections
+        .get("Answer")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    if let Some(q) = sections
+        .get("Question")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return (q.to_string(), answer);
+    }
+
+    // Fall back to body text before the first ## heading (minus a leading # title).
+    let mut preamble = String::new();
+    for line in body.lines() {
+        if line.trim_start().starts_with("## ") {
+            break;
+        }
+        if preamble.is_empty() && line.starts_with("# ") {
+            continue;
+        }
+        if !preamble.is_empty() {
+            preamble.push('\n');
+        }
+        preamble.push_str(line);
+    }
+    (preamble.trim().to_string(), answer)
+}
+
+fn map_ticket_counts(
+    tickets: &[MarkplaneDocument<Task>],
+    workflow: &TaskWorkflow,
+) -> (usize, usize, usize) {
+    let completed: HashSet<&str> = workflow
+        .statuses_in(StatusCategory::Completed)
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    let decided_count = tickets
+        .iter()
+        .filter(|t| completed.contains(t.frontmatter.status.as_str()))
+        .count();
+    let total_count = tickets.len();
+    let frontier_count = find_frontier_items(tickets, workflow).len();
+    (decided_count, total_count, frontier_count)
+}
+
+fn map_list_item(
+    doc: &MarkplaneDocument<Map>,
+    tickets: &[MarkplaneDocument<Task>],
+    workflow: &TaskWorkflow,
+) -> MapListItemResponse {
+    let fm = &doc.frontmatter;
+    let (decided_count, total_count, frontier_count) = map_ticket_counts(tickets, workflow);
+    MapListItemResponse {
+        id: fm.id.clone(),
+        title: fm.title.clone(),
+        status: fm.status.to_string(),
+        specs: fm.specs.clone(),
+        related: fm.related.clone(),
+        tags: fm.tags.clone(),
+        created: fm.created.to_string(),
+        updated: fm.updated.to_string(),
+        decided_count,
+        total_count,
+        frontier_count,
+    }
+}
+
+fn map_to_detail(
+    doc: &MarkplaneDocument<Map>,
+    tickets: &[MarkplaneDocument<Task>],
+    workflow: &TaskWorkflow,
+) -> MapDetailResponse {
+    let fm = &doc.frontmatter;
+    let sections = split_markdown_sections(&doc.body);
+    let destination = sections
+        .get("Destination")
+        .cloned()
+        .unwrap_or_default();
+    let not_yet_specified = sections
+        .get("Not yet specified")
+        .map(|s| parse_section_bullets(s))
+        .unwrap_or_default();
+    let out_of_scope = sections
+        .get("Out of scope")
+        .map(|s| parse_section_bullets(s))
+        .unwrap_or_default();
+    let (decided_count, total_count, frontier_count) = map_ticket_counts(tickets, workflow);
+
+    let ticket_responses: Vec<MapTicketResponse> = tickets
+        .iter()
+        .map(|t| {
+            let (question, answer) = ticket_question_answer(&t.body);
+            let tfm = &t.frontmatter;
+            MapTicketResponse {
+                id: tfm.id.clone(),
+                title: tfm.title.clone(),
+                item_type: tfm.item_type.to_string(),
+                status: tfm.status.to_string(),
+                assignee: tfm.assignee.clone(),
+                depends_on: tfm.depends_on.clone(),
+                position: tfm.position.clone(),
+                question,
+                answer,
+            }
+        })
+        .collect();
+
+    MapDetailResponse {
+        id: fm.id.clone(),
+        title: fm.title.clone(),
+        status: fm.status.to_string(),
+        specs: fm.specs.clone(),
+        related: fm.related.clone(),
+        tags: fm.tags.clone(),
+        created: fm.created.to_string(),
+        updated: fm.updated.to_string(),
+        body: doc.body.clone(),
+        destination,
+        not_yet_specified,
+        out_of_scope,
+        decided_count,
+        total_count,
+        frontier_count,
+        tickets: ticket_responses,
     }
 }
 
@@ -1975,6 +2188,63 @@ async fn get_note(
     }))
 }
 
+async fn get_maps(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ArchivedQueryParam>,
+) -> Result<Json<ApiListResponse<MapListItemResponse>>, (StatusCode, Json<ApiError>)> {
+    let maps = state
+        .project
+        .list_maps_filtered(params.archived)
+        .map_err(map_core_error)?;
+    let config = state.project.load_config().map_err(map_core_error)?;
+    let workflow = &config.workflows.task;
+
+    let mut data = Vec::with_capacity(maps.len());
+    for doc in &maps {
+        let tickets = state
+            .project
+            .list_tasks(&QueryFilter {
+                map: Some(doc.frontmatter.id.clone()),
+                ..Default::default()
+            })
+            .map_err(map_core_error)?;
+        data.push(map_list_item(doc, &tickets, workflow));
+    }
+
+    let total = data.len();
+    Ok(Json(ApiListResponse {
+        data,
+        meta: ListMeta { total },
+    }))
+}
+
+async fn get_map(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<MapDetailResponse>>, (StatusCode, Json<ApiError>)> {
+    parse_id(&id).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("Invalid ID format: {}", id),
+        )
+    })?;
+
+    let doc: MarkplaneDocument<Map> = state.project.read_item(&id).map_err(map_core_error)?;
+    let tickets = state
+        .project
+        .list_tasks(&QueryFilter {
+            map: Some(id.clone()),
+            ..Default::default()
+        })
+        .map_err(map_core_error)?;
+    let config = state.project.load_config().map_err(map_core_error)?;
+
+    Ok(Json(ApiResponse {
+        data: map_to_detail(&doc, &tickets, &config.workflows.task),
+    }))
+}
+
 async fn update_epic(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2902,5 +3172,30 @@ mod tests {
         let (add, remove) = diff_vec(&current, &desired);
         assert!(add.is_empty());
         assert_eq!(remove, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_parse_section_bullets() {
+        let section = "- Fog A\n* Fog B\n\n[placeholder]\n+ Fog C\nplain\n";
+        assert_eq!(
+            parse_section_bullets(section),
+            vec!["Fog A", "Fog B", "Fog C", "plain"]
+        );
+    }
+
+    #[test]
+    fn test_ticket_question_answer_from_sections() {
+        let body = "# Title\n\n## Question\n\nWhat next?\n\n## Answer\n\nGo left.\n";
+        let (q, a) = ticket_question_answer(body);
+        assert_eq!(q, "What next?");
+        assert_eq!(a.as_deref(), Some("Go left."));
+    }
+
+    #[test]
+    fn test_ticket_question_answer_preamble_fallback() {
+        let body = "# Title\n\nShould we fork?\n\n## Comments\n\n### 2026-01-01 alice\n\nHi\n";
+        let (q, a) = ticket_question_answer(body);
+        assert_eq!(q, "Should we fork?");
+        assert!(a.is_none());
     }
 }

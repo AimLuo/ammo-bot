@@ -9,6 +9,7 @@ import {
   Lightbulb,
   GitBranch,
   Map,
+  Route,
   Archive,
   BookOpen,
   PanelLeft,
@@ -42,12 +43,14 @@ const ICON_MAP = {
   Lightbulb,
   GitBranch,
   Map,
+  Route,
   Archive,
 } as const;
 
 const mainNav = [
   { href: "/dashboard", label: "Dashboard", icon: "LayoutDashboard" as const },
   { href: "/roadmap", label: "Roadmap", icon: "Map" as const },
+  { href: "/maps", label: "Maps", icon: "Route" as const },
   { href: "/backlog", label: "Backlog", icon: "CheckSquare" as const },
   { href: "/plans", label: "Plans", icon: "FileText" as const },
   { href: "/notes", label: "Notes", icon: "Lightbulb" as const },

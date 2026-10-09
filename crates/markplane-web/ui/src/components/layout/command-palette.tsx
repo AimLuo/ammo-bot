@@ -51,6 +51,7 @@ const NAVIGATION_ITEMS = [
   { label: "Go to Dashboard", path: "/dashboard", shortcut: "g d" },
   { label: "Go to Backlog", path: "/backlog", shortcut: "g b" },
   { label: "Go to Roadmap", path: "/roadmap", shortcut: "g r" },
+  { label: "Go to Maps", path: "/maps", shortcut: "g m" },
   { label: "Go to Plans", path: "/plans", shortcut: "g p" },
   { label: "Go to Notes", path: "/notes", shortcut: "g n" },
   { label: "Go to Graph", path: "/graph", shortcut: "g g" },

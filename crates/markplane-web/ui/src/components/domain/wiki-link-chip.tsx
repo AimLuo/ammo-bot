@@ -6,6 +6,7 @@ const PREFIX_CONFIG: Record<string, { route: string; param: string; cssVar: stri
   EPIC: { route: "/roadmap", param: "epic", cssVar: "--entity-epic" },
   PLAN: { route: "/plans", param: "plan", cssVar: "--entity-plan" },
   NOTE: { route: "/notes", param: "note", cssVar: "--entity-note" },
+  MAP: { route: "/maps", param: "map", cssVar: "--entity-map" },
 };
 
 export function WikiLinkChip({

@@ -12,6 +12,7 @@ const CHORD_NAV: ChordMap = {
   p: "/plans",
   n: "/notes",
   r: "/roadmap",
+  m: "/maps",
   g: "/graph",
   a: "/archive",
   s: "/settings",
