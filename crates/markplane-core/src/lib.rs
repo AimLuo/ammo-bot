@@ -22,6 +22,7 @@ pub use models::{
 pub use project::{
     EpicUpdate, MoveDirective, NoteUpdate, Patch, PlanUpdate, Project, TaskUpdate, UpdateFields,
     append_comment_to_body, apply_tag_changes, compose_body_after_title, find_blocked_items,
+    find_frontier_items,
 };
 pub use query::{QueryFilter, ScanScope};
 pub use references::{

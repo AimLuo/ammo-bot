@@ -126,6 +126,9 @@ pub enum Commands {
         /// List archived items instead of active ones
         #[arg(long)]
         archived: bool,
+        /// Show only frontier tasks (open, unblocked, unassigned), sorted by position
+        #[arg(long)]
+        frontier: bool,
     },
 
     /// Update the status of an item
@@ -416,8 +419,9 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             assignee,
             r#type,
             archived,
+            frontier,
         } => ls::run(
-            kind, status, priority, epic, plan, tags, assignee, r#type, archived,
+            kind, status, priority, epic, plan, tags, assignee, r#type, archived, frontier,
         ),
         Commands::Status { id, new_status } => status::run(id, new_status),
         Commands::Sync { normalize } => sync::run(normalize),

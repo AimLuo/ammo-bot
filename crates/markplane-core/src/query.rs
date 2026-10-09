@@ -3,7 +3,7 @@ use std::fs;
 use crate::error::Result;
 use crate::frontmatter::parse_frontmatter;
 use crate::models::*;
-use crate::project::Project;
+use crate::project::{Project, find_frontier_items};
 
 /// Controls which directories are scanned for items.
 #[derive(Debug, Clone, Copy, Default)]
@@ -107,6 +107,35 @@ impl Project {
         });
 
         Ok(items)
+    }
+
+    /// List frontier tasks: open, unassigned, all `depends_on` closed (completed or
+    /// cancelled), sorted by `position`. Optional `epic` / `plan` scopes the parent.
+    pub fn list_frontier_tasks(
+        &self,
+        epic: Option<&str>,
+        plan: Option<&str>,
+    ) -> Result<Vec<MarkplaneDocument<Task>>> {
+        let config = self.load_config()?;
+        let all = self.list_tasks(&QueryFilter::default())?;
+        let frontier = find_frontier_items(&all, &config.workflows.task);
+        Ok(frontier
+            .into_iter()
+            .filter(|t| {
+                if let Some(e) = epic
+                    && t.frontmatter.epic.as_deref() != Some(e)
+                {
+                    return false;
+                }
+                if let Some(p) = plan
+                    && t.frontmatter.plan.as_deref() != Some(p)
+                {
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect())
     }
 
     /// List all epics. Pass `archived: true` to list archived epics only.

@@ -3020,3 +3020,168 @@ fn test_resource_templates() {
     assert!(text.contains("plan:"));
     assert!(text.contains("note:"));
 }
+
+// ── Tool: markplane_query frontier ───────────────────────────────────────
+
+#[test]
+fn test_tool_query_frontier_and_richer_fields() {
+    let tmp = setup_project();
+
+    let epic_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "kind": "epic", "title": "Frontier epic" }
+            }
+        }),
+    );
+    let epic_id = extract_id_from_response(&epic_resp);
+
+    let blocker_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Blocker",
+                    "epic": epic_id,
+                    "tags": ["alpha"]
+                }
+            }
+        }),
+    );
+    let blocker_id = extract_id_from_response(&blocker_resp);
+
+    let dependent_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Dependent",
+                    "epic": epic_id,
+                    "tags": ["beta"]
+                }
+            }
+        }),
+    );
+    let dependent_id = extract_id_from_response(&dependent_resp);
+
+    let claimed_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "title": "Claimed", "epic": epic_id }
+            }
+        }),
+    );
+    let claimed_id = extract_id_from_response(&claimed_resp);
+
+    send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_link",
+                "arguments": {
+                    "from": blocker_id,
+                    "to": dependent_id,
+                    "relation": "blocks"
+                }
+            }
+        }),
+    );
+
+    send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_update",
+                "arguments": { "id": claimed_id, "assignee": "alice" }
+            }
+        }),
+    );
+
+    send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_update",
+                "arguments": { "id": blocker_id, "status": "cancelled" }
+            }
+        }),
+    );
+
+    let response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_query",
+                "arguments": { "epic": epic_id, "frontier": true }
+            }
+        }),
+    );
+    assert!(response["error"].is_null());
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    let items: Vec<Value> = serde_json::from_str(text).unwrap();
+    let ids: Vec<&str> = items.iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&dependent_id.as_str()));
+    assert!(!ids.contains(&blocker_id.as_str()));
+    assert!(!ids.contains(&claimed_id.as_str()));
+
+    let dependent = items
+        .iter()
+        .find(|i| i["id"] == dependent_id)
+        .expect("dependent on frontier");
+    assert!(dependent["assignee"].is_null());
+    assert_eq!(dependent["depends_on"], json!([blocker_id]));
+    assert_eq!(dependent["tags"], json!(["beta"]));
+
+    // Richer fields also present on non-frontier query
+    let all_resp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_query",
+                "arguments": { "epic": epic_id }
+            }
+        }),
+    );
+    let all_text = all_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let all_items: Vec<Value> = serde_json::from_str(all_text).unwrap();
+    let claimed = all_items
+        .iter()
+        .find(|i| i["id"] == claimed_id)
+        .expect("claimed in epic query");
+    assert_eq!(claimed["assignee"], "alice");
+    assert!(claimed.get("depends_on").is_some());
+    assert!(claimed.get("tags").is_some());
+}

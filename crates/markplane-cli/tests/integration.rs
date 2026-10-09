@@ -2858,3 +2858,178 @@ fn test_epic_and_plan_with_spec_template() {
         );
     }
 }
+
+// ── Frontier ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_ls_epic_frontier_cancelled_blocker_and_claim() {
+    let tmp = setup_project();
+
+    let epic_out = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Frontier epic"])
+        .output()
+        .unwrap();
+    assert!(epic_out.status.success());
+    let epic_id = extract_id(&epic_out.stdout);
+
+    let other_epic_out = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Other epic"])
+        .output()
+        .unwrap();
+    assert!(other_epic_out.status.success());
+    let other_epic_id = extract_id(&other_epic_out.stdout);
+
+    let blocker_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Blocker", "--epic", &epic_id])
+        .output()
+        .unwrap();
+    assert!(blocker_out.status.success());
+    let blocker_id = extract_id(&blocker_out.stdout);
+
+    let dependent_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Dependent", "--epic", &epic_id])
+        .output()
+        .unwrap();
+    assert!(dependent_out.status.success());
+    let dependent_id = extract_id(&dependent_out.stdout);
+
+    let claimed_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Claimed", "--epic", &epic_id])
+        .output()
+        .unwrap();
+    assert!(claimed_out.status.success());
+    let claimed_id = extract_id(&claimed_out.stdout);
+
+    let outsider_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Outsider", "--epic", &other_epic_id])
+        .output()
+        .unwrap();
+    assert!(outsider_out.status.success());
+    let outsider_id = extract_id(&outsider_out.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &blocker_id, &dependent_id, "--relation", "blocks"])
+        .assert()
+        .success();
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["start", &claimed_id, "--user", "alice"])
+        .assert()
+        .success();
+
+    // While blocker is open, dependent is not on the frontier
+    let blocked_frontier = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--epic", &epic_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(blocked_frontier.status.success());
+    let blocked_stdout = String::from_utf8_lossy(&blocked_frontier.stdout);
+    assert!(blocked_stdout.contains(&blocker_id));
+    assert!(!blocked_stdout.contains(&dependent_id));
+    assert!(!blocked_stdout.contains(&claimed_id));
+    assert!(!blocked_stdout.contains(&outsider_id));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &blocker_id, "cancelled"])
+        .assert()
+        .success();
+
+    let frontier = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--epic", &epic_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(
+        frontier.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&frontier.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&frontier.stdout);
+    assert!(stdout.contains(&dependent_id));
+    assert!(stdout.contains("Dependent"));
+    assert!(!stdout.contains(&blocker_id));
+    assert!(!stdout.contains(&claimed_id));
+    assert!(!stdout.contains(&outsider_id));
+
+    // Position order: move claimed aside; dependent should appear before a later open task
+    let later_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Later open", "--epic", &epic_id])
+        .output()
+        .unwrap();
+    assert!(later_out.status.success());
+    let later_id = extract_id(&later_out.stdout);
+
+    let ordered = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--epic", &epic_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(ordered.status.success());
+    let ordered_stdout = String::from_utf8_lossy(&ordered.stdout);
+    let dep_pos = ordered_stdout.find(&dependent_id).unwrap();
+    let later_pos = ordered_stdout.find(&later_id).unwrap();
+    assert!(dep_pos < later_pos, "frontier should be sorted by position");
+}
+
+#[test]
+fn test_ls_plan_frontier() {
+    let tmp = setup_project();
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Frontier plan"])
+        .output()
+        .unwrap();
+    assert!(plan_out.status.success());
+    let plan_id = extract_id(&plan_out.stdout);
+
+    let other_plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Other plan"])
+        .output()
+        .unwrap();
+    assert!(other_plan_out.status.success());
+    let other_plan_id = extract_id(&other_plan_out.stdout);
+
+    let ready_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Ready", "--plan", &plan_id])
+        .output()
+        .unwrap();
+    assert!(ready_out.status.success());
+    let ready_id = extract_id(&ready_out.stdout);
+
+    let other_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Other plan task", "--plan", &other_plan_id])
+        .output()
+        .unwrap();
+    assert!(other_out.status.success());
+    let other_id = extract_id(&other_out.stdout);
+
+    let ls_out = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--plan", &plan_id, "--frontier"])
+        .output()
+        .unwrap();
+    assert!(
+        ls_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ls_out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&ls_out.stdout);
+    assert!(stdout.contains(&ready_id));
+    assert!(stdout.contains("Ready"));
+    assert!(!stdout.contains(&other_id));
+}
