@@ -22,8 +22,8 @@ pub use models::{
     default_task_workflow, generate_random_id, parse_id,
 };
 pub use project::{
-    EpicUpdate, MapUpdate, MoveDirective, NoteUpdate, Patch, PlanUpdate, Project, TaskUpdate,
-    UpdateFields, append_comment_to_body, apply_tag_changes, compose_body_after_title,
+    EpicUpdate, MapUpdate, MoveDirective, NoteUpdate, Patch, PlanUpdate, Project, ResolveOutcome,
+    TaskUpdate, UpdateFields, append_comment_to_body, apply_tag_changes, compose_body_after_title,
     find_blocked_items, find_frontier_items,
 };
 pub use query::{QueryFilter, ScanScope};
@@ -32,5 +32,8 @@ pub use references::{
     extract_references, find_orphans, validate_reciprocal_links, validate_references,
     validate_task_statuses,
 };
-pub use sections::{REQUIRED_MAP_SECTIONS, missing_map_sections, split_markdown_sections};
+pub use sections::{
+    REQUIRED_MAP_SECTIONS, append_line_to_section, missing_map_sections, set_answer_section,
+    split_markdown_sections,
+};
 pub use templates::render_template;

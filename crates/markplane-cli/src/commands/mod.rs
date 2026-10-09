@@ -19,6 +19,7 @@ mod metrics;
 mod note;
 mod plan;
 mod promote;
+mod resolve;
 mod serve;
 mod show;
 mod stale;
@@ -93,6 +94,18 @@ pub enum Commands {
         /// Read comment body from file (or "-" for stdin)
         #[arg(long, value_name = "PATH")]
         body_file: String,
+    },
+
+    /// Resolve a Decision ticket (write ## Answer, mark done, append Map decision)
+    Resolve {
+        /// Decision ticket ID (TASK with a map)
+        id: String,
+        /// Read answer body from file (or "-" for stdin)
+        #[arg(long, value_name = "PATH")]
+        answer_file: String,
+        /// One-line gist for the Map Decisions so far entry
+        #[arg(long)]
+        gist: String,
     },
 
     /// Open an item in $EDITOR
@@ -434,6 +447,11 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
         ),
         Commands::Show { id } => show::run(id),
         Commands::Comment { id, body_file } => comment::run(id, body_file),
+        Commands::Resolve {
+            id,
+            answer_file,
+            gist,
+        } => resolve::run(id, answer_file, gist),
         Commands::Edit { id } => edit::run(id),
         Commands::Ls {
             kind,

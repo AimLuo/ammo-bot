@@ -247,14 +247,15 @@ fn test_tools_list() {
     assert!(tool_names.contains(&"markplane_unarchive"));
     assert!(tool_names.contains(&"markplane_move"));
     assert!(tool_names.contains(&"markplane_comment"));
+    assert!(tool_names.contains(&"markplane_resolve"));
     assert!(
         !tool_names.contains(&"markplane_stale"),
         "markplane_stale should be removed"
     );
     assert_eq!(
         tool_names.len(),
-        16,
-        "Expected 16 tools, got: {:?}",
+        17,
+        "Expected 17 tools, got: {:?}",
         tool_names
     );
 }
@@ -3397,4 +3398,196 @@ fn test_tool_add_and_query_map_decision_tickets() {
     let fids: Vec<&str> = fitems.iter().map(|i| i["id"].as_str().unwrap()).collect();
     assert!(fids.contains(&task_id.as_str()));
     assert!(!fids.contains(&blocked_id.as_str()));
+}
+
+// ── Tool: markplane_resolve ──────────────────────────────────────────────
+
+#[test]
+fn test_tool_resolve_matches_cli() {
+    let tmp = setup_project();
+    let answer = "We chose option B.\n";
+    let gist = "option B";
+
+    // CLI path
+    let map_cli = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .args(["map", "Resolve parity map CLI"])
+        .output()
+        .unwrap();
+    assert!(map_cli.status.success());
+    let map_cli_id = String::from_utf8_lossy(&map_cli.stdout)
+        .split_whitespace()
+        .find(|w| w.starts_with("MAP-"))
+        .expect("CLI map ID")
+        .to_string();
+    // Keep another open ticket so hint is not required for parity of file effects.
+    let _keep = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Keep open CLI",
+            "--map",
+            &map_cli_id,
+            "--type",
+            "task",
+        ])
+        .output()
+        .unwrap();
+    let task_cli = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Parity decision CLI",
+            "--map",
+            &map_cli_id,
+            "--type",
+            "grilling",
+        ])
+        .output()
+        .unwrap();
+    let cli_task_id = String::from_utf8_lossy(&task_cli.stdout)
+        .split_whitespace()
+        .find(|w| w.starts_with("TASK-"))
+        .expect("CLI task ID")
+        .to_string();
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, answer).unwrap();
+    let cli_resolve = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &cli_task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            gist,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli_resolve.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&cli_resolve.stderr)
+    );
+
+    // MCP path
+    let map_mcp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": { "kind": "map", "title": "Resolve parity map MCP" }
+            }
+        }),
+    );
+    assert!(map_mcp["error"].is_null());
+    let map_mcp_id = extract_id_from_response(&map_mcp);
+
+    let _keep_mcp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 41,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Keep open MCP",
+                    "map": map_mcp_id,
+                    "type": "task"
+                }
+            }
+        }),
+    );
+    let task_mcp = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Parity decision MCP",
+                    "map": map_mcp_id,
+                    "type": "grilling"
+                }
+            }
+        }),
+    );
+    assert!(task_mcp["error"].is_null());
+    let mcp_task_id = extract_id_from_response(&task_mcp);
+
+    let mcp_response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_resolve",
+                "arguments": {
+                    "id": mcp_task_id,
+                    "answer": answer,
+                    "gist": gist
+                }
+            }
+        }),
+    );
+    assert!(
+        mcp_response["error"].is_null(),
+        "MCP error: {}",
+        mcp_response
+    );
+    assert_ne!(
+        mcp_response["result"]["isError"], true,
+        "tool error: {}",
+        mcp_response["result"]["content"][0]["text"]
+    );
+
+    let cli_task = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", cli_task_id)),
+    )
+    .unwrap();
+    let mcp_task = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", mcp_task_id)),
+    )
+    .unwrap();
+    assert!(cli_task.contains("status: done"));
+    assert!(mcp_task.contains("status: done"));
+    assert!(cli_task.contains("## Answer"));
+    assert!(mcp_task.contains("## Answer"));
+    assert!(cli_task.contains("We chose option B."));
+    assert!(mcp_task.contains("We chose option B."));
+
+    let cli_map = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_cli_id)),
+    )
+    .unwrap();
+    let mcp_map = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_mcp_id)),
+    )
+    .unwrap();
+    let cli_line = format!("- Parity decision CLI [[{}]]: {}", cli_task_id, gist);
+    let mcp_line = format!("- Parity decision MCP [[{}]]: {}", mcp_task_id, gist);
+    assert!(
+        cli_map.contains(&cli_line),
+        "CLI map missing decision line:\n{}",
+        cli_map
+    );
+    assert!(
+        mcp_map.contains(&mcp_line),
+        "MCP map missing decision line:\n{}",
+        mcp_map
+    );
+    assert!(cli_map.contains("status: active"));
+    assert!(mcp_map.contains("status: active"));
 }

@@ -3275,14 +3275,7 @@ fn test_add_map_accepts_wayfinder_types_rejects_feature() {
 
     let ok = cmd()
         .current_dir(tmp.path())
-        .args([
-            "add",
-            "Grill this",
-            "--map",
-            &map_id,
-            "--type",
-            "grilling",
-        ])
+        .args(["add", "Grill this", "--map", &map_id, "--type", "grilling"])
         .output()
         .unwrap();
     assert!(
@@ -3304,7 +3297,14 @@ fn test_add_map_accepts_wayfinder_types_rejects_feature() {
 
     let bad = cmd()
         .current_dir(tmp.path())
-        .args(["add", "Not a decision", "--map", &map_id, "--type", "feature"])
+        .args([
+            "add",
+            "Not a decision",
+            "--map",
+            &map_id,
+            "--type",
+            "feature",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -3322,7 +3322,14 @@ fn test_add_map_accepts_wayfinder_types_rejects_feature() {
     for ty in ["research", "prototype", "task"] {
         let out = cmd()
             .current_dir(tmp.path())
-            .args(["add", &format!("Ticket {ty}"), "--map", &map_id, "--type", ty])
+            .args([
+                "add",
+                &format!("Ticket {ty}"),
+                "--map",
+                &map_id,
+                "--type",
+                ty,
+            ])
             .output()
             .unwrap();
         assert!(
@@ -3365,14 +3372,7 @@ fn test_map_mutex_with_epic_and_plan_on_add_and_link() {
     let map_epic = cmd()
         .current_dir(tmp.path())
         .args([
-            "add",
-            "Both",
-            "--map",
-            &map_id,
-            "--epic",
-            &epic_id,
-            "--type",
-            "grilling",
+            "add", "Both", "--map", &map_id, "--epic", &epic_id, "--type", "grilling",
         ])
         .output()
         .unwrap();
@@ -3530,7 +3530,14 @@ fn test_ls_map_and_frontier() {
 
     let outsider_out = cmd()
         .current_dir(tmp.path())
-        .args(["add", "Outsider", "--map", &other_map, "--type", "prototype"])
+        .args([
+            "add",
+            "Outsider",
+            "--map",
+            &other_map,
+            "--type",
+            "prototype",
+        ])
         .output()
         .unwrap();
     let outsider_id = extract_id(&outsider_out.stdout);
@@ -3612,4 +3619,241 @@ fn test_ls_map_and_frontier() {
     let dep_pos = ordered_stdout.find(&dependent_id).unwrap();
     let later_pos = ordered_stdout.find(&later_id).unwrap();
     assert!(dep_pos < later_pos, "frontier should be sorted by position");
+}
+
+// ── Resolve ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_resolve_writes_answer_marks_done_appends_decision() {
+    let tmp = setup_project();
+    let map_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["map", "Resolve map"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    // Keep a second open ticket so the map-cleared hint is not printed.
+    let _other = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["add", "Still open", "--map", &map_id, "--type", "task"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args([
+                "add",
+                "Pick the path",
+                "--map",
+                &map_id,
+                "--type",
+                "grilling",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, "We take the left fork.\n").unwrap();
+
+    let out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            "left fork",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.to_lowercase().contains("no open") && !stdout.contains("status"),
+        "should not hint map done while another ticket is open: {}",
+        stdout
+    );
+
+    let task_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    assert!(
+        task_file.contains("status: done"),
+        "task should be done:\n{}",
+        task_file
+    );
+    let task_body = task_file.splitn(3, "---").nth(2).unwrap_or("");
+    assert!(
+        task_body.contains("## Answer"),
+        "expected ## Answer:\n{}",
+        task_body
+    );
+    assert!(
+        task_body.contains("We take the left fork."),
+        "expected answer content:\n{}",
+        task_body
+    );
+
+    let map_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(
+        map_file.contains("status: active"),
+        "map status must stay active:\n{}",
+        map_file
+    );
+    let expected_line = format!("- Pick the path [[{}]]: left fork", task_id);
+    assert!(
+        map_file.contains(&expected_line),
+        "expected decision line {:?}:\n{}",
+        expected_line,
+        map_file
+    );
+}
+
+#[test]
+fn test_resolve_last_open_prints_hint_map_status_unchanged() {
+    let tmp = setup_project();
+    let map_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["map", "Last ticket map"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args([
+                "add",
+                "Final decision",
+                "--map",
+                &map_id,
+                "--type",
+                "research",
+            ])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, "Ship it.\n").unwrap();
+
+    let out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            "ship it",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&map_id),
+        "hint should mention map id: {}",
+        stdout
+    );
+    assert!(
+        stdout.to_lowercase().contains("no open") || stdout.contains("status"),
+        "hint should mention no open tickets / status: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("done"),
+        "hint should mention marking done: {}",
+        stdout
+    );
+
+    let map_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(
+        map_file.contains("status: active"),
+        "map must remain active (not auto-done):\n{}",
+        map_file
+    );
+}
+
+#[test]
+fn test_resolve_rejects_non_decision_ticket() {
+    let tmp = setup_project();
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["add", "Regular implementation task"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let answer_path = tmp.path().join("answer.md");
+    std::fs::write(&answer_path, "Nope.\n").unwrap();
+
+    let out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "resolve",
+            &task_id,
+            "--answer-file",
+            answer_path.to_str().unwrap(),
+            "--gist",
+            "nope",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "resolve on non-Decision ticket should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("decision") || stderr.contains("map"),
+        "stderr should mention Decision ticket / map: {}",
+        stderr
+    );
+
+    let task_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    assert!(
+        !task_file.contains("status: done"),
+        "non-decision resolve must not mark done:\n{}",
+        task_file
+    );
+    assert!(
+        !task_file.contains("## Answer"),
+        "non-decision resolve must not write Answer:\n{}",
+        task_file
+    );
 }
