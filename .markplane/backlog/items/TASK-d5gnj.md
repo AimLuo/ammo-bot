@@ -1,7 +1,7 @@
 ---
 id: TASK-d5gnj
 title: Map 归档连带工单与 link -r spec
-status: backlog
+status: in-progress
 priority: medium
 type: feature
 effort: medium
@@ -14,7 +14,7 @@ blocks:
 - TASK-k4tfw
 - TASK-9hqi2
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: a7

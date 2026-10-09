@@ -1,7 +1,7 @@
 ---
 id: TASK-z3uwm
 title: Context 层与 MCP map resources
-status: backlog
+status: in-progress
 priority: medium
 type: feature
 effort: medium
@@ -12,7 +12,7 @@ depends_on:
 blocks:
 - TASK-d3tdm
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: a8

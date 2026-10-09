@@ -1,7 +1,7 @@
 ---
 id: TASK-gmgsq
 title: resolve 命令
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -13,7 +13,7 @@ blocks:
 - TASK-k4tfw
 - TASK-9hqi2
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aF

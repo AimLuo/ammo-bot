@@ -1,7 +1,7 @@
 ---
 id: TASK-2uakq
 title: Web UI：/maps 列表与路线图详情页
-status: backlog
+status: in-progress
 priority: medium
 type: feature
 effort: medium
@@ -13,7 +13,7 @@ blocks:
 - TASK-mbc9k
 - TASK-9hqi2
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: a9
