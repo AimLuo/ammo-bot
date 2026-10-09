@@ -131,6 +131,30 @@ pub fn compose_body_after_title(title: &str, content: &str) -> String {
     }
 }
 
+/// Append a dated, attributed comment under `## Comments` (creating the section if needed).
+pub fn append_comment_to_body(body: &str, date: &str, author: &str, text: &str) -> String {
+    let text = text.trim_end();
+    let entry = if text.is_empty() {
+        format!("### {date} {author}\n")
+    } else {
+        format!("### {date} {author}\n\n{text}\n")
+    };
+
+    let has_comments = body.lines().any(|line| line.trim() == "## Comments");
+    let mut result = body.trim_end().to_string();
+    if has_comments {
+        result.push_str("\n\n");
+        result.push_str(&entry);
+    } else {
+        if !result.is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str("## Comments\n\n");
+        result.push_str(&entry);
+    }
+    result
+}
+
 /// Maximum allowed title length in characters.
 const MAX_TITLE_LENGTH: usize = 500;
 
@@ -713,6 +737,45 @@ impl Project {
             IdPrefix::Note => {
                 let mut doc: MarkplaneDocument<Note> = self.read_item(id)?;
                 doc.frontmatter.status = new_status.parse()?;
+                doc.frontmatter.updated = today;
+                self.write_item(id, &doc)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Append a comment under `## Comments` on any item (creates the section if needed).
+    ///
+    /// Holds an advisory file lock for the full read-modify-write cycle.
+    pub fn add_comment(&self, id: &str, author: &str, text: &str) -> Result<()> {
+        let (prefix, _) = parse_id(id)?;
+        let today = Local::now().date_naive();
+        let date = today.format("%Y-%m-%d").to_string();
+        let _lock = self.lock_item(id)?;
+
+        match prefix {
+            IdPrefix::Task => {
+                let mut doc: MarkplaneDocument<Task> = self.read_item(id)?;
+                doc.body = append_comment_to_body(&doc.body, &date, author, text);
+                doc.frontmatter.updated = today;
+                self.write_item(id, &doc)?;
+            }
+            IdPrefix::Epic => {
+                let mut doc: MarkplaneDocument<Epic> = self.read_item(id)?;
+                doc.body = append_comment_to_body(&doc.body, &date, author, text);
+                doc.frontmatter.updated = today;
+                self.write_item(id, &doc)?;
+            }
+            IdPrefix::Plan => {
+                let mut doc: MarkplaneDocument<Plan> = self.read_item(id)?;
+                doc.body = append_comment_to_body(&doc.body, &date, author, text);
+                doc.frontmatter.updated = today;
+                self.write_item(id, &doc)?;
+            }
+            IdPrefix::Note => {
+                let mut doc: MarkplaneDocument<Note> = self.read_item(id)?;
+                doc.body = append_comment_to_body(&doc.body, &date, author, text);
                 doc.frontmatter.updated = today;
                 self.write_item(id, &doc)?;
             }

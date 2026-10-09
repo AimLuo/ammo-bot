@@ -411,6 +411,28 @@ pub fn list_tools(project: &Project) -> Value {
                     },
                     "required": ["id"]
                 }
+            },
+            {
+                "name": "markplane_comment",
+                "description": "Append a dated, attributed comment under ## Comments on any item.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Item ID (e.g. TASK-042, EPIC-001, PLAN-003, NOTE-007)"
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Comment body text"
+                        },
+                        "author": {
+                            "type": "string",
+                            "description": "Comment author (defaults to $USER / $USERNAME / me)"
+                        }
+                    },
+                    "required": ["id", "body"]
+                }
             }
         ]
     })
@@ -434,6 +456,7 @@ pub fn call_tool(id: Value, project: &Project, name: &str, args: Value) -> JsonR
         "markplane_check" => handle_check(project),
         "markplane_archive" => handle_archive(project, &args),
         "markplane_unarchive" => handle_unarchive(project, &args),
+        "markplane_comment" => handle_comment(project, &args),
         _ => {
             return JsonRpcResponse::error(id, METHOD_NOT_FOUND, format!("Unknown tool: {}", name));
         }
@@ -1179,4 +1202,31 @@ fn handle_unarchive(project: &Project, args: &Value) -> Result<String, String> {
     project.unarchive_item(id).map_err(|e| e.to_string())?;
 
     Ok(format!("{{\"success\":true,\"restored\":\"{}\"}}", id))
+}
+
+fn handle_comment(project: &Project, args: &Value) -> Result<String, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: id".to_string())?;
+    let body = args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: body".to_string())?;
+    let author = args
+        .get("author")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "me".to_string())
+        });
+
+    project
+        .add_comment(id, &author, body)
+        .map_err(|e| e.to_string())?;
+
+    let result = json!({ "success": true, "id": id });
+    serde_json::to_string(&result).map_err(|e| e.to_string())
 }
