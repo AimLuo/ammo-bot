@@ -35,15 +35,15 @@ The core library contains all domain logic. It exposes a `Project` struct that r
 
 | Module | Purpose |
 |--------|---------|
-| `models` | Entity structs (`Task`, `Epic`, `Plan`, `Note`), enums (`StatusCategory`, `Priority`, `Effort`, etc.), `TaskWorkflow` (configurable status-to-category mapping), `Config` (including configurable `task_types`/`note_types`/`workflows`), `MarkplaneDocument<T>` wrapper, ID parsing/formatting |
-| `project` | `Project` struct — init, config, ID management, CRUD operations, archiving, `find_blocked_items()` |
-| `frontmatter` | Parse and serialize `---\nyaml\n---\nbody` format |
-| `query` | `QueryFilter` struct, `list_tasks()`, `list_epics()`, `list_plans()`, `list_notes()` with filtering and sorting |
+| `models` | Entity structs (`Task`, `Epic`, `Plan`, `Map`, `Note`), enums (`StatusCategory`, `Priority`, `Effort`, `MapStatus`, etc.), `TaskWorkflow` (configurable status-to-category mapping), `Config` (including configurable `task_types`/`note_types`/`workflows`), `MarkplaneDocument<T>` wrapper, ID parsing/formatting |
+| `project` | `Project` struct — init, config, ID management, CRUD operations, archiving (Map archives Decision tickets), `find_blocked_items()`, `find_frontier_items()` |
+| `frontmatter` | Parse and serialize `---\nyaml\n---\nbody` format; Map body section helpers |
+| `query` | `QueryFilter` struct, `list_tasks()`, `list_epics()`, `list_plans()`, `list_notes()`, `list_maps()`, `list_frontier_tasks()` with filtering and sorting |
 | `references` | `extract_references()` (wiki-link `[[ID]]` scanning), `validate_references()`, `find_orphans()`, `detect_cycles()`, `build_reference_graph()` |
-| `links` | `LinkRelation` enum (blocks, depends-on, epic, plan, implements, related), `LinkAction` enum, `Project::link_items()` — centralized cross-entity linking with type validation and reciprocal management |
-| `index` | INDEX.md generation for all directories (root, backlog, roadmap, plans, notes) |
-| `context` | `.context/` file generation — summary, active-work, blocked-items, metrics |
-| `templates` | Embedded template constants and `render_template()` placeholder replacement |
+| `links` | `LinkRelation` enum (blocks, depends-on, epic, plan, implements, map, spec, related), `LinkAction` enum, `Project::link_items()` — centralized cross-entity linking with type validation and reciprocal management |
+| `index` | INDEX.md generation for all directories (root, backlog, roadmap, plans, maps, notes) |
+| `context` | `.context/` file generation — summary (incl. Active Maps), maps.md, active-work, blocked-items, metrics |
+| `templates` | Embedded template constants (incl. map + shared spec) and `render_template()` placeholder replacement |
 | `error` | `MarkplaneError` enum (via `thiserror`) and `Result<T>` type alias |
 
 ### markplane-cli (binary: `markplane`)
@@ -51,7 +51,7 @@ The core library contains all domain logic. It exposes a `Project` struct that r
 The CLI crate provides the user-facing terminal interface and the integrated MCP server.
 
 - **Argument parsing**: `clap` with derive macros
-- **Commands**: `init`, `add`, `show`, `edit`, `ls`, `status`, `sync`, `start`, `done`, `promote`, `plan`, `epic`, `note`, `update`, `link`, `check`, `stale`, `archive`, `unarchive`, `context`, `metrics`, `graph`, `claude-md`, `dashboard`, `serve`, `mcp`
+- **Commands**: `init`, `add`, `show`, `comment`, `resolve`, `edit`, `ls`, `status`, `sync`, `start`, `done`, `promote`, `plan`, `epic`, `note`, `map`, `update`, `link`, `check`, `stale`, `archive`, `unarchive`, `context`, `metrics`, `graph`, `claude-md`, `dashboard`, `serve`, `mcp`
 - **Formatting**: `commands/formatting.rs` — shared helpers for truncation, status/priority colorization (via `colored`), table output (via `tabled`)
 - **MCP module** (`src/mcp/`): The `markplane mcp` subcommand runs the MCP server enabling AI tools (Claude, Cursor, etc.) to interact with the project
   - **Protocol**: JSON-RPC 2.0 over stdio (one JSON object per line)
@@ -82,32 +82,34 @@ pub struct MarkplaneDocument<T> {
                     │                      │
                     └──────────────────────┘
 
-  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
-  │     Task      │  │     Epic      │  │     Plan      │  │     Note      │
-  │ TASK-xxxxx    │  │ EPIC-xxxxx    │  │ PLAN-xxxxx    │  │ NOTE-xxxxx    │
-  │               │  │               │  │               │  │               │
-  │ id, title,    │  │ id, title,    │  │ id, title,    │  │ id, title,    │
-  │ status,       │  │ status,       │  │ status,       │  │ type,         │
-  │ priority,     │  │ priority,     │  │ implements[], │  │ status,       │
-  │ type, effort, │  │ started?,     │  │ related[],    │  │ tags[],       │
-  │ tags[],       │  │ target?,      │  │ created,      │  │ related[],    │
-  │ epic?,        │  │ tags[],       │  │ updated       │  │ created,      │
-  │ plan?,        │  │ related[],    │  │               │  │ updated       │
-  │ depends_on[], │  │               │  │               │  │               │
-  │ blocks[],     │  │               │  │               │  │               │
-  │ related[],    │  │               │  │               │  │               │
-  │ assignee?,    │  │               │  │               │  │               │
-  │ created,      │  │               │  │               │  │               │
-  │ updated       │  │               │  │               │  │               │
-  └───────────────┘  └───────────────┘  └───────────────┘  └───────────────┘
+  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+  │     Task      │  │     Epic      │  │     Plan      │  │     Map       │  │     Note      │
+  │ TASK-xxxxx    │  │ EPIC-xxxxx    │  │ PLAN-xxxxx    │  │ MAP-xxxxx     │  │ NOTE-xxxxx    │
+  │               │  │               │  │               │  │               │  │               │
+  │ id, title,    │  │ id, title,    │  │ id, title,    │  │ id, title,    │  │ id, title,    │
+  │ status,       │  │ status,       │  │ status,       │  │ status,       │  │ type,         │
+  │ priority,     │  │ priority,     │  │ implements[], │  │ specs[],      │  │ status,       │
+  │ type, effort, │  │ started?,     │  │ related[],    │  │ related[],    │  │ tags[],       │
+  │ tags[],       │  │ target?,      │  │ tags[],       │  │ tags[],       │  │ related[],    │
+  │ epic?,        │  │ tags[],       │  │ created,      │  │ created,      │  │ created,      │
+  │ plan?, map?,  │  │ related[],    │  │ updated       │  │ updated       │  │ updated       │
+  │ depends_on[], │  │               │  │               │  │               │  │               │
+  │ blocks[],     │  │               │  │               │  │               │  │               │
+  │ related[],    │  │               │  │               │  │               │  │               │
+  │ assignee?,    │  │               │  │               │  │               │  │               │
+  │ created,      │  │               │  │               │  │               │  │               │
+  │ updated       │  │               │  │               │  │               │  │               │
+  └───────────────┘  └───────────────┘  └───────────────┘  └───────────────┘  └───────────────┘
 ```
 
 Relationships between entities:
 - `Task.epic` → links to an `Epic`
 - `Task.plan` → links to a `Plan`
+- `Task.map` → links to a `Map` (Decision ticket; mutually exclusive with epic/plan)
 - `Task.depends_on[]` / `blocks[]` → links to other `Task`s
 - `Plan.implements[]` → links to `Task`s it implements
-- `*.related[]` → bidirectional links to any item type (all four entity types)
+- `Map.specs[]` → links to EPICs / PLANs the map produced
+- `*.related[]` → bidirectional links to any item type
 
 ## Data Flow
 
@@ -142,10 +144,12 @@ CLI: markplane sync [--normalize]
   │    ├─ generate_root_index()      → INDEX.md
   │    ├─ generate_backlog_index()   → backlog/INDEX.md
   │    ├─ generate_roadmap_index()   → roadmap/INDEX.md
-  │    ├─ generate_plans_index()     → plans/INDEX.md
-  │    └─ generate_notes_index()     → notes/INDEX.md
+  │      ├─ generate_plans_index()     → plans/INDEX.md
+      │    ├─ generate_maps_index()      → maps/INDEX.md
+      │    └─ generate_notes_index()     → notes/INDEX.md
   └─ generate_all_context()
        ├─ generate_context_summary()     → .context/summary.md
+       ├─ generate_context_maps()        → .context/maps.md
        ├─ generate_context_active_work() → .context/active-work.md
        ├─ generate_context_blocked()     → .context/blocked-items.md
        └─ generate_context_metrics()     → .context/metrics.md
@@ -220,7 +224,7 @@ Core errors are typed and specific. CLI commands convert them to user-friendly m
 - **Title length**: Capped at 500 characters to prevent resource exhaustion
 - **YAML sanitization**: `sanitize_yaml_string()` escapes `\`, `"`, `\n`, `\r` before embedding in YAML templates, preventing YAML injection
 - **Tag quoting**: `format_yaml_list()` quotes each tag value and escapes inner quotes
-- **ID validation**: `parse_id()` enforces strict `PREFIX-RANDOM` format (5-char alphanumeric suffix) — only `EPIC`, `TASK`, `PLAN`, `NOTE` prefixes accepted. This prevents path traversal since IDs determine file paths.
+- **ID validation**: `parse_id()` enforces strict `PREFIX-RANDOM` format (5-char alphanumeric suffix) — only `EPIC`, `TASK`, `PLAN`, `MAP`, `NOTE` prefixes accepted. This prevents path traversal since IDs determine file paths.
 
 ### Concurrency Safety
 - **Random IDs**: `next_id()` generates random 5-character alphanumeric IDs — no shared counter, safe for parallel git branches.

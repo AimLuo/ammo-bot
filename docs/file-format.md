@@ -23,6 +23,11 @@
 │   ├── items/               # Plan files
 │   │   └── PLAN-ya8v2.md
 │   └── archive/             # Completed plans
+├── maps/
+│   ├── INDEX.md             # Map listing (auto-generated)
+│   ├── items/               # Map files
+│   │   └── MAP-k7x9m.md
+│   └── archive/             # Archived maps
 ├── notes/
 │   ├── INDEX.md             # Note listing (auto-generated)
 │   ├── items/               # Note files
@@ -35,6 +40,7 @@
 │   ├── task.md              # Default task template
 │   ├── task-bug.md          # Bug report template
 │   ├── epic.md              # Default epic template
+│   ├── map.md               # Wayfinder map template
 │   ├── plan-implementation.md  # Implementation plan template
 │   ├── plan-refactor.md     # Refactor plan template
 │   ├── note.md              # Generic note template
@@ -42,6 +48,7 @@
 │   └── note-analysis.md     # Analysis note template
 └── .context/
     ├── summary.md           # Project overview (~1000 tokens)
+    ├── maps.md              # Active maps context for agents
     ├── active-work.md       # Currently in-progress items
     ├── blocked-items.md     # Items with unresolved dependencies
     └── metrics.md           # Status/priority distribution, epic progress
@@ -94,12 +101,15 @@ Titles are always double-quoted in the YAML to safely handle special characters.
 | `tags` | string[] | no | Categorization tags (default: `[]`) |
 | `epic` | string? | no | Parent epic ID, e.g. `EPIC-gc8t5` (default: `null`) |
 | `plan` | string? | no | Linked plan ID, e.g. `PLAN-rj9d4` (default: `null`) |
+| `map` | string? | no | Parent Map ID when this task is a **Decision ticket** (default: omitted). Mutually exclusive with `epic` / `plan`. |
 | `depends_on` | string[] | no | IDs this item depends on (default: `[]`) |
 | `blocks` | string[] | no | IDs this item blocks (default: `[]`) |
 | `related` | string[] | no | Related item IDs, any type (default: `[]`) |
 | `assignee` | string? | no | Assigned user (default: `null`) |
 | `created` | date | yes | Creation date (`YYYY-MM-DD`) |
 | `updated` | date | yes | Last modification date (`YYYY-MM-DD`, see [Timestamps](#timestamps)) |
+
+A task with `map` set is a **Decision ticket**. Its `type` must be one of the built-in wayfinder types — `research`, `prototype`, `grilling`, or `task` — and skips `config.task_types` validation. Decision tickets never carry the `ready-for-agent` triage tag.
 
 ### Epic (prefix: `EPIC`)
 
@@ -125,8 +135,26 @@ Titles are always double-quoted in the YAML to safely handle special characters.
 | `status` | enum | yes | Current workflow status |
 | `implements` | string[] | no | Task IDs this plan implements (default: `[]`) |
 | `related` | string[] | no | Related item IDs, any type (default: `[]`) |
+| `tags` | string[] | no | Categorization tags (default: `[]`) |
 | `created` | date | yes | Creation date (`YYYY-MM-DD`) |
 | `updated` | date | yes | Last modification date (`YYYY-MM-DD`) |
+
+Plans may be created standalone (no parent task) or linked to a task. EPICs and PLANs can share the built-in `spec` body template (Problem Statement … Further Notes).
+
+### Map (prefix: `MAP`)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | yes | Unique identifier, e.g. `MAP-k7x9m` |
+| `title` | string | yes | Map title (max 500 characters) |
+| `status` | enum | yes | `active`, `done`, or `abandoned` (new maps start as `active`) |
+| `specs` | string[] | no | Spec IDs (EPIC / PLAN) this map produced, via `link -r spec` (default: `[]`) |
+| `related` | string[] | no | Related item IDs, any type (default: `[]`) |
+| `tags` | string[] | no | Categorization tags (default: `[]`) |
+| `created` | date | yes | Creation date (`YYYY-MM-DD`) |
+| `updated` | date | yes | Last modification date (`YYYY-MM-DD`) |
+
+Maps have no `priority` or `assignee`. The Destination lives in the markdown body, not frontmatter. Child Decision tickets are tasks with `map` set; they are discovered by query, not stored on the Map. Body template sections: Destination, Notes, Decisions so far, Not yet specified, Out of scope. `markplane check` warns when any of those sections is missing.
 
 ### Note (prefix: `NOTE`)
 
@@ -195,6 +223,13 @@ draft → approved → in-progress → done
 draft → active → archived
 ```
 
+**MapStatus** — `active` → `done` (also `abandoned`)
+
+```
+active → done
+       ↘ abandoned
+```
+
 ### Priority
 
 Values (highest to lowest): `critical`, `high`, `medium`, `low`, `someday`
@@ -202,6 +237,8 @@ Values (highest to lowest): `critical`, `high`, `medium`, `low`, `someday`
 ### TaskType (Task only)
 
 Configurable via `task_types` in `config.yaml` or the web UI [Settings page](web-ui-guide.md#settings). Default values: `feature`, `bug`, `enhancement`, `chore`, `research`, `spike`. The first value in the list is the default for new tasks.
+
+**Decision tickets** (tasks with `map`) ignore `task_types` and accept only `research`, `prototype`, `grilling`, or `task`.
 
 ### Effort (Task only)
 
@@ -222,7 +259,7 @@ Direct file edits (opening a `.md` file in your editor) do **not** auto-update t
 ## ID System
 
 IDs follow the format `PREFIX-RANDOM` where:
-- **PREFIX** is one of: `EPIC`, `TASK`, `PLAN`, `NOTE`
+- **PREFIX** is one of: `EPIC`, `TASK`, `PLAN`, `MAP`, `NOTE`
 - **RANDOM** is a 5-character random alphanumeric suffix (e.g., `4ed4i`, `k7x9m`, `rm6d3`)
 
 The random suffix uses a reduced 32-character alphabet (a-z, 0-9 minus ambiguous chars `0`, `o`, `1`, `l`), giving ~33 million combinations per prefix.
@@ -230,7 +267,7 @@ The random suffix uses a reduced 32-character alphabet (a-z, 0-9 minus ambiguous
 Rules:
 - IDs are **permanent** — once assigned, never reused
 - IDs are **randomly generated** — no shared counter, safe for concurrent processes and parallel git branches
-- The prefix determines the **directory**: `EPIC` → `roadmap/`, `TASK` → `backlog/`, `PLAN` → `plans/`, `NOTE` → `notes/`
+- The prefix determines the **directory**: `EPIC` → `roadmap/`, `TASK` → `backlog/`, `PLAN` → `plans/`, `MAP` → `maps/`, `NOTE` → `notes/`
 - The filename is always `{ID}.md` (e.g., `TASK-rm6d3.md`)
 - ID parsing is case-insensitive (`task-rm6d3` resolves to `TASK-rm6d3`)
 - New IDs are collision-checked against existing items before assignment
@@ -244,15 +281,15 @@ This feature depends on [[TASK-wp7v2]] and relates to [[EPIC-gc8t5]].
 See [[PLAN-rj9d4]] for the implementation plan.
 ```
 
-References work in both the markdown body and are also extracted from frontmatter fields (`epic`, `plan`, `depends_on`, `blocks`, `implements`, `related`).
+References work in both the markdown body and are also extracted from frontmatter fields (`epic`, `plan`, `map`, `depends_on`, `blocks`, `implements`, `specs`, `related`).
 
 Reference rules:
 - Must contain a valid ID matching `PREFIX-RANDOM` format (e.g. `TASK-4ed4i`)
 - Cannot span newlines
-- Only the four valid prefixes (`EPIC`, `TASK`, `PLAN`, `NOTE`) are recognized
+- Valid prefixes: `EPIC`, `TASK`, `PLAN`, `MAP`, `NOTE`
 - Invalid references (e.g., `[[INVALID-x7k2f]]`) are ignored during extraction
 
-Use `markplane check` to validate all references, task statuses, and reciprocal link symmetry. Add `--orphans` to find items with no incoming references, or `--fix` to repair asymmetric reciprocal links.
+Use `markplane check` to validate all references, task statuses, reciprocal link symmetry, and Map body sections. Add `--orphans` to find items with no incoming references, or `--fix` to repair asymmetric reciprocal links.
 
 ## config.yaml Schema
 
@@ -357,6 +394,12 @@ plan:
     refactor:
       description: Refactor plan with migration steps
 
+map:
+  default: default
+  templates:
+    default:
+      description: Wayfinder map with Destination and decision sections
+
 note:
   default: default
   type_defaults:
@@ -371,6 +414,8 @@ note:
       description: Analysis note with conclusions
 ```
 
+The built-in `spec` template (seven-section to-spec structure) is registered for both `epic` and `plan` and can be selected with `--template spec`.
+
 ### File Naming Convention
 
 - `{kind}.md` — default template for the kind (e.g. `task.md`, `epic.md`)
@@ -383,6 +428,7 @@ Generated during `markplane init`:
 - `task.md` — Default tasks (description, acceptance criteria, notes, references)
 - `task-bug.md` — Bug reports (description, steps to reproduce, expected/actual behavior)
 - `epic.md` — Epics (objective, key results, notes)
+- `map.md` — Wayfinder maps (Destination, Notes, Decisions so far, Not yet specified, Out of scope)
 - `plan-implementation.md` — Implementation plans (overview, approach, phases, testing, rollback)
 - `plan-refactor.md` — Refactor plans (motivation, current/target state, migration steps, risks)
 - `note.md` — Generic notes (ideas, decisions, meetings)
@@ -413,15 +459,17 @@ Each directory has an index:
 - **backlog/INDEX.md**: Prioritized kanban view (In Progress, Blocked, Planned, Backlog, Drafts)
 - **roadmap/INDEX.md**: Epics (now, next, later) with nested task tables and progress
 - **plans/INDEX.md**: Active and completed plans with their implements links
+- **maps/INDEX.md**: Active maps with status and titles
 - **notes/INDEX.md**: Active notes table with type/status/tags, archived notes list, special files links
 
 ## .context/ Files
 
-Context files are generated summaries optimized for AI consumption (~1000 token budget). Generated by `markplane sync` or `markplane context`.
+Context files are generated summaries optimized for AI consumption (~1000 token budget for `summary.md`). Generated by `markplane sync` or `markplane context`.
 
-- **summary.md**: Project overview — now epics with progress, in-progress work, blocked items, recent completions, priority queue, key metrics, key documentation (when `documentation_paths` is configured)
+- **summary.md**: Project overview — now epics with progress, **Active Maps** (up to 3: progress + next frontier ticket), in-progress work, blocked items, recent completions, priority queue, key metrics, key documentation (when `documentation_paths` is configured). Decision tickets are excluded from the priority queue, backlog counts, metrics, and blocked-items lists; claimed Decision tickets appear in active work with their Map.
+- **maps.md**: Per active map (~300–500 tokens, independent of the summary budget): Destination first paragraph, frontier, claimed tickets with assignees, blocked count, Not yet specified (fog) count
 - **active-work.md**: Detailed view of all in-progress tasks and plans with full metadata
-- **blocked-items.md**: Items with unresolved dependencies, showing which items block them
+- **blocked-items.md**: Items with unresolved dependencies, showing which items block them (implementation tickets only)
 - **metrics.md**: Status distribution, priority distribution, epic progress percentages, plans summary
 
 ## Special Files

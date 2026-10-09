@@ -38,9 +38,9 @@ Markplane 作为 mattpocock skills 的 tracker 后端 [[EPIC-7m4ss]]
 
 ## Acceptance criteria
 
-- [ ] 文档中的命令与当前 CLI 一致（抽查可执行）
-- [ ] README 只保留源码安装
-- [ ] `docs/skills-workflow.md` 覆盖五个技能的衔接
+- [x] 文档中的命令与当前 CLI 一致（抽查可执行）
+- [x] README 只保留源码安装
+- [x] `docs/skills-workflow.md` 覆盖五个技能的衔接
 
 ## Blocked by
 

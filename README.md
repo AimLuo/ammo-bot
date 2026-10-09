@@ -12,13 +12,15 @@
 
 ---
 
+> **This repository is a fork of [zerowand01/markplane](https://github.com/zerowand01/markplane)** (`0.1.4+skills.1`). It keeps upstream's markdown-first tracker and adds first-class support for [mattpocock/skills](https://github.com/mattpocock/skills) (wayfinder, to-spec, to-tickets, implement-spec, code-review): **Maps** and **Decision tickets**, frontier queries, `comment` / `resolve`, standalone PLANs with tags, richer MCP tools and context, a `/maps` Web UI, plus two repo skills (`my-to-spec`, `my-setup-matt-pocock-skills`). See [Skills workflow](docs/skills-workflow.md).
+
 <a href="https://github.com/user-attachments/assets/9d303e13-d14a-458f-bb58-20cd069082bc">
   <video src="https://github.com/user-attachments/assets/9d303e13-d14a-458f-bb58-20cd069082bc" autoplay loop muted playsinline></video>
 </a>
 
 Every developer using AI coding assistants hits the same wall: the AI is great at code, but clueless about the project. It doesn't know what you're building, what's blocked, or what's next. Meanwhile, your project data is locked in a SaaS tool that lives outside your codebase, outside your editor, outside your flow.
 
-Markplane stores every task, epic, and plan as a markdown file inside your repo — version-controlled with git, browsable with any editor, and automatically compressed into token-efficient summaries your AI assistant can read and act on. No database, no SaaS, no context-switching.
+Markplane stores every task, epic, plan, and map as a markdown file inside your repo — version-controlled with git, browsable with any editor, and automatically compressed into token-efficient summaries your AI assistant can read and act on. No database, no SaaS, no context-switching.
 
 ## Quickstart
 
@@ -57,7 +59,8 @@ Markplane automatically generates a `.context/` directory with compressed, token
 
 | File | What it contains | Size |
 |------|-----------------|------|
-| `summary.md` | Active epics, in-progress work, blocked items, priority queue, key metrics | ~1000 tokens |
+| `summary.md` | Active epics, Active Maps, in-progress work, blocked items, priority queue, key metrics | ~1000 tokens |
+| `maps.md` | Active maps: destination, frontier, claimed tickets, blocked/fog counts | ~300–500 tokens |
 | `active-work.md` | Detailed view of current work with dependencies and assignees | ~500 tokens |
 | `blocked-items.md` | Items waiting on unresolved dependencies | ~200-500 tokens |
 | `metrics.md` | Status distribution, priority breakdown, epic progress | ~500 tokens |
@@ -70,69 +73,15 @@ See the [AI Integration Guide](docs/ai-integration.md) for the full context laye
 
 ## Installation
 
-### Homebrew (macOS and Linux)
-
-```bash
-brew trust zerowand01/markplane
-brew install zerowand01/markplane/markplane
-```
-
-Homebrew 6.0+ requires third-party taps to be trusted before their formulae
-will load. Formulae are executable Ruby, and only official taps are
-pre-reviewed, so Homebrew asks you to opt in explicitly. Without the first
-command you'll see `Error: Refusing to load formula ... from untrusted tap`.
-Trust is recorded in `~/.homebrew/trust.json` and is set once per machine.
-
-To upgrade later:
-
-```bash
-brew update && brew upgrade markplane
-```
-
-`brew update` refreshes the tap's metadata — without it Homebrew still
-believes your installed version is current and reports nothing to upgrade.
-
-### Shell script (macOS and Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zerowand01/markplane/master/install.sh | sh
-```
-
-Downloads the latest release, verifies the SHA256 checksum, and installs to `~/.local/bin/`. Customize with environment variables:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zerowand01/markplane/master/install.sh | INSTALL_DIR=/usr/local/bin sh
-```
-
-### Pre-built binary
-
-Download the latest release for your platform from [GitHub Releases](https://github.com/zerowand01/markplane/releases). Pre-built binaries include the web UI and require no additional dependencies.
-
-| Platform | Archive |
-|----------|---------|
-| macOS (Apple Silicon) | `markplane-v*-aarch64-apple-darwin.tar.gz` |
-| macOS (Intel) | `markplane-v*-x86_64-apple-darwin.tar.gz` |
-| Linux (x86_64) | `markplane-v*-x86_64-unknown-linux-musl.tar.gz` |
-| Windows (x86_64) | `markplane-v*-x86_64-pc-windows-msvc.zip` |
-
-**macOS / Linux:**
-
-```bash
-tar xzf markplane-v*.tar.gz       # extract the binary from the archive
-mv markplane ~/.local/bin/        # or /usr/local/bin/ with sudo
-```
-
-> **Note:** On macOS, binaries downloaded via a browser may be blocked by Gatekeeper. Remove the quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/markplane`, or use the shell script install which avoids this entirely.
-
-**Windows:** Extract `markplane.exe` from the `.zip` to a location on your `PATH` (e.g., `%LOCALAPPDATA%\markplane\`).
+This fork ships **source installs only** (no Homebrew tap, release tarballs, or `install.sh` support). Upstream packaging files may still exist in-tree; they are not the supported path here.
 
 ### Build from source
 
 Requires Rust 1.93.0+. To include the web UI, also requires Node.js 24. Versions are pinned in [`mise.toml`](mise.toml) — with [mise](https://mise.jdx.dev/): `mise trust && mise install`.
 
 ```bash
-git clone https://github.com/zerowand01/markplane.git
-cd markplane
+git clone <url-of-this-repository>
+cd ammo-bot   # or your local checkout name
 
 # CLI only
 cargo install --path crates/markplane-cli
@@ -141,6 +90,18 @@ cargo install --path crates/markplane-cli
 cd crates/markplane-web/ui && npm install && npm run build && cd ../../..
 cargo install --path crates/markplane-cli --features embed-ui
 ```
+
+Verify the fork build: `markplane --version` should report a `+skills.N` suffix (e.g. `0.1.4+skills.1`).
+
+### Install `my-*` skills
+
+This repo includes two skills at the root (`my-to-spec`, `my-setup-matt-pocock-skills`). Symlink them into your agent skill directories:
+
+```bash
+./scripts/link-skills.sh
+```
+
+That links into `~/.claude/skills`, `~/.agents/skills`, and `~/.cursor/skills`. Other mattpocock skills (wayfinder, to-tickets, implement-spec, code-review, …) come from upstream and are not redistributed here — install those separately, then run `/my-setup-matt-pocock-skills` in a repo so it writes a Markplane tracker doc.
 
 ## Initialization
 
@@ -159,6 +120,7 @@ This creates the `.markplane/` directory with config, templates, and starter con
 ├── roadmap/              # Epics — strategic goals and phases (EPIC-xxxxx)
 ├── backlog/              # Tasks — the "what" to do (TASK-xxxxx)
 ├── plans/                # Plans — the "how" to do it (PLAN-xxxxx)
+├── maps/                 # Maps — wayfinder routes (MAP-xxxxx)
 ├── notes/                # Notes — research, ideas, decisions (NOTE-xxxxx)
 ├── templates/            # Document templates
 └── .context/             # Token-optimized summaries for AI
@@ -172,7 +134,7 @@ Launch the local web dashboard to see your project:
 markplane serve --open
 ```
 
-This opens `http://localhost:4200` in your browser with a dashboard, kanban board, dependency graph, and more.
+This opens `http://localhost:4200` in your browser with a dashboard, kanban board, Maps route graphs, dependency graph, and more.
 
 See the [Web UI Guide](docs/web-ui-guide.md) for keyboard shortcuts, views, and details.
 
@@ -209,10 +171,14 @@ The CLI is a power-user interface for everything Markplane can do:
 
 ```bash
 markplane add "Fix login redirect" --type bug --priority critical --tags auth
+markplane map "Chart the auth rewrite" --body-file map-body.md
+markplane add "Which session store?" --map MAP-xxxxx --type grilling
+markplane ls --map MAP-xxxxx --frontier
+markplane resolve TASK-xxxxx --answer-file ans.md --gist "Use Redis sessions"
 markplane ls                          # List tasks
 markplane ls --priority high,critical # Filter by priority
 markplane show TASK-fq2x8            # View item details
-markplane start TASK-fq2x8           # Set to in-progress
+markplane start TASK-fq2x8 --user me # Claim / start work
 markplane done TASK-fq2x8            # Mark as done
 markplane dashboard                   # Project overview
 markplane sync                        # Regenerate INDEX.md + .context/
@@ -228,6 +194,7 @@ See the [CLI Reference](docs/cli-reference.md) for complete command documentatio
 | Task | `draft` → `backlog` → `planned` → `in-progress` → `done` (also `cancelled`) | Yes — via `config.yaml` `workflows.task` |
 | Epic | `later` → `next` → `now` → `done` | No |
 | Plan | `draft` → `approved` → `in-progress` → `done` | No |
+| Map | `active` → `done` (also `abandoned`) | No |
 | Note | `draft` → `active` → `archived` | No |
 
 Task statuses are fully configurable. Each status maps to one of six **status categories** (`draft`, `backlog`, `planned`, `active`, `completed`, `cancelled`) that control system behavior (kanban columns, progress tracking, archive eligibility). Add custom statuses like `in-review`, `in-qa`, or `deployed` by placing them under the appropriate category in `config.yaml`.
@@ -235,18 +202,21 @@ Task statuses are fully configurable. Each status maps to one of six **status ca
 ## Features
 
 - **Markdown + YAML frontmatter** — Structured metadata (status, priority, effort, tags) in YAML; free-form details in markdown.
-- **AI-optimized context layer** — Generated `.context/` summaries compress full project state into ~1000 tokens for AI consumption. INDEX.md routing lets AI agents load only what they need.
-- **Web UI** — Local dashboard with kanban board, dependency graph, markdown rendering, search, and dark/light themes.
+- **Maps & Decision tickets** — Wayfinder routes with frontier queries, claim (`start --user`), and atomic `resolve`.
+- **AI-optimized context layer** — Generated `.context/` summaries (including Active Maps / `maps.md`) compress project state for AI consumption. INDEX.md routing lets agents load only what they need.
+- **Web UI** — Local dashboard with kanban board, `/maps` route graphs, dependency graph, markdown rendering, search, and dark/light themes.
 - **MCP server** — Structured tool access for AI coding assistants (Claude, Cursor, etc.) via JSON-RPC over stdio.
-- **Cross-references** — `[[TASK-rm6d3]]` wiki-style links between items, with validation via `markplane check`.
+- **Skills workflow** — Tracker backend for mattpocock skills; see [Skills workflow](docs/skills-workflow.md).
+- **Cross-references** — `[[TASK-rm6d3]]` / `[[MAP-xxxxx]]` wiki-style links between items, with validation via `markplane check`.
 - **Dependency tracking** — `blocks` / `depends_on` relationships and bidirectional `related` links with visual dependency graphs.
 - **Real-time sync** — Changes from CLI, MCP, or file edits appear instantly in the web UI via WebSocket.
-- **Archive management** — Archive completed items across all entity types with easy restore.
-- **Built-in workflows** — Configurable status progressions for tasks, epics, plans, and notes.
+- **Archive management** — Archive completed items across all entity types with easy restore (archiving a Map archives its Decision tickets).
+- **Built-in workflows** — Configurable status progressions for tasks; fixed workflows for epics, plans, maps, and notes.
 
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md) — Step-by-step tutorial
+- [Skills workflow](docs/skills-workflow.md) — wayfinder → my-to-spec → to-tickets → implement-spec → code-review
 - [CLI Reference](docs/cli-reference.md) — Complete command documentation
 - [Web UI Guide](docs/web-ui-guide.md) — Web dashboard usage and development
 - [AI Integration Guide](docs/ai-integration.md) — Context layer, INDEX.md pattern, AI workflows

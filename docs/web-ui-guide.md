@@ -19,6 +19,7 @@ markplane serve --port 8080  # Custom port
 | Dashboard | `/dashboard` | Summary metrics, active work, blocked items, epic progress, AI context panel |
 | Backlog | `/backlog` | Kanban board, list view, and table view with filtering |
 | Roadmap | `/roadmap` | Epics with progress tracking, status breakdowns, and linked tasks |
+| Maps | `/maps` | Wayfinder maps list and route-graph detail |
 | Plans | `/plans` | Implementation plans with detail view |
 | Notes | `/notes` | Research notes, ideas, and decisions |
 | Graph | `/graph` | Interactive dependency graph |
@@ -36,6 +37,7 @@ The default backlog view shows tasks organized in status columns: In Progress, P
 - **WIP limits**: The In Progress column has a limit of 5 items. The column header turns red when exceeded.
 - **Filters**: Filter by status, priority, epic, tags, and assignee. Active filters are shown as removable pills. Filter state is preserved in the URL.
 - **View toggle**: Switch between Kanban, List, and Table views using the toggle in the header. The selection is preserved in the URL (`?view=list`).
+- **Decision tickets**: Hidden by default so implementation work stays visible. Toggle **Decision tickets** in the backlog header to show tasks that have a `map` field.
 
 ### Roadmap (`/roadmap`)
 
@@ -43,14 +45,24 @@ Epics are displayed in three columns — Now, Next, and Later — with graduated
 
 - **Drag-and-drop**: Drag epic cards between columns to change status. Updates are optimistic. The Done section is not droppable — use the "Mark done" action from the detail sheet instead.
 
+### Maps (`/maps`)
+
+The Maps list shows every map as a card with ID, status, title, decided/total progress, and frontier count. Click a card (or open `/maps?map=MAP-xxxxx`) for the route-graph detail:
+
+- Decision tickets lay out left-to-right by dependency depth from Start toward the Destination
+- Node borders encode state: decided / claimed / frontier / blocked (cancelled tickets are out of scope and listed separately, not on the graph)
+- Nodes show type badge and title; click a node for Question, Answer, and blockers in a side panel, with Not yet specified and Out of scope beneath
+- Deep-link from a task: `/maps?map=MAP-xxxxx&node=TASK-xxxxx` highlights that node
+
 ### Task Detail
 
 Click any task to open its detail panel. The panel shows:
 
-- **Markdown body** rendered with syntax highlighting and clickable `[[TASK-rm6d3]]` wiki-link chips
-- **Metadata sidebar** with editable fields: status, priority, effort, type, epic, plan, tags, assignee, dependencies, related items
+- **Markdown body** rendered with syntax highlighting and clickable `[[TASK-rm6d3]]` / `[[MAP-xxxxx]]` wiki-link chips
+- **Metadata sidebar** with editable fields: status, priority, effort, type, epic, plan, map, tags, assignee, dependencies, related items
 - Click any metadata field to edit it inline via dropdown
 - **Plan field**: Search and link an existing plan, or create a new one directly from the dropdown
+- **Map field**: When set (Decision ticket), links to the Maps route graph with that node highlighted
 
 ### Epic Detail
 
@@ -102,7 +114,7 @@ General settings fields save on blur or Enter (text/number inputs) or immediatel
 
 Press `Cmd+K` (or `Ctrl+K`) to open the command palette. It provides:
 
-- Fuzzy search across all tasks, epics, plans, and notes
+- Fuzzy search across all tasks, epics, plans, maps, and notes
 - Navigation shortcuts to any page
 - Creation actions: New Task, New Epic, New Note, New Plan
 - Quick actions like triggering a sync
@@ -130,6 +142,7 @@ All changes are detected via filesystem watching and pushed to the browser over 
 | `g` then `d` | Go to Dashboard |
 | `g` then `b` | Go to Backlog |
 | `g` then `r` | Go to Roadmap |
+| `g` then `m` | Go to Maps |
 | `g` then `p` | Go to Plans |
 | `g` then `n` | Go to Notes |
 | `g` then `g` | Go to Graph |
@@ -245,6 +258,8 @@ Error:             { "error": { "code": string, "message": string } }
 | GET | `/api/plans` | List plans |
 | GET | `/api/plans/:id` | Plan detail |
 | POST | `/api/plans` | Create plan (optionally linked to a task). Validates task_id format and existence; rolls back if linking fails. |
+| GET | `/api/maps` | List maps with decided/total progress and frontier count |
+| GET | `/api/maps/:id` | Map detail with route-graph tickets and body sections |
 | GET | `/api/notes` | List notes |
 | GET | `/api/notes/:id` | Note detail |
 | POST | `/api/notes` | Create note |
@@ -255,12 +270,12 @@ Error:             { "error": { "code": string, "message": string } }
 | GET | `/api/graph/:id` | Focused graph (2-hop neighborhood) |
 | GET | `/api/docs` | List available documentation pages |
 | GET | `/api/docs/:slug` | Get documentation page content |
-| POST | `/api/items/:id/archive` | Archive any item (task, epic, plan, note) |
+| POST | `/api/items/:id/archive` | Archive any item (task, epic, plan, map, note) |
 | POST | `/api/items/:id/unarchive` | Restore an archived item |
 | GET | `/api/config` | Get project configuration (project info, context settings, documentation paths, item types, note types, workflows) |
 | PATCH | `/api/config` | Update project configuration (partial updates supported at every level). Returns 409 Conflict if workflow changes would strand active tasks using removed statuses. |
 
-All list endpoints (`/api/tasks`, `/api/epics`, `/api/plans`, `/api/notes`) accept an `?archived=true` query parameter to return archived items instead of active ones.
+All list endpoints (`/api/tasks`, `/api/epics`, `/api/plans`, `/api/maps`, `/api/notes`) accept an `?archived=true` query parameter to return archived items instead of active ones.
 
 ### WebSocket Events
 

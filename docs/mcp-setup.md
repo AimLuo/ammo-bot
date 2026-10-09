@@ -147,20 +147,20 @@ The server inherits its working directory from the AI tool that launches it (e.g
 
 ## Tool Catalog
 
-The server exposes 15 tools via the `tools/list` method.
+The server exposes 17 tools via the `tools/list` method.
 
 ### Context & Navigation
 
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
 | `markplane_summary` | Get project state summary. Returns a text overview of the project. | *(none)* | *(none)* |
-| `markplane_context` | Generate a context summary for the project. | *(none)* | `focus` (string): area like `active-work`, `blocked`, `metrics` |
+| `markplane_context` | Generate a context summary for the project. | *(none)* | `focus` (string): area like `active-work`, `blocked`, `metrics` (no map focus) |
 
 ### Query & Search
 
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
-| `markplane_query` | Query items with optional filters. Returns matching items. | *(none)* | `kind` (string): item kind — `tasks` (default), `epics`, `plans`, or `notes`; `status` (string[]): filter by status; `priority` (string[]): filter by priority; `epic` (string): filter by epic ID; `tags` (string[]): filter by tags; `assignee` (string): filter by assignee; `archived` (boolean): show archived items instead of active |
+| `markplane_query` | Query items with optional filters. Returns matching items (includes assignee / depends_on / tags where applicable). | *(none)* | `kind` (string): `tasks` (default), `epics`, `plans`, `notes`, or `maps`; `status` (string[]); `priority` (string[]); `epic` (string); `plan` (string); `map` (string); `tags` (string[]); `assignee` (string); `archived` (boolean); `frontier` (boolean): open, unblocked, unassigned tasks sorted by position (tasks only; combines with epic/plan/map) |
 | `markplane_show` | Get full details of any item by ID. Returns frontmatter and body. | `id` (string) | *(none)* |
 | `markplane_graph` | Build a reference graph showing how items relate to each other. | `id` (string) | `depth` (number): max traversal depth, default 2 |
 
@@ -168,23 +168,27 @@ The server exposes 15 tools via the `tools/list` method.
 
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
-| `markplane_add` | Create a new item. | `title` (string) | `kind` (string): item kind — `task` (default), `epic`, or `note`; `type` (string): item type (tasks only, configurable via `config.yaml`); `priority` (string): priority (tasks and epics), default medium; `effort` (string): effort size (tasks only), default medium; `epic` (string): parent epic ID (tasks only); `note_type` (string): note type (notes only, configurable via `config.yaml`); `tags` (string[]): tags (tasks and notes); `template` (string): template name override (e.g. `bug`, `research`) |
-| `markplane_update` | Update fields on an existing item. | `id` (string) | `title` (string): new title; `status` (string): new status; `priority` (string): new priority; `effort` (string): effort size (tasks); `type` (string): item type (tasks); `assignee` (string/null): set or clear assignee (tasks); `position` (string/null): position key; `add_tags` (string[]): tags to add; `remove_tags` (string[]): tags to remove; `started` (string/null): started date YYYY-MM-DD (epics); `target` (string/null): target date YYYY-MM-DD (epics); `note_type` (string): note type (notes) |
+| `markplane_add` | Create a new item. | `title` (string) | `kind` (string): `task` (default), `epic`, `plan`, `note`, or `map`; `type` (string): task type (with `map`: `research`/`prototype`/`grilling`/`task`); `priority` (string); `effort` (string); `epic` (string): parent epic (tasks); `map` (string): parent Map — Decision ticket (tasks; mutually exclusive with epic/plan); `note_type` (string); `tags` (string[]): tasks, notes, epics, plans; `template` (string); `body` (string): body after the title heading |
+| `markplane_update` | Update fields on an existing item. | `id` (string) | `title` (string); `status` (string) — includes Map statuses `active`/`done`/`abandoned`; `priority` (string); `effort` (string); `type` (string); `assignee` (string/null); `position` (string/null); `add_tags` (string[]); `remove_tags` (string[]); `started` (string/null); `target` (string/null); `note_type` (string) |
 | `markplane_move` | Move a task to a new position within its priority group. Handles fractional-indexing math automatically. | `id` (string) | `to` (string): `top` or `bottom`; `before` (string): task ID to position before; `after` (string): task ID to position after. Provide exactly one of `to`, `before`, or `after`. |
+| `markplane_comment` | Append a dated, attributed comment under `## Comments`. | `id` (string), `body` (string) | `author` (string) |
+| `markplane_resolve` | Resolve a Decision ticket: write `## Answer`, mark done, append Map Decisions so far. | `id` (string), `answer` (string), `gist` (string) | *(none)* |
 
 ### Workflow
 
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
 | `markplane_promote` | Promote a note to a task. | `note_id` (string) | `priority` (string): default medium; `effort` (string): default medium |
-| `markplane_plan` | Create an implementation plan linked to a task. | `task_id` (string) | `title` (string): defaults to "Implementation plan for {item title}"; `template` (string): template name override (e.g. `refactor`), defaults to `implementation` |
-| `markplane_link` | Link two items with a typed relationship. `related` is bidirectional and works between any item types. | `from` (string), `to` (string), `relation` (string): `blocks`, `depends_on`, `epic`, `plan`, `implements`, or `related` | `remove` (boolean): remove the link instead of adding it (default: false) |
+| `markplane_plan` | Create an implementation plan linked to a task. (Standalone plans: use `markplane_add` with `kind: "plan"`.) | `task_id` (string) | `title` (string): defaults to "Implementation plan for {item title}"; `template` (string): template name override (e.g. `refactor`), defaults to `implementation` |
+| `markplane_link` | Link two items with a typed relationship. `related` is bidirectional and works between any item types. | `from` (string), `to` (string), `relation` (string): `blocks`, `depends_on`, `epic`, `plan`, `implements`, `map`, or `related` | `remove` (boolean): remove the link instead of adding it (default: false) |
+
+> Map → Spec (`spec`) linking is available on the CLI (`markplane link … -r spec`). Prefer the CLI for that relation until MCP grows a matching enum value.
 
 ### Archive
 
 | Tool | Description | Required Params | Optional Params |
 |------|-------------|-----------------|-----------------|
-| `markplane_archive` | Move an item to the archive. | `id` (string) | *(none)* |
+| `markplane_archive` | Move an item to the archive. Archiving a Map also archives its Decision tickets. | `id` (string) | *(none)* |
 | `markplane_unarchive` | Restore an archived item back to active items. | `id` (string) | *(none)* |
 
 ### Maintenance
@@ -196,7 +200,7 @@ The server exposes 15 tools via the `tools/list` method.
 
 ## Resource Catalog
 
-The server exposes 8 resources via the `resources/list` method.
+The server exposes 10 resources via the `resources/list` method (5 static + 5 templates).
 
 ### Static Resources
 
@@ -206,6 +210,7 @@ The server exposes 8 resources via the `resources/list` method.
 | `markplane://active-work` | Active Work | `text/markdown` | Currently in-progress tasks |
 | `markplane://blocked` | Blocked Items | `text/markdown` | Items that have unresolved dependencies or need attention |
 | `markplane://templates` | Template Manifest | `text/yaml` | Template configuration showing available templates for each item kind |
+| `markplane://maps` | Active Maps | `text/markdown` | Context summary of active maps (contents of `.context/maps.md`) |
 
 ### Dynamic Resource Templates
 
@@ -215,6 +220,7 @@ The server exposes 8 resources via the `resources/list` method.
 | `markplane://epic/{id}` | Epic | Full content of an epic by ID (e.g. `markplane://epic/EPIC-xa7r2`) |
 | `markplane://plan/{id}` | Plan | Full content of an implementation plan by ID (e.g. `markplane://plan/PLAN-ya8v2`) |
 | `markplane://note/{id}` | Note | Full content of a note by ID (e.g. `markplane://note/NOTE-vt3k8`) |
+| `markplane://map/{id}` | Map | Full content of a map by ID (e.g. `markplane://map/MAP-k7x9m`) |
 
 ## JSON-RPC Examples
 

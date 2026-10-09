@@ -30,14 +30,17 @@ markplane add <TITLE> [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--type <TYPE>` | *(first in config)* | Task type (configurable via `config.yaml`, default: first in `task_types` list) |
+| `--type <TYPE>` | *(first in config)* | Task type (configurable via `config.yaml`, default: first in `task_types` list). With `--map`: must be `research`, `prototype`, `grilling`, or `task` (built-in; skips config). |
 | `--priority <PRIORITY>` | `medium` | Priority: `critical`, `high`, `medium`, `low`, `someday` |
 | `--effort <EFFORT>` | `medium` | Effort estimate: `xs`, `small`, `medium`, `large`, `xl` |
 | `--epic <EPIC_ID>` | — | Parent epic ID (e.g. `EPIC-xa7r2`) |
+| `--plan <PLAN_ID>` | — | Parent plan ID (e.g. `PLAN-ya8v2`); maintains `Plan.implements` |
+| `--map <MAP_ID>` | — | Parent Map ID — creates a **Decision ticket**. Mutually exclusive with `--epic` / `--plan`. |
 | `--tags <TAGS>` | — | Comma-separated tags (e.g. `auth,backend`) |
 | `--template <NAME>` | — | Template name override (e.g. `bug`). Uses type-based or kind defaults if omitted. |
+| `--body-file <PATH>` | — | Read body from file (or `-` for stdin); placed after the title heading |
 
-New items are created with status `draft`.
+New items are created with status `draft` (Decision tickets use the backlog category status from the workflow).
 
 **Example:**
 
@@ -47,13 +50,18 @@ markplane add "Implement dark mode" --type feature --priority high --effort larg
 
 markplane add "Login crash on Safari" --type bug --template bug
 # Created TASK-kn4r7 — Login crash on Safari (uses bug template)
+
+markplane add "Ship caching layer" --plan PLAN-ya8v2 --body-file ticket.md --tags ready-for-agent
+
+markplane add "Which session store?" --map MAP-k7x9m --type grilling --body-file q.md
+# Created TASK-… — Decision ticket under MAP-k7x9m
 ```
 
 ---
 
 ## archive
 
-Move items to archive subdirectories. Works with all entity types (tasks, epics, plans, notes).
+Move items to archive subdirectories. Works with all entity types (tasks, epics, plans, maps, notes).
 
 ```
 markplane archive [ID] [OPTIONS]
@@ -72,7 +80,9 @@ markplane archive [ID] [OPTIONS]
 | `--all-done` | `false` | Archive all completed items across all types |
 | `--dry-run` | `false` | Preview what would be archived without making changes |
 
-When archiving a single item, provide the ID. When using `--all-done`, all done/cancelled tasks, done epics, done plans, and archived-status notes are moved to their respective `archive/` subdirectories.
+When archiving a single item, provide the ID. When using `--all-done`, all done/cancelled tasks, done epics, done plans, done/abandoned maps, and archived-status notes are moved to their respective `archive/` subdirectories.
+
+Archiving a **Map** also archives all of its Decision tickets.
 
 Archived items retain their status (no "archived" status) and remain resolvable via `[[ID]]` cross-references and `markplane show`.
 
@@ -186,7 +196,38 @@ Output a CLAUDE.md integration snippet for AI coding tools.
 markplane claude-md
 ```
 
-Prints a markdown snippet pointing AI assistants to relevant Markplane files. Add the output to your project's `CLAUDE.md`.
+Prints (or appends) a `## Project Management` markdown snippet pointing AI assistants to relevant Markplane files, including `.markplane/maps/INDEX.md` and `.context/maps.md`.
+
+---
+
+## comment
+
+Append a dated, attributed comment under `## Comments` on any item.
+
+```
+markplane comment <ID> --body-file <PATH>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<ID>` | Item ID (any kind) |
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--body-file <PATH>` | Read comment body from file (or `-` for stdin) (required) |
+
+Creates a `### <date> <author>` subsection (author from `$USER` / `$USERNAME` / `me`). Works on tasks, epics, plans, maps, and notes.
+
+**Example:**
+
+```bash
+markplane comment TASK-fq2x8 --body-file note.md
+# ✓ Comment appended to TASK-fq2x8
+```
 
 ---
 
@@ -319,6 +360,9 @@ markplane epic <TITLE> [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--priority <PRIORITY>` | `medium` | Priority: `critical`, `high`, `medium`, `low`, `someday` |
+| `--tags <TAGS>` | — | Comma-separated tags |
+| `--template <NAME>` | — | Template name override (e.g. `spec`) |
+| `--body-file <PATH>` | — | Read body from file (or `-` for stdin); placed after the title heading |
 
 New epics are created with status `later`.
 
@@ -327,6 +371,8 @@ New epics are created with status `later`.
 ```bash
 markplane epic "Phase 2: API Layer" --priority high
 # Created EPIC-kb4n9 — Phase 2: API Layer
+
+markplane epic "Auth rewrite" --body-file spec.md --tags ready-for-agent --template spec
 ```
 
 ---
@@ -419,7 +465,7 @@ markplane link <FROM> <TO> -r <RELATION> [--remove]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --relation <RELATION>` | Relationship type (required): `blocks`, `depends-on`, `epic`, `plan`, `implements`, `related` |
+| `-r, --relation <RELATION>` | Relationship type (required): `blocks`, `depends-on`, `epic`, `plan`, `implements`, `map`, `spec`, `related` |
 | `--remove` | Remove the link instead of adding it |
 
 Each relation type has specific source/target type constraints:
@@ -431,6 +477,8 @@ Each relation type has specific source/target type constraints:
 | `epic` | TASK | EPIC | Sets `from.epic` to target |
 | `plan` | TASK | PLAN | Sets `from.plan` to target and adds to `plan.implements[]` |
 | `implements` | PLAN | TASK | Adds to `from.implements[]` and sets `task.plan` |
+| `map` | TASK | MAP | Sets `from.map` to target (Decision ticket; mutually exclusive with epic/plan) |
+| `spec` | MAP | EPIC or PLAN | Adds target to `map.specs[]` |
 | `related` | any | any | Adds to `from.related[]` and `to.related[]` (bidirectional) |
 
 Self-links are rejected. Invalid source/target type combinations return an error. Adding a duplicate link is a no-op. Removing a non-existent link is a no-op.
@@ -455,6 +503,10 @@ markplane link TASK-fq2x8 NOTE-vt3k8 -r related
 markplane link TASK-hn5k3 TASK-d4p7m -r related
 markplane link EPIC-xa7r2 EPIC-kb4n9 -r related
 
+# Decision ticket → Map; Map → published Spec
+markplane link TASK-q1 MAP-k7x9m -r map
+markplane link MAP-k7x9m EPIC-kb4n9 -r spec
+
 # Remove a link
 markplane link TASK-hn5k3 TASK-fq2x8 -r depends-on --remove
 ```
@@ -477,18 +529,22 @@ markplane ls [KIND] [OPTIONS]
 | `epics` | List epics |
 | `plans` | List plans |
 | `notes` | List notes |
+| `maps` | List maps |
 
-**Options (tasks only):**
+**Options (tasks):**
 
 | Option | Description |
 |--------|-------------|
 | `--status <VALUES>` | Filter by status (comma-separated) |
 | `--priority <VALUES>` | Filter by priority (comma-separated) |
 | `--epic <EPIC_ID>` | Filter by epic ID |
+| `--plan <PLAN_ID>` | Filter by plan ID |
+| `--map <MAP_ID>` | Filter by map ID (Decision tickets) |
 | `--tags <VALUES>` | Filter by tags (comma-separated, items must have at least one) |
 | `--assignee <USER>` | Filter by assignee |
 | `--type <VALUES>` | Filter by item type (comma-separated) |
 | `--archived` | Show archived items instead of active ones |
+| `--frontier` | Show only frontier tasks: open, unblocked (completed **or cancelled** blockers count as resolved), unassigned; sorted by `position`. Combines with `--epic` / `--plan` / `--map`. |
 
 **Examples:**
 
@@ -497,11 +553,47 @@ markplane ls
 markplane ls --status in-progress,planned
 markplane ls --priority critical,high --tags auth
 markplane ls --epic EPIC-xa7r2
+markplane ls --plan PLAN-ya8v2 --frontier
+markplane ls --map MAP-k7x9m --frontier
 markplane ls epics
 markplane ls plans
 markplane ls notes
+markplane ls maps
 markplane ls --archived             # Archived tasks
 markplane ls epics --archived       # Archived epics
+```
+
+---
+
+## map
+
+Create a new Map (wayfinder route).
+
+```
+markplane map <TITLE> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<TITLE>` | Map title (required) |
+
+**Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--tags <TAGS>` | — | Comma-separated tags |
+| `--template <NAME>` | — | Template name override |
+| `--body-file <PATH>` | — | Read body from file (or `-` for stdin); placed after the title heading |
+
+New maps are created with status `active`. The default template pre-fills Destination / Notes / Decisions so far / Not yet specified / Out of scope.
+
+**Example:**
+
+```bash
+markplane map "Auth rewrite route" --body-file map.md
+# Created MAP-k7x9m — Auth rewrite route
 ```
 
 ---
@@ -573,6 +665,7 @@ markplane note <TITLE> [OPTIONS]
 | `--type <TYPE>` | *(first in config)* | Note type (configurable via `config.yaml`, default: first in `note_types` list) |
 | `--tags <TAGS>` | — | Comma-separated tags |
 | `--template <NAME>` | — | Template name override (e.g. `research`, `analysis`). Uses type-based defaults if omitted. |
+| `--body-file <PATH>` | — | Read body from file (or `-` for stdin); placed after the title heading |
 
 New notes are created with status `draft`.
 
@@ -587,28 +680,28 @@ markplane note "Evaluate caching strategies" --type research --tags "performance
 
 ## plan
 
-Create a linked implementation plan for a task.
+Create a plan — standalone, or linked to a task.
 
 ```
-markplane plan <ID> [OPTIONS]
+markplane plan [TASK_ID] [OPTIONS]
 ```
 
 **Arguments:**
 
 | Argument | Description |
 |----------|-------------|
-| `<ID>` | Task ID (e.g. `TASK-rm6d3`) |
+| `[TASK_ID]` | Optional task ID. Omit for a standalone plan (requires `--title`). |
 
 **Options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--title <TITLE>` | `"Implementation plan for <item title>"` | Custom plan title |
-| `--template <NAME>` | — | Template name override (e.g. `refactor`). Defaults to `implementation`. |
+| `--title <TITLE>` | `"Implementation plan for <item title>"` when linked; **required** when standalone | Plan title |
+| `--tags <TAGS>` | — | Comma-separated tags |
+| `--template <NAME>` | — | Template name override (e.g. `refactor`, `implementation`, `spec`). Defaults to `implementation`. |
+| `--body-file <PATH>` | — | Read body from file (or `-` for stdin); placed after the title heading |
 
-Creates a plan that references the task via `implements` and links the plan back to the item's `plan` field.
-
-Only works with tasks (`TASK-xxxxx`).
+When a task ID is provided, creates a plan that references the task via `implements` and links the plan back to the item's `plan` field. Standalone plans are valid specs for `to-tickets` / `implement-spec`.
 
 **Example:**
 
@@ -620,6 +713,9 @@ markplane plan TASK-4ed4i
 markplane plan TASK-d4p7m --title "JWT architecture design"
 # Created PLAN-mf5t9 — JWT architecture design
 # Linked to TASK-d4p7m
+
+markplane plan --title "Cache layer design" --body-file spec.md --tags ready-for-agent --template spec
+# Created PLAN-… — standalone plan
 ```
 
 ---
@@ -652,6 +748,37 @@ Creates a new task with the note's title and tags, using the default item type f
 ```bash
 markplane promote NOTE-vt3k8 --priority high --effort small
 # Promoted NOTE-vt3k8 → TASK-hn5k3 — Evaluate caching strategies
+```
+
+---
+
+## resolve
+
+Resolve a Decision ticket in one step: write `## Answer`, mark the ticket done, and append a line to the parent Map's Decisions so far.
+
+```
+markplane resolve <ID> --answer-file <PATH> --gist <GIST>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<ID>` | Decision ticket ID (a TASK with `map` set) |
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--answer-file <PATH>` | Read answer body from file (or `-` for stdin) (required) |
+| `--gist <GIST>` | One-line gist for the Map entry (required) |
+
+Appends `- <title> [[ID]]: <gist>` under the Map's Decisions so far. If the Map has no open tickets left, prints a hint so you can ask the human whether to mark the Map done (`markplane status <MAP> done`).
+
+**Example:**
+
+```bash
+markplane resolve TASK-q1 --answer-file answer.md --gist "Use Redis for sessions"
 ```
 
 ---
@@ -703,9 +830,9 @@ markplane show <ID>
 
 | Argument | Description |
 |----------|-------------|
-| `<ID>` | Item ID (e.g. `TASK-rm6d3`, `EPIC-xa7r2`, `PLAN-wk7n1`, `NOTE-dq6m1`) |
+| `<ID>` | Item ID (e.g. `TASK-rm6d3`, `EPIC-xa7r2`, `PLAN-wk7n1`, `MAP-k7x9m`, `NOTE-dq6m1`) |
 
-Displays all metadata fields and the markdown body. Works with all item types. Also finds archived items.
+Displays all metadata fields and the markdown body (including `## Comments` when present). Works with all item types. Also finds archived items.
 
 ---
 
@@ -793,6 +920,7 @@ markplane status <ID> <NEW_STATUS>
 | `TASK` | Configurable via `config.yaml` `workflows.task`. Defaults: `draft`, `backlog`, `planned`, `in-progress`, `done`, `cancelled` |
 | `EPIC` | `later`, `next`, `now`, `done` |
 | `PLAN` | `draft`, `approved`, `in-progress`, `done` |
+| `MAP` | `active`, `done`, `abandoned` |
 | `NOTE` | `draft`, `active`, `archived` |
 
 **Example:**
@@ -869,8 +997,8 @@ markplane update <ID> [OPTIONS]
 | `--clear-assignee` | Tasks | Clear assignee |
 | `--position <KEY>` | Tasks | Set position key for manual ordering |
 | `--clear-position` | Tasks | Clear position |
-| `--add-tag <TAGS>` | Tasks, Epics, Notes | Comma-separated tags to add (duplicates ignored) |
-| `--remove-tag <TAGS>` | Tasks, Epics, Notes | Comma-separated tags to remove |
+| `--add-tag <TAGS>` | Tasks, Epics, Plans, Maps, Notes | Comma-separated tags to add (duplicates ignored) |
+| `--remove-tag <TAGS>` | Tasks, Epics, Plans, Maps, Notes | Comma-separated tags to remove |
 | `--started <DATE>` | Epics | Set started date (YYYY-MM-DD) |
 | `--clear-started` | Epics | Clear started date |
 | `--target <DATE>` | Epics | Set target date (YYYY-MM-DD) |
