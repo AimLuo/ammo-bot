@@ -1,7 +1,7 @@
 ---
 id: TASK-62jjn
 title: Frontier 查询与 cancelled blocker 视为解除
-status: in-progress
+status: done
 priority: high
 type: feature
 effort: medium
