@@ -1,7 +1,7 @@
 ---
 id: TASK-z3uwm
 title: Context 层与 MCP map resources
-status: in-progress
+status: done
 priority: medium
 type: feature
 effort: medium
