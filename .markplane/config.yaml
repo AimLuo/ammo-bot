@@ -1,7 +1,7 @@
 version: 1
 project:
   name: Markplane
-  description: AI-native, markdown-first project management system
+  description: Markplane fork that tracks mattpocock skills workflows (Maps, Decision tickets, and related CLI)
 context:
   token_budget: 1000
   recent_days: 7
