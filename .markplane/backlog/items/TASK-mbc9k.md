@@ -1,7 +1,7 @@
 ---
 id: TASK-mbc9k
 title: Web UI：Backlog 隐藏 Decision ticket 与 Task→Map 跳转
-status: in-progress
+status: done
 priority: medium
 type: feature
 effort: medium
