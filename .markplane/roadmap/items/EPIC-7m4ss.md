@@ -1,7 +1,7 @@
 ---
 id: EPIC-7m4ss
 title: Markplane 作为 mattpocock skills 的 tracker 后端
-status: now
+status: done
 priority: high
 started: null
 target: null
