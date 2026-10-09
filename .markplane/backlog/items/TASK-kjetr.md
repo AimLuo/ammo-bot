@@ -1,7 +1,7 @@
 ---
 id: TASK-kjetr
 title: Decision ticket：add --map 与 ls --map
-status: backlog
+status: in-progress
 priority: high
 type: feature
 effort: medium
@@ -16,7 +16,7 @@ blocks:
 - TASK-z3uwm
 - TASK-2uakq
 related: []
-assignee: null
+assignee: chuck
 tags:
 - ready-for-agent
 position: aE
