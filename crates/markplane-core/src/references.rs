@@ -809,6 +809,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let task_b = project
@@ -819,6 +820,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -851,6 +853,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -887,6 +890,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let task_b = project
@@ -897,6 +901,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -935,6 +940,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let _task_b = project
@@ -945,6 +951,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -981,6 +988,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let task_b = project
@@ -991,6 +999,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1046,6 +1055,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let task_b = project
@@ -1056,6 +1066,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1104,9 +1115,10 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
-        let plan = project.create_plan("Plan", vec![], None).unwrap();
+        let plan = project.create_plan("Plan", vec![], None, None).unwrap();
 
         // Create proper link
         project
@@ -1145,9 +1157,12 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
-        let note = project.create_note("Note", "idea", vec![], None).unwrap();
+        let note = project
+            .create_note("Note", "idea", vec![], None, None)
+            .unwrap();
 
         // Create proper link
         project
@@ -1186,6 +1201,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let task_b = project
@@ -1197,10 +1213,13 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
-        let plan = project.create_plan("Plan", vec![], None).unwrap();
-        let note = project.create_note("Note", "idea", vec![], None).unwrap();
+        let plan = project.create_plan("Plan", vec![], None, None).unwrap();
+        let note = project
+            .create_note("Note", "idea", vec![], None, None)
+            .unwrap();
 
         // Create correct reciprocal links
         project
@@ -1254,6 +1273,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let t2 = project
@@ -1265,6 +1285,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let t3 = project
@@ -1275,6 +1296,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1310,6 +1332,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let t2 = project
@@ -1320,6 +1343,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1359,6 +1383,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let task_b = project
@@ -1369,6 +1394,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1412,6 +1438,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let t2 = project
@@ -1422,6 +1449,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1460,6 +1488,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let t2 = project
@@ -1470,6 +1499,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();

@@ -2192,6 +2192,166 @@ fn test_full_workflow() {
         .success();
 }
 
+// ── Body file ────────────────────────────────────────────────────────
+
+#[test]
+fn test_add_with_body_file() {
+    let tmp = setup_project();
+    let body_path = tmp.path().join("body.md");
+    std::fs::write(&body_path, "## Description\n\nCustom body from file.\n").unwrap();
+
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Body file task",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let task_id = extract_id(&output.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &task_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Custom body from file"))
+        .stdout(predicate::str::contains("## Description"));
+}
+
+#[test]
+fn test_epic_plan_note_with_body_file() {
+    let tmp = setup_project();
+    let body_path = tmp.path().join("body.md");
+    std::fs::write(&body_path, "## Objective\n\nEpic body from file.\n").unwrap();
+
+    let epic_out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "epic",
+            "Body epic",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        epic_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&epic_out.stderr)
+    );
+    let epic_id = extract_id(&epic_out.stdout);
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &epic_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Epic body from file"));
+
+    std::fs::write(&body_path, "## Overview\n\nPlan body from file.\n").unwrap();
+    let task_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Task for plan"])
+        .output()
+        .unwrap();
+    assert!(task_out.status.success());
+    let task_id = extract_id(&task_out.stdout);
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", &task_id, "--body-file", body_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        plan_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&plan_out.stderr)
+    );
+    let plan_id = extract_id(&plan_out.stdout);
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &plan_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Plan body from file"));
+
+    std::fs::write(&body_path, "## Findings\n\nNote body from file.\n").unwrap();
+    let note_out = cmd()
+        .current_dir(tmp.path())
+        .args([
+            "note",
+            "Body note",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        note_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&note_out.stderr)
+    );
+    let note_id = extract_id(&note_out.stdout);
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &note_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Note body from file"));
+}
+
+#[test]
+fn test_add_body_file_stdin() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Stdin body task", "--body-file", "-"])
+        .write_stdin("## Description\n\nBody from stdin.\n")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let task_id = extract_id(&output.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &task_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Body from stdin"));
+}
+
+#[test]
+fn test_add_without_body_file_uses_template() {
+    let tmp = setup_project();
+    let output = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Template body task"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let task_id = extract_id(&output.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["show", &task_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Description"))
+        .stdout(predicate::str::contains("## Acceptance Criteria"))
+        .stdout(predicate::str::contains("[What needs to be done"));
+}
+
 // ── Template flag ────────────────────────────────────────────────────
 
 #[test]

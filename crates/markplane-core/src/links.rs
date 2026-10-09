@@ -463,25 +463,30 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         task.id
     }
 
     fn create_epic(project: &Project, title: &str) -> String {
-        let epic = project.create_epic(title, Priority::Medium, None).unwrap();
+        let epic = project
+            .create_epic(title, Priority::Medium, None, None)
+            .unwrap();
         epic.id
     }
 
     fn create_plan(project: &Project, title: &str, task_id: &str) -> String {
-        let plan = project.create_plan(title, vec![], None).unwrap();
+        let plan = project.create_plan(title, vec![], None, None).unwrap();
         // Don't auto-link — we'll use link_items to test
         let _ = task_id;
         plan.id
     }
 
     fn create_note(project: &Project, title: &str) -> String {
-        let note = project.create_note(title, "idea", vec![], None).unwrap();
+        let note = project
+            .create_note(title, "idea", vec![], None, None)
+            .unwrap();
         note.id
     }
 

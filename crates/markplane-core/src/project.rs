@@ -121,6 +121,16 @@ pub fn apply_tag_changes(current: &mut Vec<String>, add: &[String], remove: &[St
     }
 }
 
+/// Compose an item body from explicit content placed after the title heading.
+pub fn compose_body_after_title(title: &str, content: &str) -> String {
+    let content = content.trim_end();
+    if content.is_empty() {
+        format!("# {title}\n")
+    } else {
+        format!("# {title}\n\n{content}\n")
+    }
+}
+
 /// Maximum allowed title length in characters.
 const MAX_TITLE_LENGTH: usize = 500;
 
@@ -411,6 +421,22 @@ impl Project {
         }
     }
 
+    /// Build item body: explicit content after the title heading, or a rendered template.
+    fn resolve_create_body(
+        &self,
+        kind: &str,
+        title: &str,
+        template: Option<&str>,
+        item_type: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<String> {
+        if let Some(content) = body {
+            return Ok(compose_body_after_title(title, content));
+        }
+        let tmpl = self.resolve_template_body(kind, template, item_type)?;
+        Ok(render_template(&tmpl, &[("{TITLE}", title)]))
+    }
+
     /// Create a new task.
     #[allow(clippy::too_many_arguments)]
     pub fn create_task(
@@ -422,6 +448,7 @@ impl Project {
         epic: Option<String>,
         tags: Vec<String>,
         template: Option<&str>,
+        body: Option<&str>,
     ) -> Result<Task> {
         validate_title_length(title)?;
         self.validate_task_type(item_type)?;
@@ -429,7 +456,6 @@ impl Project {
         let id = self.next_id(&IdPrefix::Task)?;
         let today = Local::now().date_naive();
         let position = self.append_position(&priority)?;
-        let tmpl = self.resolve_template_body("task", template, Some(item_type))?;
 
         let task = Task {
             id,
@@ -450,7 +476,7 @@ impl Project {
             updated: today,
         };
 
-        let body = render_template(&tmpl, &[("{TITLE}", title)]);
+        let body = self.resolve_create_body("task", title, template, Some(item_type), body)?;
         let doc = MarkplaneDocument {
             frontmatter: &task,
             body,
@@ -471,6 +497,7 @@ impl Project {
         title: &str,
         priority: Priority,
         template: Option<&str>,
+        body: Option<&str>,
     ) -> Result<Epic> {
         validate_title_length(title)?;
         let id = self.next_id(&IdPrefix::Epic)?;
@@ -489,8 +516,7 @@ impl Project {
             updated: today,
         };
 
-        let tmpl = self.resolve_template_body("epic", template, None)?;
-        let body = render_template(&tmpl, &[("{TITLE}", title)]);
+        let body = self.resolve_create_body("epic", title, template, None, body)?;
         let doc = MarkplaneDocument {
             frontmatter: &epic,
             body,
@@ -511,6 +537,7 @@ impl Project {
         title: &str,
         implements: Vec<String>,
         template: Option<&str>,
+        body: Option<&str>,
     ) -> Result<Plan> {
         validate_title_length(title)?;
         let id = self.next_id(&IdPrefix::Plan)?;
@@ -526,8 +553,7 @@ impl Project {
             updated: today,
         };
 
-        let tmpl = self.resolve_template_body("plan", template, None)?;
-        let body = render_template(&tmpl, &[("{TITLE}", title)]);
+        let body = self.resolve_create_body("plan", title, template, None, body)?;
         let doc = MarkplaneDocument {
             frontmatter: &plan,
             body,
@@ -549,12 +575,12 @@ impl Project {
         note_type: &str,
         tags: Vec<String>,
         template: Option<&str>,
+        body: Option<&str>,
     ) -> Result<Note> {
         validate_title_length(title)?;
         self.validate_note_type(note_type)?;
         let id = self.next_id(&IdPrefix::Note)?;
         let today = Local::now().date_naive();
-        let tmpl = self.resolve_template_body("note", template, Some(note_type))?;
 
         let note = Note {
             id,
@@ -567,7 +593,7 @@ impl Project {
             updated: today,
         };
 
-        let body = render_template(&tmpl, &[("{TITLE}", title)]);
+        let body = self.resolve_create_body("note", title, template, Some(note_type), body)?;
         let doc = MarkplaneDocument {
             frontmatter: &note,
             body,
@@ -1435,7 +1461,7 @@ impl Project {
         use crate::links::{LinkAction, LinkRelation};
 
         // 1. Create epic
-        let epic = self.create_epic("Project Setup", Priority::Medium, None)?;
+        let epic = self.create_epic("Project Setup", Priority::Medium, None, None)?;
         let epic_id = epic.id.clone();
 
         // 2. Create task 1: review setup
@@ -1446,6 +1472,7 @@ impl Project {
             Effort::Small,
             Some(epic_id.clone()),
             vec!["onboarding".to_string()],
+            None,
             None,
         )?;
         let setup_task_id = setup_task.id.clone();
@@ -1459,11 +1486,12 @@ impl Project {
             Some(epic_id.clone()),
             vec!["onboarding".to_string()],
             None,
+            None,
         )?;
         let import_task_id = import_task.id.clone();
 
         // 4. Create plan for the import task
-        let plan = self.create_plan("Import existing work into markplane", vec![], None)?;
+        let plan = self.create_plan("Import existing work into markplane", vec![], None, None)?;
         let plan_id = plan.id.clone();
 
         // 5. Create note
@@ -1471,6 +1499,7 @@ impl Project {
             "Project decisions",
             "decision",
             vec!["onboarding".to_string()],
+            None,
             None,
         )?;
         let note_id = note.id.clone();
@@ -1698,6 +1727,7 @@ mod tests {
                 None,
                 vec!["auth".to_string()],
                 None,
+                None,
             )
             .unwrap();
 
@@ -1718,7 +1748,7 @@ mod tests {
     fn test_create_epic() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1: Foundation", Priority::High, None)
+            .create_epic("Phase 1: Foundation", Priority::High, None, None)
             .unwrap();
 
         assert!(epic.id.starts_with("EPIC-"));
@@ -1741,11 +1771,17 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
         let plan = project
-            .create_plan("Dark mode implementation", vec![task.id.clone()], None)
+            .create_plan(
+                "Dark mode implementation",
+                vec![task.id.clone()],
+                None,
+                None,
+            )
             .unwrap();
 
         assert!(plan.id.starts_with("PLAN-"));
@@ -1761,6 +1797,7 @@ mod tests {
                 "Caching research",
                 "research",
                 vec!["cache".to_string(), "performance".to_string()],
+                None,
                 None,
             )
             .unwrap();
@@ -1781,6 +1818,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1803,6 +1841,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -1821,6 +1860,7 @@ mod tests {
                 Effort::Xs,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -1871,6 +1911,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -1903,7 +1944,7 @@ mod tests {
 
         // Task with tags, epic, special chars
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
         let task = project
             .create_task(
@@ -1913,6 +1954,7 @@ mod tests {
                 Effort::Small,
                 Some(epic.id.clone()),
                 vec!["auth".to_string(), "urgent".to_string()],
+                None,
                 None,
             )
             .unwrap();
@@ -1940,7 +1982,7 @@ mod tests {
 
         // Plan with implements list
         let plan = project
-            .create_plan("Plan A", vec![task.id.clone()], None)
+            .create_plan("Plan A", vec![task.id.clone()], None, None)
             .unwrap();
         let plan_path = project.item_path(&plan.id).unwrap();
         let plan_original = fs::read_to_string(&plan_path).unwrap();
@@ -1951,7 +1993,7 @@ mod tests {
 
         // Note with tags
         let note = project
-            .create_note("Research", "research", vec!["perf".to_string()], None)
+            .create_note("Research", "research", vec!["perf".to_string()], None, None)
             .unwrap();
         let note_path = project.item_path(&note.id).unwrap();
         let note_original = fs::read_to_string(&note_path).unwrap();
@@ -1967,7 +2009,7 @@ mod tests {
     fn test_update_status_epic() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
 
         project.update_status(&epic.id, "next").unwrap();
@@ -1986,7 +2028,7 @@ mod tests {
     #[test]
     fn test_update_status_plan() {
         let (_tmp, project) = setup_project();
-        let plan = project.create_plan("Plan A", vec![], None).unwrap();
+        let plan = project.create_plan("Plan A", vec![], None, None).unwrap();
 
         project.update_status(&plan.id, "approved").unwrap();
         let doc: MarkplaneDocument<Plan> = project.read_item(&plan.id).unwrap();
@@ -2005,7 +2047,7 @@ mod tests {
     fn test_update_status_note() {
         let (_tmp, project) = setup_project();
         let note = project
-            .create_note("Research A", "research", vec![], None)
+            .create_note("Research A", "research", vec![], None, None)
             .unwrap();
 
         project.update_status(&note.id, "active").unwrap();
@@ -2021,7 +2063,7 @@ mod tests {
     fn test_update_status_epic_invalid() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
         assert!(project.update_status(&epic.id, "in-progress").is_err());
         assert!(project.update_status(&epic.id, "planned").is_err());
@@ -2031,7 +2073,7 @@ mod tests {
     #[test]
     fn test_update_status_plan_invalid() {
         let (_tmp, project) = setup_project();
-        let plan = project.create_plan("Plan A", vec![], None).unwrap();
+        let plan = project.create_plan("Plan A", vec![], None, None).unwrap();
         assert!(project.update_status(&plan.id, "cancelled").is_err());
     }
 
@@ -2049,6 +2091,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         project
@@ -2059,6 +2102,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2083,6 +2127,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let blocked_task = project
@@ -2093,6 +2138,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2123,6 +2169,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let blocked_task = project
@@ -2133,6 +2180,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2164,6 +2212,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2207,6 +2256,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2233,7 +2283,7 @@ mod tests {
     fn test_update_epic_body() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
 
         project
@@ -2254,7 +2304,7 @@ mod tests {
     #[test]
     fn test_update_plan_body() {
         let (_tmp, project) = setup_project();
-        let plan = project.create_plan("Plan A", vec![], None).unwrap();
+        let plan = project.create_plan("Plan A", vec![], None, None).unwrap();
 
         project
             .update_plan(
@@ -2274,7 +2324,7 @@ mod tests {
     fn test_update_note_body() {
         let (_tmp, project) = setup_project();
         let note = project
-            .create_note("Research A", "research", vec![], None)
+            .create_note("Research A", "research", vec![], None, None)
             .unwrap();
 
         project
@@ -2392,6 +2442,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2418,6 +2469,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2438,6 +2490,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2499,6 +2552,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2527,6 +2581,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec!["old".to_string()],
+                None,
                 None,
             )
             .unwrap();
@@ -2565,6 +2620,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2608,6 +2664,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2642,7 +2699,7 @@ mod tests {
     fn test_update_epic_clear_started_and_target() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Date test", Priority::Medium, None)
+            .create_epic("Date test", Priority::Medium, None, None)
             .unwrap();
 
         let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
@@ -2703,6 +2760,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2722,7 +2780,7 @@ mod tests {
     fn test_update_epic_fields() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::Medium, None)
+            .create_epic("Phase 1", Priority::Medium, None, None)
             .unwrap();
 
         let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
@@ -2753,7 +2811,7 @@ mod tests {
     #[test]
     fn test_update_plan_fields() {
         let (_tmp, project) = setup_project();
-        let plan = project.create_plan("Plan A", vec![], None).unwrap();
+        let plan = project.create_plan("Plan A", vec![], None, None).unwrap();
 
         project
             .update_plan(
@@ -2777,7 +2835,7 @@ mod tests {
     fn test_update_note_fields() {
         let (_tmp, project) = setup_project();
         let note = project
-            .create_note("Research", "idea", vec!["wip".to_string()], None)
+            .create_note("Research", "idea", vec!["wip".to_string()], None, None)
             .unwrap();
 
         project
@@ -2813,6 +2871,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -2835,7 +2894,9 @@ mod tests {
     #[test]
     fn test_update_item_rejects_invalid_field_for_type() {
         let (_tmp, project) = setup_project();
-        let epic = project.create_epic("Epic", Priority::Medium, None).unwrap();
+        let epic = project
+            .create_epic("Epic", Priority::Medium, None, None)
+            .unwrap();
 
         // effort is not valid for epics
         let result = project.update_item(
@@ -2847,7 +2908,7 @@ mod tests {
         );
         assert!(result.is_err());
 
-        let plan = project.create_plan("Plan", vec![], None).unwrap();
+        let plan = project.create_plan("Plan", vec![], None, None).unwrap();
 
         // priority is not valid for plans
         let result = project.update_item(
@@ -2859,7 +2920,9 @@ mod tests {
         );
         assert!(result.is_err());
 
-        let note = project.create_note("Note", "idea", vec![], None).unwrap();
+        let note = project
+            .create_note("Note", "idea", vec![], None, None)
+            .unwrap();
 
         // assignee is not valid for notes
         let result = project.update_item(
@@ -2883,6 +2946,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -2986,6 +3050,7 @@ mod tests {
                 None,
                 vec![],
                 Some("bug"),
+                None,
             )
             .unwrap();
 
@@ -2997,7 +3062,7 @@ mod tests {
     fn test_create_plan_with_refactor_template() {
         let (_tmp, project) = setup_project();
         let plan = project
-            .create_plan("Refactor auth", vec![], Some("refactor"))
+            .create_plan("Refactor auth", vec![], Some("refactor"), None)
             .unwrap();
 
         let doc: MarkplaneDocument<Plan> = project.read_item(&plan.id).unwrap();
@@ -3009,7 +3074,7 @@ mod tests {
     fn test_create_note_with_explicit_template() {
         let (_tmp, project) = setup_project();
         let note = project
-            .create_note("Research notes", "idea", vec![], Some("research"))
+            .create_note("Research notes", "idea", vec![], Some("research"), None)
             .unwrap();
 
         let doc: MarkplaneDocument<Note> = project.read_item(&note.id).unwrap();
@@ -3057,6 +3122,7 @@ mod tests {
                 Effort::Medium,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -3173,6 +3239,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap()
             .id;
@@ -3184,6 +3251,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap()
@@ -3235,7 +3303,9 @@ mod tests {
     #[test]
     fn test_move_item_non_task_error() {
         let (_tmp, project) = setup_project();
-        let epic = project.create_epic("Epic", Priority::High, None).unwrap();
+        let epic = project
+            .create_epic("Epic", Priority::High, None, None)
+            .unwrap();
 
         let result = project.move_item(&epic.id, MoveDirective::Top);
         assert!(result.is_err());
@@ -3348,6 +3418,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -3377,6 +3448,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -3401,6 +3473,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();

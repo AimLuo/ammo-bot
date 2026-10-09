@@ -629,7 +629,7 @@ mod tests {
     fn test_generate_context_summary_with_items() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
         project.update_status(&epic.id, "now").unwrap();
 
@@ -641,6 +641,7 @@ mod tests {
                 Effort::Medium,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -654,6 +655,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -673,7 +675,7 @@ mod tests {
     fn test_generate_context_summary_includes_archived_in_epic_progress() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Test Epic", Priority::High, None)
+            .create_epic("Test Epic", Priority::High, None, None)
             .unwrap();
         project.update_status(&epic.id, "now").unwrap();
 
@@ -686,6 +688,7 @@ mod tests {
                 Effort::Small,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -701,6 +704,7 @@ mod tests {
                 Some(epic.id.clone()),
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         project.update_status(&task2.id, "done").unwrap();
@@ -714,6 +718,7 @@ mod tests {
                 Effort::Small,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -743,6 +748,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         project.update_status(&blocker.id, "in-progress").unwrap();
@@ -756,6 +762,7 @@ mod tests {
                 Effort::Medium,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -791,6 +798,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         project.update_status(&task.id, "in-progress").unwrap();
@@ -822,6 +830,7 @@ mod tests {
                 None,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         let blocked = project
@@ -832,6 +841,7 @@ mod tests {
                 Effort::Medium,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -850,7 +860,7 @@ mod tests {
     fn test_generate_context_metrics() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
         project
             .create_task(
@@ -860,6 +870,7 @@ mod tests {
                 Effort::Medium,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -871,6 +882,7 @@ mod tests {
                 Effort::Small,
                 None,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -890,7 +902,7 @@ mod tests {
     fn test_generate_context_metrics_includes_archived_in_epic_progress() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Test Epic", Priority::High, None)
+            .create_epic("Test Epic", Priority::High, None, None)
             .unwrap();
 
         // 2 done+archived, 1 active
@@ -902,6 +914,7 @@ mod tests {
                 Effort::Small,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -917,6 +930,7 @@ mod tests {
                 Some(epic.id.clone()),
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         project.update_status(&t2.id, "done").unwrap();
@@ -930,6 +944,7 @@ mod tests {
                 Effort::Small,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -962,7 +977,7 @@ mod tests {
     fn test_sync_all() {
         let (_tmp, project) = setup_project();
         let epic = project
-            .create_epic("Phase 1", Priority::High, None)
+            .create_epic("Phase 1", Priority::High, None, None)
             .unwrap();
         project
             .create_task(
@@ -972,6 +987,7 @@ mod tests {
                 Effort::Medium,
                 Some(epic.id.clone()),
                 vec![],
+                None,
                 None,
             )
             .unwrap();

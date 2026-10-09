@@ -66,6 +66,9 @@ pub enum Commands {
         /// Template name override (e.g. "bug", "default")
         #[arg(long)]
         template: Option<String>,
+        /// Read body from file (or "-" for stdin); placed after the title heading
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
     },
 
     /// Show details of an item
@@ -161,6 +164,9 @@ pub enum Commands {
         /// Template name override (e.g. "refactor", "implementation")
         #[arg(long)]
         template: Option<String>,
+        /// Read body from file (or "-" for stdin); placed after the title heading
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
     },
 
     /// Create a new epic
@@ -170,6 +176,9 @@ pub enum Commands {
         /// Priority level
         #[arg(long, default_value = "medium")]
         priority: String,
+        /// Read body from file (or "-" for stdin); placed after the title heading
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
     },
 
     /// Create a new note
@@ -185,6 +194,9 @@ pub enum Commands {
         /// Template name override (e.g. "research", "analysis")
         #[arg(long)]
         template: Option<String>,
+        /// Read body from file (or "-" for stdin); placed after the title heading
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
     },
 
     /// Update properties on any item
@@ -361,7 +373,10 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             epic,
             tags,
             template,
-        } => add::run(title, r#type, priority, effort, epic, tags, template),
+            body_file,
+        } => add::run(
+            title, r#type, priority, effort, epic, tags, template, body_file,
+        ),
         Commands::Show { id } => show::run(id),
         Commands::Edit { id } => edit::run(id),
         Commands::Ls {
@@ -389,14 +404,20 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             id,
             title,
             template,
-        } => plan::run(id, title, template),
-        Commands::Epic { title, priority } => epic::run(title, priority),
+            body_file,
+        } => plan::run(id, title, template, body_file),
+        Commands::Epic {
+            title,
+            priority,
+            body_file,
+        } => epic::run(title, priority, body_file),
         Commands::Note {
             title,
             r#type,
             tags,
             template,
-        } => note::run(title, r#type, tags, template),
+            body_file,
+        } => note::run(title, r#type, tags, template, body_file),
         Commands::Update {
             id,
             title,
@@ -467,4 +488,16 @@ pub fn parse_comma_list(s: &str) -> Vec<String> {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .collect()
+}
+
+/// Read body content from a file path, or stdin when path is `-`.
+pub fn read_body_file(path: &str) -> anyhow::Result<String> {
+    if path == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf)
+    } else {
+        Ok(std::fs::read_to_string(path)?)
+    }
 }

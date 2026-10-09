@@ -474,6 +474,71 @@ fn test_tool_add_invalid_kind() {
     assert_tool_error(&response, "invalid kind");
 }
 
+#[test]
+fn test_tool_add_with_body_matches_cli() {
+    let tmp = setup_project();
+    let body_content = "## Description\n\nShared body content for parity.\n";
+    let body_path = tmp.path().join("body.md");
+    std::fs::write(&body_path, body_content).unwrap();
+
+    let cli_out = assert_cmd::cargo::cargo_bin_cmd!("markplane")
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "Parity title",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&cli_out.stderr)
+    );
+    let cli_stdout = String::from_utf8_lossy(&cli_out.stdout);
+    let cli_id = cli_stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("TASK-"))
+        .expect("CLI ID")
+        .to_string();
+
+    let mcp_response = send_request(
+        &tmp,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 26,
+            "method": "tools/call",
+            "params": {
+                "name": "markplane_add",
+                "arguments": {
+                    "title": "Parity title",
+                    "body": body_content
+                }
+            }
+        }),
+    );
+    assert!(mcp_response["error"].is_null());
+    let mcp_id = extract_id_from_response(&mcp_response);
+
+    let cli_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", cli_id)),
+    )
+    .unwrap();
+    let mcp_file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", mcp_id)),
+    )
+    .unwrap();
+
+    // Bodies (after frontmatter) must match for the same title + body input.
+    let cli_body = cli_file.splitn(3, "---").nth(2).unwrap_or("").trim();
+    let mcp_body = mcp_file.splitn(3, "---").nth(2).unwrap_or("").trim();
+    assert_eq!(cli_body, mcp_body);
+    assert!(cli_body.contains("Shared body content for parity."));
+}
+
 // ── Tool: markplane_show ─────────────────────────────────────────────────
 
 #[test]
@@ -1117,7 +1182,7 @@ fn test_tool_promote() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let note = project
-        .create_note("Good idea", "idea", vec!["cool".to_string()], None)
+        .create_note("Good idea", "idea", vec!["cool".to_string()], None, None)
         .unwrap();
 
     let response = send_request(
@@ -1679,6 +1744,7 @@ fn test_resource_task_item() {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
 
@@ -1704,7 +1770,12 @@ fn test_resource_epic_item() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let epic = project
-        .create_epic("Epic resource test", markplane_core::Priority::High, None)
+        .create_epic(
+            "Epic resource test",
+            markplane_core::Priority::High,
+            None,
+            None,
+        )
         .unwrap();
 
     let response = send_request(
@@ -1768,7 +1839,7 @@ fn test_resource_plan_item() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let plan = project
-        .create_plan("Plan resource test", vec![], None)
+        .create_plan("Plan resource test", vec![], None, None)
         .unwrap();
 
     let response = send_request(
@@ -1801,6 +1872,7 @@ fn test_resource_plan_wrong_prefix() {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
 
@@ -1829,7 +1901,7 @@ fn test_resource_note_item() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let note = project
-        .create_note("Note resource test", "research", vec![], None)
+        .create_note("Note resource test", "research", vec![], None, None)
         .unwrap();
 
     let response = send_request(
@@ -1861,6 +1933,7 @@ fn test_resource_note_wrong_prefix() {
             markplane_core::Effort::Small,
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -2100,7 +2173,12 @@ fn test_tool_update_epic_priority_and_tags() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let epic = project
-        .create_epic("Epic update test", markplane_core::Priority::Medium, None)
+        .create_epic(
+            "Epic update test",
+            markplane_core::Priority::Medium,
+            None,
+            None,
+        )
         .unwrap();
 
     let response = send_request(
@@ -2147,7 +2225,13 @@ fn test_tool_update_note_type_and_tags() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let note = project
-        .create_note("Note update test", "idea", vec!["wip".to_string()], None)
+        .create_note(
+            "Note update test",
+            "idea",
+            vec!["wip".to_string()],
+            None,
+            None,
+        )
         .unwrap();
 
     let response = send_request(
@@ -2268,6 +2352,7 @@ fn create_positioned_task(
             markplane_core::Effort::Medium,
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -2553,7 +2638,7 @@ fn test_tool_move_non_task_error() {
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
     let epic = project
-        .create_epic("Epic", markplane_core::Priority::High, None)
+        .create_epic("Epic", markplane_core::Priority::High, None, None)
         .unwrap();
 
     let response = send_request(
@@ -2576,7 +2661,9 @@ fn test_tool_update_rejects_invalid_field_for_type() {
     let tmp = setup_project();
     let root = tmp.path().join(".markplane");
     let project = markplane_core::Project::new(root);
-    let plan = project.create_plan("Test plan", vec![], None).unwrap();
+    let plan = project
+        .create_plan("Test plan", vec![], None, None)
+        .unwrap();
 
     // priority is not valid for plans
     let response = send_request(
@@ -2644,6 +2731,7 @@ fn test_tool_plan_with_template() {
             markplane_core::Effort::Medium,
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();

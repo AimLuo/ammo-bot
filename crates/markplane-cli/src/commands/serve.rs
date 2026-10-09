@@ -1446,6 +1446,7 @@ async fn create_task(
             body.epic,
             body.tags,
             None,
+            None,
         )
         .map_err(map_core_error)?;
 
@@ -1471,7 +1472,7 @@ async fn create_epic(
 
     let epic = state
         .project
-        .create_epic(&body.title, priority, None)
+        .create_epic(&body.title, priority, None, None)
         .map_err(map_core_error)?;
 
     let doc: MarkplaneDocument<Epic> = state.project.read_item(&epic.id).map_err(map_core_error)?;
@@ -1523,7 +1524,7 @@ async fn create_plan(
 
     let plan = state
         .project
-        .create_plan(&body.title, implements, None)
+        .create_plan(&body.title, implements, None, None)
         .map_err(map_core_error)?;
 
     // If task_id provided, link the plan back to the task
@@ -1563,7 +1564,7 @@ async fn create_note(
         .unwrap_or(config.default_note_type());
     let note = state
         .project
-        .create_note(&body.title, note_type, body.tags, None)
+        .create_note(&body.title, note_type, body.tags, None, None)
         .map_err(map_core_error)?;
 
     let doc: MarkplaneDocument<Note> = state.project.read_item(&note.id).map_err(map_core_error)?;
