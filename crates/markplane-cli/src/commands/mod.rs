@@ -323,7 +323,7 @@ pub enum Commands {
         from: String,
         /// Target item ID
         to: String,
-        /// Relationship type: blocks, depends-on, epic, plan, implements, map, related
+        /// Relationship type: blocks, depends-on, epic, plan, implements, map, spec, related
         #[arg(long, short = 'r')]
         relation: String,
         /// Remove the link instead of adding it

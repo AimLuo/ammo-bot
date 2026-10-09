@@ -26,6 +26,8 @@ pub enum LinkRelation {
     Implements,
     /// Task belongs to Map as a Decision ticket (no reciprocal; Task-side only)
     Map,
+    /// Map produced a Spec (EPIC or PLAN); Map-side `specs` only, no reverse field
+    Spec,
     /// Any item can be related to any other item (bidirectional)
     Related,
 }
@@ -41,9 +43,10 @@ impl FromStr for LinkRelation {
             "plan" => Ok(LinkRelation::Plan),
             "implements" => Ok(LinkRelation::Implements),
             "map" => Ok(LinkRelation::Map),
+            "spec" => Ok(LinkRelation::Spec),
             "related" => Ok(LinkRelation::Related),
             _ => Err(MarkplaneError::InvalidLink(format!(
-                "Unknown link relation: {}. Use blocks, depends_on, epic, plan, implements, map, or related.",
+                "Unknown link relation: {}. Use blocks, depends_on, epic, plan, implements, map, spec, or related.",
                 s
             ))),
         }
@@ -59,6 +62,7 @@ impl fmt::Display for LinkRelation {
             LinkRelation::Plan => write!(f, "plan"),
             LinkRelation::Implements => write!(f, "implements"),
             LinkRelation::Map => write!(f, "map"),
+            LinkRelation::Spec => write!(f, "spec"),
             LinkRelation::Related => write!(f, "related"),
         }
     }
@@ -479,6 +483,19 @@ impl Project {
                             doc.frontmatter.map = None;
                         }
                     }
+                }
+                doc.frontmatter.updated = today;
+                self.write_item(from, &doc)?;
+            }
+
+            LinkRelation::Spec => {
+                require_prefix(from, &from_prefix, &[IdPrefix::Map])?;
+                require_prefix(to, &to_prefix, &[IdPrefix::Epic, IdPrefix::Plan])?;
+
+                let mut doc: MarkplaneDocument<Map> = self.read_item(from)?;
+                match action {
+                    LinkAction::Add => push_unique(&mut doc.frontmatter.specs, to),
+                    LinkAction::Remove => remove_value(&mut doc.frontmatter.specs, to),
                 }
                 doc.frontmatter.updated = today;
                 self.write_item(from, &doc)?;

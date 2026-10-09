@@ -1,7 +1,7 @@
 ---
 id: TASK-d5gnj
 title: Map 归档连带工单与 link -r spec
-status: in-progress
+status: done
 priority: medium
 type: feature
 effort: medium
