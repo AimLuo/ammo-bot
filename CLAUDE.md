@@ -10,7 +10,9 @@ Markplane is an AI-native, markdown-first project management system. "Mark" (mar
 
 ## Build & Test
 
-Requires Rust 1.93.0+ (edition 2024). Web UI also requires Node.js 18+.
+Requires Rust 1.93.0+ (edition 2024). Web UI also requires Node.js 24.
+
+Toolchain versions are pinned in [`mise.toml`](mise.toml) (Rust 1.93.0 + clippy/rustfmt, Node 24). With [mise](https://mise.jdx.dev/) installed: `mise trust && mise install`.
 
 ```bash
 cargo build --workspace              # Build all crates

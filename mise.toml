@@ -1,0 +1,5 @@
+[tools]
+# Keep in sync with workspace.package.rust-version / CI toolchain pin.
+rust = { version = "1.93.0", components = "clippy,rustfmt" }
+# Keep in sync with crates/markplane-web/ui/.nvmrc (CI node-version-file).
+node = "24"

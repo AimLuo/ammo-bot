@@ -4,16 +4,25 @@ Thank you for your interest in contributing to Markplane! This guide covers ever
 
 ## Prerequisites
 
-- **Rust 1.93.0+** (edition 2024) — install via [rustup](https://rustup.rs/)
+- **Rust 1.93.0+** (edition 2024)
 - **Git** for version control
-- **Node.js 18+** — only needed if working on the web UI (`crates/markplane-web/ui/`)
+- **Node.js 24** — only needed if working on the web UI (`crates/markplane-web/ui/`)
+
+Recommended: install both via [mise](https://mise.jdx.dev/) using the repo's `mise.toml`:
+
+```bash
+mise trust
+mise install
+```
+
+Or install manually: [rustup](https://rustup.rs/) for Rust, and Node 24 (see `crates/markplane-web/ui/.nvmrc`).
 
 Verify your setup:
 
 ```bash
 rustc --version   # 1.93.0 or later
 cargo --version
-node --version    # 18.0.0 or later (optional, for web UI)
+node --version    # 24.x (optional, for web UI)
 ```
 
 ## Fork and Clone

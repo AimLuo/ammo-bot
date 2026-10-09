@@ -128,7 +128,7 @@ mv markplane ~/.local/bin/        # or /usr/local/bin/ with sudo
 
 ### Build from source
 
-Requires Rust 1.93.0+. To include the web UI, also requires Node.js 18+.
+Requires Rust 1.93.0+. To include the web UI, also requires Node.js 24. Versions are pinned in [`mise.toml`](mise.toml) — with [mise](https://mise.jdx.dev/): `mise trust && mise install`.
 
 ```bash
 git clone https://github.com/zerowand01/markplane.git
