@@ -3613,3 +3613,195 @@ fn test_ls_map_and_frontier() {
     let later_pos = ordered_stdout.find(&later_id).unwrap();
     assert!(dep_pos < later_pos, "frontier should be sorted by position");
 }
+
+#[test]
+fn test_archive_map_cascades_decision_tickets() {
+    let tmp = setup_project();
+
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Archive me"])
+        .output()
+        .unwrap();
+    let map_id = extract_id(&map_out.stdout);
+
+    let d1_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Decision one", "--map", &map_id, "--type", "research"])
+        .output()
+        .unwrap();
+    let d1 = extract_id(&d1_out.stdout);
+
+    let d2_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Decision two", "--map", &map_id, "--type", "task"])
+        .output()
+        .unwrap();
+    let d2 = extract_id(&d2_out.stdout);
+
+    // Status change alone must not archive Decision tickets
+    cmd()
+        .current_dir(tmp.path())
+        .args(["status", &map_id, "done"])
+        .assert()
+        .success();
+
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d1))
+            .is_file()
+    );
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d2))
+            .is_file()
+    );
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["archive", &map_id])
+        .assert()
+        .success();
+
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/maps/archive/{}.md", map_id))
+            .is_file()
+    );
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/archive/{}.md", d1))
+            .is_file()
+    );
+    assert!(
+        tmp.path()
+            .join(format!(".markplane/backlog/archive/{}.md", d2))
+            .is_file()
+    );
+    assert!(
+        !tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d1))
+            .exists()
+    );
+    assert!(
+        !tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", d2))
+            .exists()
+    );
+
+    let ls = cmd()
+        .current_dir(tmp.path())
+        .args(["ls", "--map", &map_id])
+        .output()
+        .unwrap();
+    assert!(ls.status.success());
+    let ls_stdout = String::from_utf8_lossy(&ls.stdout);
+    assert!(!ls_stdout.contains(&d1));
+    assert!(!ls_stdout.contains(&d2));
+}
+
+#[test]
+fn test_link_spec_maintains_map_specs() {
+    let tmp = setup_project();
+
+    let map_out = cmd()
+        .current_dir(tmp.path())
+        .args(["map", "Spec map"])
+        .output()
+        .unwrap();
+    let map_id = extract_id(&map_out.stdout);
+
+    let epic_out = cmd()
+        .current_dir(tmp.path())
+        .args(["epic", "Published epic"])
+        .output()
+        .unwrap();
+    let epic_id = extract_id(&epic_out.stdout);
+
+    let plan_out = cmd()
+        .current_dir(tmp.path())
+        .args(["plan", "--title", "Published plan"])
+        .output()
+        .unwrap();
+    let plan_id = extract_id(&plan_out.stdout);
+
+    let task_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Not a spec"])
+        .output()
+        .unwrap();
+    let task_id = extract_id(&task_out.stdout);
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &epic_id, "-r", "spec"])
+        .assert()
+        .success();
+
+    let map_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    assert!(map_body.contains(&format!("- {}", epic_id)) || map_body.contains(&epic_id));
+    let map_fm = map_body.split("---").nth(1).unwrap_or("");
+    assert!(map_fm.contains("specs:"));
+    assert!(map_fm.contains(&epic_id));
+
+    // EPIC gains no reverse field
+    let epic_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/roadmap/items/{}.md", epic_id)),
+    )
+    .unwrap();
+    let epic_fm = epic_body.split("---").nth(1).unwrap_or("");
+    assert!(!epic_fm.contains(&map_id));
+    assert!(!epic_fm.contains("specs:"));
+
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &plan_id, "-r", "spec"])
+        .assert()
+        .success();
+
+    let map_body2 = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    let map_fm2 = map_body2.split("---").nth(1).unwrap_or("");
+    assert!(map_fm2.contains(&epic_id));
+    assert!(map_fm2.contains(&plan_id));
+
+    // PLAN gains no reverse field
+    let plan_body = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/plans/items/{}.md", plan_id)),
+    )
+    .unwrap();
+    let plan_fm = plan_body.split("---").nth(1).unwrap_or("");
+    assert!(!plan_fm.contains(&map_id));
+
+    // Reject TASK targets
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &task_id, "-r", "spec"])
+        .assert()
+        .failure();
+
+    // --remove clears the specs entry
+    cmd()
+        .current_dir(tmp.path())
+        .args(["link", &map_id, &epic_id, "-r", "spec", "--remove"])
+        .assert()
+        .success();
+
+    let map_body3 = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/maps/items/{}.md", map_id)),
+    )
+    .unwrap();
+    let map_fm3 = map_body3.split("---").nth(1).unwrap_or("");
+    assert!(!map_fm3.contains(&epic_id));
+    assert!(map_fm3.contains(&plan_id));
+}
