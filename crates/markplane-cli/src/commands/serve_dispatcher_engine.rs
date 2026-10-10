@@ -892,7 +892,14 @@ async fn run_agent(
         cmd.process_group(0);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("spawn agent: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            // Stage call ended without system/init — counts toward auto-close.
+            maybe_auto_close_on_startup_fail(proj, false).await;
+            return Err(format!("spawn agent: {e}"));
+        }
+    };
     let pid = child.id();
     attempt.pid = Some(pid);
     attempt.process_group_id = Some(pid);
