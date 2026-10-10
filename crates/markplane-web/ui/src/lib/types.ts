@@ -226,7 +226,8 @@ export interface Run {
   worktree_removed_at?: string | null;
   branch_removed_at?: string | null;
   branch_head_at_removal?: string | null;
-  cleanup_blocked?: boolean | null;
+  /** Skip reason: uncommitted_changes | unmerged_commits | orphan_running | not_a_worktree */
+  cleanup_blocked?: string | null;
   cleanup_trigger?: string | null;
   attempts: Attempt[];
 }

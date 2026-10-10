@@ -134,8 +134,10 @@ pub struct Run {
     pub branch_removed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_head_at_removal: Option<String>,
+    /// Last cleanup skip reason (`uncommitted_changes`, `unmerged_commits`,
+    /// `orphan_running`, `not_a_worktree`); cleared after a successful cleanup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup_blocked: Option<bool>,
+    pub cleanup_blocked: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_trigger: Option<String>,
     #[serde(default)]
