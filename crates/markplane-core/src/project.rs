@@ -238,6 +238,7 @@ const LAYOUT_DIRS: &[&str] = &[
 ];
 
 /// Represents a `.markplane/` project directory.
+#[derive(Clone, Debug)]
 pub struct Project {
     /// Path to the `.markplane/` directory.
     root: PathBuf,

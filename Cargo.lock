@@ -956,6 +956,7 @@ dependencies = [
  "clap_complete",
  "colored",
  "futures",
+ "http-body-util",
  "markplane-core",
  "mime_guess",
  "notify",

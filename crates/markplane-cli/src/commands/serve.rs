@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::convert::Infallible;
+
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Json};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use futures::SinkExt;
 use futures::stream::StreamExt;
@@ -40,7 +42,6 @@ struct WebAssets;
 struct DocAssets;
 
 struct AppState {
-    project: Project,
     ws_tx: broadcast::Sender<String>,
     port: u16,
     dev: bool,
@@ -95,15 +96,8 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
 
     let (ws_tx, _) = broadcast::channel::<String>(256);
 
-    let state = Arc::new(AppState {
-        project,
-        ws_tx: ws_tx.clone(),
-        port,
-        dev,
-    });
-
     // Start file watcher for WebSocket events
-    let watch_root = state.project.root().to_path_buf();
+    let watch_root = project.root().to_path_buf();
     let ws_tx_clone = ws_tx.clone();
     tokio::spawn(async move {
         if let Err(e) = run_file_watcher(watch_root, ws_tx_clone).await {
@@ -111,6 +105,66 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
         }
     });
 
+    let app = build_app(project, ws_tx, port, dev);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let url = format!("http://localhost:{}", port);
+
+    println!("Markplane web UI starting on {}", url);
+    if dev {
+        println!("Running in dev mode — API only (use Next.js dev server for UI)");
+    } else {
+        #[cfg(feature = "embed-ui")]
+        println!("Serving embedded UI from binary");
+        #[cfg(not(feature = "embed-ui"))]
+        println!("Serving static UI from crates/markplane-web/ui/out/");
+    }
+    println!("WebSocket available at ws://localhost:{}/ws", port);
+
+    if open {
+        let _ = open::that(&url);
+    }
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // MapRequestLayer sits outside the Router (before route matching); that
+    // requires into_make_service rather than passing the Router directly.
+    axum::serve(
+        listener,
+        axum::ServiceExt::<Request>::into_make_service(app),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Inject the active [`Project`] into request extensions before route matching.
+fn inject_project(project: Project) -> impl Fn(Request) -> Request + Clone {
+    move |mut req: Request| {
+        req.extensions_mut().insert(project.clone());
+        req
+    }
+}
+
+/// Assemble the serve Router and wrap it with the project-injection layer.
+///
+/// The layer runs before route matching so handlers can read [`Project`] from
+/// request extensions instead of global state.
+fn build_app(
+    project: Project,
+    ws_tx: broadcast::Sender<String>,
+    port: u16,
+    dev: bool,
+) -> tower::util::BoxCloneService<Request, Response, Infallible> {
+    let state = Arc::new(AppState { ws_tx, port, dev });
+    let router = build_router(state);
+    let app = tower::Layer::layer(
+        &tower::util::MapRequestLayer::new(inject_project(project)),
+        router,
+    );
+    tower::util::BoxCloneService::new(app)
+}
+
+fn build_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/api/summary", get(get_summary))
         .route("/api/tasks", get(get_tasks).post(create_task))
@@ -139,13 +193,13 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
-    let cors = if dev {
+    let cors = if state.dev {
         CorsLayer::permissive()
     } else {
-        let localhost = format!("http://localhost:{}", port)
+        let localhost = format!("http://localhost:{}", state.port)
             .parse::<HeaderValue>()
             .unwrap();
-        let loopback = format!("http://127.0.0.1:{}", port)
+        let loopback = format!("http://127.0.0.1:{}", state.port)
             .parse::<HeaderValue>()
             .unwrap();
         CorsLayer::new()
@@ -154,7 +208,7 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
             .allow_headers(tower_http::cors::Any)
     };
 
-    let app = if dev {
+    if state.dev {
         // In dev mode, just serve the API — Next.js dev server proxies to us
         api.layer(cors)
             .layer(axum::extract::DefaultBodyLimit::max(2_097_152))
@@ -179,30 +233,7 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
                 .layer(axum::extract::DefaultBodyLimit::max(2_097_152))
                 .layer(CompressionLayer::new())
         }
-    };
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let url = format!("http://localhost:{}", port);
-
-    println!("Markplane web UI starting on {}", url);
-    if dev {
-        println!("Running in dev mode — API only (use Next.js dev server for UI)");
-    } else {
-        #[cfg(feature = "embed-ui")]
-        println!("Serving embedded UI from binary");
-        #[cfg(not(feature = "embed-ui"))]
-        println!("Serving static UI from crates/markplane-web/ui/out/");
     }
-    println!("WebSocket available at ws://localhost:{}/ws", port);
-
-    if open {
-        let _ = open::that(&url);
-    }
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
 }
 
 // ── Embedded Static File Server ──────────────────────────────────────────
@@ -619,11 +650,11 @@ fn doc_content_available(path: &str, project: &Project) -> bool {
 }
 
 async fn get_docs(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
 ) -> Result<Json<ApiListResponse<DocMetaResponse>>, (StatusCode, Json<ApiError>)> {
     let docs: Vec<DocMetaResponse> = DOC_MANIFEST
         .iter()
-        .filter(|entry| doc_content_available(entry.path, &state.project))
+        .filter(|entry| doc_content_available(entry.path, &project))
         .map(|entry| DocMetaResponse {
             slug: entry.slug.to_string(),
             title: entry.title.to_string(),
@@ -637,7 +668,7 @@ async fn get_docs(
 }
 
 async fn get_doc(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(slug): Path<String>,
 ) -> Result<Json<ApiResponse<DocContentResponse>>, (StatusCode, Json<ApiError>)> {
     let entry = DOC_MANIFEST
@@ -645,7 +676,7 @@ async fn get_doc(
         .find(|e| e.slug == slug)
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "not_found", "Document not found"))?;
 
-    let content = read_doc_content(entry.path, &state.project).ok_or_else(|| {
+    let content = read_doc_content(entry.path, &project).ok_or_else(|| {
         error_response(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -1213,9 +1244,9 @@ struct SummaryCounts {
 // ── Handlers ──────────────────────────────────────────────────────────────
 
 async fn get_summary(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
 ) -> Result<Json<ApiResponse<SummaryResponse>>, (StatusCode, Json<ApiError>)> {
-    let project = &state.project;
+    let project = &project;
 
     let config = project.load_config().map_err(map_core_error)?;
     let tasks = project
@@ -1349,9 +1380,9 @@ async fn get_summary(
 }
 
 async fn get_config(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
 ) -> Result<Json<ApiResponse<ConfigResponse>>, (StatusCode, Json<ApiError>)> {
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: config_to_response(config),
@@ -1414,10 +1445,10 @@ struct UpdateWorkflowsRequest {
 }
 
 async fn patch_config(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<ApiResponse<ConfigResponse>>, (StatusCode, Json<ApiError>)> {
-    let mut config = state.project.load_config().map_err(map_core_error)?;
+    let mut config = project.load_config().map_err(map_core_error)?;
 
     // Helper: validate a type list — trim, lowercase, reject empty/duplicate, require ≥1
     fn validate_types(
@@ -1538,8 +1569,7 @@ async fn patch_config(
         // Validate that no active tasks use statuses being removed
         let new_workflow = markplane_core::TaskWorkflow(workflow_map);
         let new_statuses: HashSet<&str> = new_workflow.all_statuses().into_iter().collect();
-        let tasks = state
-            .project
+        let tasks = project
             .list_tasks(&QueryFilter::default())
             .map_err(map_core_error)?;
         let mut stranded: Vec<(String, String)> = Vec::new();
@@ -1567,7 +1597,7 @@ async fn patch_config(
         config.workflows.task = new_workflow;
     }
 
-    state.project.save_config(&config).map_err(map_core_error)?;
+    project.save_config(&config).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: config_to_response(config),
@@ -1588,7 +1618,7 @@ struct TaskQueryParams {
 }
 
 async fn get_tasks(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Query(params): Query<TaskQueryParams>,
 ) -> Result<Json<ApiListResponse<TaskResponse>>, (StatusCode, Json<ApiError>)> {
     let filter = QueryFilter {
@@ -1607,7 +1637,7 @@ async fn get_tasks(
         },
     };
 
-    let tasks = state.project.list_tasks(&filter).map_err(map_core_error)?;
+    let tasks = project.list_tasks(&filter).map_err(map_core_error)?;
 
     let total = tasks.len();
     let data: Vec<_> = tasks.iter().map(task_to_response).collect();
@@ -1619,7 +1649,7 @@ async fn get_tasks(
 }
 
 async fn get_task(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<TaskResponse>>, (StatusCode, Json<ApiError>)> {
     // Validate ID format
@@ -1631,7 +1661,7 @@ async fn get_task(
         )
     })?;
 
-    let doc: MarkplaneDocument<Task> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Task> = project.read_item(&id).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: task_to_response(&doc),
@@ -1639,10 +1669,10 @@ async fn get_task(
 }
 
 async fn create_task(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Json(body): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<TaskResponse>>), (StatusCode, Json<ApiError>)> {
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
     let item_type = body
         .item_type
         .as_deref()
@@ -1656,8 +1686,7 @@ async fn create_task(
         .parse()
         .map_err(|e: MarkplaneError| map_core_error(e))?;
 
-    let task = state
-        .project
+    let task = project
         .create_task(
             &body.title,
             item_type,
@@ -1672,7 +1701,7 @@ async fn create_task(
         .map_err(map_core_error)?;
 
     // Read the created task back to get the full document with body
-    let doc: MarkplaneDocument<Task> = state.project.read_item(&task.id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Task> = project.read_item(&task.id).map_err(map_core_error)?;
 
     Ok((
         StatusCode::CREATED,
@@ -1683,7 +1712,7 @@ async fn create_task(
 }
 
 async fn create_epic(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Json(body): Json<CreateEpicRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<EpicResponse>>), (StatusCode, Json<ApiError>)> {
     let priority: Priority = body
@@ -1691,16 +1720,15 @@ async fn create_epic(
         .parse()
         .map_err(|e: MarkplaneError| map_core_error(e))?;
 
-    let epic = state
-        .project
+    let epic = project
         .create_epic(&body.title, priority, vec![], None, None)
         .map_err(map_core_error)?;
 
-    let doc: MarkplaneDocument<Epic> = state.project.read_item(&epic.id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Epic> = project.read_item(&epic.id).map_err(map_core_error)?;
 
     // New epic has no tasks yet
     let tasks: Vec<MarkplaneDocument<Task>> = vec![];
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse {
@@ -1710,7 +1738,7 @@ async fn create_epic(
 }
 
 async fn create_plan(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Json(body): Json<CreatePlanRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<PlanResponse>>), (StatusCode, Json<ApiError>)> {
     // Validate task_id if provided
@@ -1729,7 +1757,7 @@ async fn create_plan(
                 &format!("task_id must be a TASK item, got {}", task_id),
             ));
         }
-        state.project.item_path(task_id).map_err(|_| {
+        project.item_path(task_id).map_err(|_| {
             error_response(
                 StatusCode::NOT_FOUND,
                 "not_found",
@@ -1743,20 +1771,18 @@ async fn create_plan(
         None => vec![],
     };
 
-    let plan = state
-        .project
+    let plan = project
         .create_plan(&body.title, implements, vec![], None, None)
         .map_err(map_core_error)?;
 
     // If task_id provided, link the plan back to the task
     if let Some(ref task_id) = body.task_id
         && let Err(e) =
-            state
-                .project
+            project
                 .link_items(task_id, &plan.id, LinkRelation::Plan, LinkAction::Add)
     {
         // Roll back: delete the plan file
-        let _ = std::fs::remove_file(state.project.item_path(&plan.id).unwrap_or_default());
+        let _ = std::fs::remove_file(project.item_path(&plan.id).unwrap_or_default());
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "link_error",
@@ -1764,7 +1790,7 @@ async fn create_plan(
         ));
     }
 
-    let doc: MarkplaneDocument<Plan> = state.project.read_item(&plan.id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Plan> = project.read_item(&plan.id).map_err(map_core_error)?;
 
     Ok((
         StatusCode::CREATED,
@@ -1775,20 +1801,19 @@ async fn create_plan(
 }
 
 async fn create_note(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Json(body): Json<CreateNoteRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<NoteResponse>>), (StatusCode, Json<ApiError>)> {
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
     let note_type = body
         .note_type
         .as_deref()
         .unwrap_or(config.default_note_type());
-    let note = state
-        .project
+    let note = project
         .create_note(&body.title, note_type, body.tags, None, None)
         .map_err(map_core_error)?;
 
-    let doc: MarkplaneDocument<Note> = state.project.read_item(&note.id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Note> = project.read_item(&note.id).map_err(map_core_error)?;
 
     Ok((
         StatusCode::CREATED,
@@ -1799,7 +1824,7 @@ async fn create_note(
 }
 
 async fn update_task(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
     Json(body): Json<UpdateTaskRequest>,
 ) -> Result<Json<ApiResponse<TaskResponse>>, (StatusCode, Json<ApiError>)> {
@@ -1812,7 +1837,7 @@ async fn update_task(
     })?;
 
     // Read current state for diffing tags and links
-    let current: MarkplaneDocument<Task> = state.project.read_item(&id).map_err(map_core_error)?;
+    let current: MarkplaneDocument<Task> = project.read_item(&id).map_err(map_core_error)?;
     let fm = &current.frontmatter;
 
     // ── Properties → TaskUpdate ──────────────────────────────────────
@@ -1844,8 +1869,7 @@ async fn update_task(
         || !matches!(position, Patch::Unchanged)
         || body.body.is_some();
     if has_changes {
-        state
-            .project
+        project
             .update_task(
                 &id,
                 &TaskUpdate {
@@ -1878,16 +1902,14 @@ async fn update_task(
             match desired {
                 Some(new) => {
                     // Add overwrites the epic field directly
-                    state
-                        .project
+                    project
                         .link_items(&id, new, LinkRelation::Epic, LinkAction::Add)
                         .map_err(map_core_error)?;
                 }
                 None => {
                     // Clear: remove the current epic link
                     if let Some(old) = current_epic {
-                        state
-                            .project
+                        project
                             .link_items(&id, old, LinkRelation::Epic, LinkAction::Remove)
                             .map_err(map_core_error)?;
                     }
@@ -1908,16 +1930,14 @@ async fn update_task(
             match desired {
                 Some(new) => {
                     // Add cleans up old plan's implements list and sets new plan
-                    state
-                        .project
+                    project
                         .link_items(&id, new, LinkRelation::Plan, LinkAction::Add)
                         .map_err(map_core_error)?;
                 }
                 None => {
                     // Clear: remove the current plan link
                     if let Some(old) = current_plan {
-                        state
-                            .project
+                        project
                             .link_items(&id, old, LinkRelation::Plan, LinkAction::Remove)
                             .map_err(map_core_error)?;
                     }
@@ -1931,14 +1951,12 @@ async fn update_task(
         let (to_add, to_remove) = diff_vec(&fm.depends_on, desired_deps);
         // Remove first to avoid transient invalid states
         for dep in &to_remove {
-            state
-                .project
+            project
                 .link_items(&id, dep, LinkRelation::DependsOn, LinkAction::Remove)
                 .map_err(map_core_error)?;
         }
         for dep in &to_add {
-            state
-                .project
+            project
                 .link_items(&id, dep, LinkRelation::DependsOn, LinkAction::Add)
                 .map_err(map_core_error)?;
         }
@@ -1948,14 +1966,12 @@ async fn update_task(
     if let Some(ref desired_blocks) = body.blocks {
         let (to_add, to_remove) = diff_vec(&fm.blocks, desired_blocks);
         for blk in &to_remove {
-            state
-                .project
+            project
                 .link_items(&id, blk, LinkRelation::Blocks, LinkAction::Remove)
                 .map_err(map_core_error)?;
         }
         for blk in &to_add {
-            state
-                .project
+            project
                 .link_items(&id, blk, LinkRelation::Blocks, LinkAction::Add)
                 .map_err(map_core_error)?;
         }
@@ -1965,28 +1981,26 @@ async fn update_task(
     if let Some(ref desired_related) = body.related {
         let (to_add, to_remove) = diff_vec(&fm.related, desired_related);
         for rel in &to_remove {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Remove)
                 .map_err(map_core_error)?;
         }
         for rel in &to_add {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Add)
                 .map_err(map_core_error)?;
         }
     }
 
     // Re-read for response
-    let doc: MarkplaneDocument<Task> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Task> = project.read_item(&id).map_err(map_core_error)?;
     Ok(Json(ApiResponse {
         data: task_to_response(&doc),
     }))
 }
 
 async fn delete_task(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<TaskResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -1997,11 +2011,11 @@ async fn delete_task(
         )
     })?;
 
-    let doc: MarkplaneDocument<Task> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Task> = project.read_item(&id).map_err(map_core_error)?;
 
     let response = task_to_response(&doc);
 
-    state.project.archive_item(&id).map_err(map_core_error)?;
+    project.archive_item(&id).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse { data: response }))
 }
@@ -2015,7 +2029,7 @@ struct ArchiveResponse {
 }
 
 async fn post_archive_item(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ArchiveResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2026,7 +2040,7 @@ async fn post_archive_item(
         )
     })?;
 
-    state.project.archive_item(&id).map_err(map_core_error)?;
+    project.archive_item(&id).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: ArchiveResponse { success: true, id },
@@ -2034,7 +2048,7 @@ async fn post_archive_item(
 }
 
 async fn post_unarchive_item(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ArchiveResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2045,7 +2059,7 @@ async fn post_unarchive_item(
         )
     })?;
 
-    state.project.unarchive_item(&id).map_err(map_core_error)?;
+    project.unarchive_item(&id).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: ArchiveResponse { success: true, id },
@@ -2059,15 +2073,13 @@ struct ArchivedQueryParam {
 }
 
 async fn get_epics(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Query(params): Query<ArchivedQueryParam>,
 ) -> Result<Json<ApiListResponse<EpicResponse>>, (StatusCode, Json<ApiError>)> {
-    let epics = state
-        .project
+    let epics = project
         .list_epics_filtered(params.archived)
         .map_err(map_core_error)?;
-    let tasks = state
-        .project
+    let tasks = project
         .list_tasks(&QueryFilter {
             map: None,
             scope: ScanScope::All,
@@ -2075,7 +2087,7 @@ async fn get_epics(
         })
         .map_err(map_core_error)?;
 
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
     let total = epics.len();
     let data: Vec<_> = epics
         .iter()
@@ -2089,7 +2101,7 @@ async fn get_epics(
 }
 
 async fn get_epic(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<EpicResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2100,17 +2112,16 @@ async fn get_epic(
         )
     })?;
 
-    let doc: MarkplaneDocument<Epic> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Epic> = project.read_item(&id).map_err(map_core_error)?;
 
-    let tasks = state
-        .project
+    let tasks = project
         .list_tasks(&QueryFilter {
             map: None,
             scope: ScanScope::All,
             ..Default::default()
         })
         .map_err(map_core_error)?;
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: epic_to_response(&doc, &tasks, &config.workflows.task),
@@ -2118,11 +2129,10 @@ async fn get_epic(
 }
 
 async fn get_plans(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Query(params): Query<ArchivedQueryParam>,
 ) -> Result<Json<ApiListResponse<PlanResponse>>, (StatusCode, Json<ApiError>)> {
-    let plans = state
-        .project
+    let plans = project
         .list_plans_filtered(params.archived)
         .map_err(map_core_error)?;
 
@@ -2136,7 +2146,7 @@ async fn get_plans(
 }
 
 async fn get_plan(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<PlanResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2147,7 +2157,7 @@ async fn get_plan(
         )
     })?;
 
-    let doc: MarkplaneDocument<Plan> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Plan> = project.read_item(&id).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: plan_to_response(&doc),
@@ -2155,11 +2165,10 @@ async fn get_plan(
 }
 
 async fn get_notes(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Query(params): Query<ArchivedQueryParam>,
 ) -> Result<Json<ApiListResponse<NoteResponse>>, (StatusCode, Json<ApiError>)> {
-    let notes = state
-        .project
+    let notes = project
         .list_notes_filtered(params.archived)
         .map_err(map_core_error)?;
 
@@ -2173,7 +2182,7 @@ async fn get_notes(
 }
 
 async fn get_note(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<NoteResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2184,7 +2193,7 @@ async fn get_note(
         )
     })?;
 
-    let doc: MarkplaneDocument<Note> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Note> = project.read_item(&id).map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: note_to_response(&doc),
@@ -2192,20 +2201,18 @@ async fn get_note(
 }
 
 async fn get_maps(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Query(params): Query<ArchivedQueryParam>,
 ) -> Result<Json<ApiListResponse<MapListItemResponse>>, (StatusCode, Json<ApiError>)> {
-    let maps = state
-        .project
+    let maps = project
         .list_maps_filtered(params.archived)
         .map_err(map_core_error)?;
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
     let workflow = &config.workflows.task;
 
     let mut data = Vec::with_capacity(maps.len());
     for doc in &maps {
-        let tickets = state
-            .project
+        let tickets = project
             .list_tasks(&QueryFilter {
                 map: Some(doc.frontmatter.id.clone()),
                 ..Default::default()
@@ -2222,7 +2229,7 @@ async fn get_maps(
 }
 
 async fn get_map(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<MapDetailResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2233,15 +2240,14 @@ async fn get_map(
         )
     })?;
 
-    let doc: MarkplaneDocument<Map> = state.project.read_item(&id).map_err(map_core_error)?;
-    let tickets = state
-        .project
+    let doc: MarkplaneDocument<Map> = project.read_item(&id).map_err(map_core_error)?;
+    let tickets = project
         .list_tasks(&QueryFilter {
             map: Some(id.clone()),
             ..Default::default()
         })
         .map_err(map_core_error)?;
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: map_to_detail(&doc, &tickets, &config.workflows.task),
@@ -2249,7 +2255,7 @@ async fn get_map(
 }
 
 async fn update_epic(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
     Json(body): Json<UpdateEpicRequest>,
 ) -> Result<Json<ApiResponse<EpicResponse>>, (StatusCode, Json<ApiError>)> {
@@ -2262,7 +2268,7 @@ async fn update_epic(
     })?;
 
     // Read current state for diffing tags and links
-    let current: MarkplaneDocument<Epic> = state.project.read_item(&id).map_err(map_core_error)?;
+    let current: MarkplaneDocument<Epic> = project.read_item(&id).map_err(map_core_error)?;
     let fm = &current.frontmatter;
 
     // Diff tags if provided
@@ -2310,8 +2316,7 @@ async fn update_epic(
         || !matches!(target, Patch::Unchanged)
         || body.body.is_some();
     if has_changes {
-        state
-            .project
+        project
             .update_epic(
                 &id,
                 &EpicUpdate {
@@ -2334,30 +2339,27 @@ async fn update_epic(
     if let Some(ref desired_related) = body.related {
         let (to_add, to_remove) = diff_vec(&fm.related, desired_related);
         for rel in &to_remove {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Remove)
                 .map_err(map_core_error)?;
         }
         for rel in &to_add {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Add)
                 .map_err(map_core_error)?;
         }
     }
 
     // Re-read for response
-    let doc: MarkplaneDocument<Epic> = state.project.read_item(&id).map_err(map_core_error)?;
-    let tasks = state
-        .project
+    let doc: MarkplaneDocument<Epic> = project.read_item(&id).map_err(map_core_error)?;
+    let tasks = project
         .list_tasks(&QueryFilter {
             map: None,
             scope: ScanScope::All,
             ..Default::default()
         })
         .map_err(map_core_error)?;
-    let config = state.project.load_config().map_err(map_core_error)?;
+    let config = project.load_config().map_err(map_core_error)?;
 
     Ok(Json(ApiResponse {
         data: epic_to_response(&doc, &tasks, &config.workflows.task),
@@ -2365,7 +2367,7 @@ async fn update_epic(
 }
 
 async fn update_plan(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
     Json(body): Json<UpdatePlanRequest>,
 ) -> Result<Json<ApiResponse<PlanResponse>>, (StatusCode, Json<ApiError>)> {
@@ -2378,13 +2380,12 @@ async fn update_plan(
     })?;
 
     // Read current state for link diffing
-    let current: MarkplaneDocument<Plan> = state.project.read_item(&id).map_err(map_core_error)?;
+    let current: MarkplaneDocument<Plan> = project.read_item(&id).map_err(map_core_error)?;
 
     // Properties + body
     let has_changes = body.title.is_some() || body.status.is_some() || body.body.is_some();
     if has_changes {
-        state
-            .project
+        project
             .update_plan(
                 &id,
                 &PlanUpdate {
@@ -2403,28 +2404,26 @@ async fn update_plan(
     if let Some(ref desired_related) = body.related {
         let (to_add, to_remove) = diff_vec(&current.frontmatter.related, desired_related);
         for rel in &to_remove {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Remove)
                 .map_err(map_core_error)?;
         }
         for rel in &to_add {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Add)
                 .map_err(map_core_error)?;
         }
     }
 
     // Re-read for response
-    let doc: MarkplaneDocument<Plan> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Plan> = project.read_item(&id).map_err(map_core_error)?;
     Ok(Json(ApiResponse {
         data: plan_to_response(&doc),
     }))
 }
 
 async fn update_note(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
     Json(body): Json<UpdateNoteRequest>,
 ) -> Result<Json<ApiResponse<NoteResponse>>, (StatusCode, Json<ApiError>)> {
@@ -2437,7 +2436,7 @@ async fn update_note(
     })?;
 
     // Read current state for diffing tags and links
-    let current: MarkplaneDocument<Note> = state.project.read_item(&id).map_err(map_core_error)?;
+    let current: MarkplaneDocument<Note> = project.read_item(&id).map_err(map_core_error)?;
     let fm = &current.frontmatter;
 
     // ── Properties → NoteUpdate ──────────────────────────────────────
@@ -2454,8 +2453,7 @@ async fn update_note(
         || !remove_tags.is_empty()
         || body.body.is_some();
     if has_changes {
-        state
-            .project
+        project
             .update_note(
                 &id,
                 &NoteUpdate {
@@ -2476,30 +2474,29 @@ async fn update_note(
     if let Some(ref desired_related) = body.related {
         let (to_add, to_remove) = diff_vec(&fm.related, desired_related);
         for rel in &to_remove {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Remove)
                 .map_err(map_core_error)?;
         }
         for rel in &to_add {
-            state
-                .project
+            project
                 .link_items(&id, rel, LinkRelation::Related, LinkAction::Add)
                 .map_err(map_core_error)?;
         }
     }
 
     // Re-read for response
-    let doc: MarkplaneDocument<Note> = state.project.read_item(&id).map_err(map_core_error)?;
+    let doc: MarkplaneDocument<Note> = project.read_item(&id).map_err(map_core_error)?;
     Ok(Json(ApiResponse {
         data: note_to_response(&doc),
     }))
 }
 
 async fn post_sync(
+    Extension(project): Extension<Project>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<SyncResponse>>, (StatusCode, Json<ApiError>)> {
-    state.project.sync_all().map_err(map_core_error)?;
+    project.sync_all().map_err(map_core_error)?;
 
     // Broadcast sync_complete event to all WebSocket clients
     let event = serde_json::json!({"type": "sync_complete"});
@@ -2539,7 +2536,7 @@ struct LinkResponse {
 }
 
 async fn post_link(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Json(req): Json<LinkRequest>,
 ) -> Result<Json<ApiResponse<LinkResponse>>, (StatusCode, Json<ApiError>)> {
     let relation: LinkRelation = req
@@ -2552,8 +2549,7 @@ async fn post_link(
         LinkAction::Add
     };
 
-    state
-        .project
+    project
         .link_items(&req.from, &req.to, relation, action)
         .map_err(map_core_error)?;
 
@@ -2591,7 +2587,7 @@ struct SearchResultResponse {
 }
 
 async fn get_search(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<ApiListResponse<SearchResultResponse>>, (StatusCode, Json<ApiError>)> {
     let query = params.q.to_lowercase();
@@ -2605,13 +2601,11 @@ async fn get_search(
     let mut results: Vec<SearchResultResponse> = Vec::new();
 
     // Search tasks
-    let mut tasks = state
-        .project
+    let mut tasks = project
         .list_tasks(&QueryFilter::default())
         .map_err(map_core_error)?;
     let archived_task_ids: HashSet<String> = if params.include_archived {
-        let archived = state
-            .project
+        let archived = project
             .list_tasks(&QueryFilter {
                 map: None,
                 scope: ScanScope::Archived,
@@ -2659,10 +2653,9 @@ async fn get_search(
     }
 
     // Search epics
-    let mut epics = state.project.list_epics().map_err(map_core_error)?;
+    let mut epics = project.list_epics().map_err(map_core_error)?;
     let archived_epic_ids: HashSet<String> = if params.include_archived {
-        let archived = state
-            .project
+        let archived = project
             .list_epics_filtered(true)
             .map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
@@ -2702,10 +2695,9 @@ async fn get_search(
     }
 
     // Search plans
-    let mut plans = state.project.list_plans().map_err(map_core_error)?;
+    let mut plans = project.list_plans().map_err(map_core_error)?;
     let archived_plan_ids: HashSet<String> = if params.include_archived {
-        let archived = state
-            .project
+        let archived = project
             .list_plans_filtered(true)
             .map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
@@ -2742,10 +2734,9 @@ async fn get_search(
     }
 
     // Search notes
-    let mut notes = state.project.list_notes().map_err(map_core_error)?;
+    let mut notes = project.list_notes().map_err(map_core_error)?;
     let archived_note_ids: HashSet<String> = if params.include_archived {
-        let archived = state
-            .project
+        let archived = project
             .list_notes_filtered(true)
             .map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
@@ -2785,10 +2776,9 @@ async fn get_search(
     }
 
     // Search maps
-    let mut maps = state.project.list_maps().map_err(map_core_error)?;
+    let mut maps = project.list_maps().map_err(map_core_error)?;
     let archived_map_ids: HashSet<String> = if params.include_archived {
-        let archived = state
-            .project
+        let archived = project
             .list_maps_filtered(true)
             .map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
@@ -2902,14 +2892,14 @@ struct GraphResponse {
 }
 
 async fn get_graph_all(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
 ) -> Result<Json<ApiResponse<GraphResponse>>, (StatusCode, Json<ApiError>)> {
-    let graph = build_graph(&state.project, None).map_err(map_anyhow_error)?;
+    let graph = build_graph(&project, None).map_err(map_anyhow_error)?;
     Ok(Json(ApiResponse { data: graph }))
 }
 
 async fn get_graph_focused(
-    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<GraphResponse>>, (StatusCode, Json<ApiError>)> {
     parse_id(&id).map_err(|_| {
@@ -2919,7 +2909,7 @@ async fn get_graph_focused(
             &format!("Invalid ID format: {}", id),
         )
     })?;
-    let graph = build_graph(&state.project, Some(&id)).map_err(map_anyhow_error)?;
+    let graph = build_graph(&project, Some(&id)).map_err(map_anyhow_error)?;
     Ok(Json(ApiResponse { data: graph }))
 }
 
@@ -3122,6 +3112,147 @@ fn build_graph(project: &Project, focus_id: Option<&str>) -> anyhow::Result<Grap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    fn setup_temp_project() -> (TempDir, Project) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join(".markplane");
+        let project = Project::init(root, "Serve Test", "in-process serve tests").unwrap();
+        (tmp, project)
+    }
+
+    async fn oneshot_json(
+        app: &tower::util::BoxCloneService<Request, Response, Infallible>,
+        method: &str,
+        uri: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn summary_returns_project_name_from_temp_dir() {
+        let (_tmp, project) = setup_temp_project();
+        let (ws_tx, _) = broadcast::channel::<String>(16);
+        let app = build_app(project, ws_tx, 4200, true);
+
+        let (status, json) = oneshot_json(&app, "GET", "/api/summary").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["name"], "Serve Test");
+        assert_eq!(json["data"]["description"], "in-process serve tests");
+    }
+
+    #[tokio::test]
+    async fn tasks_list_and_get_return_created_task() {
+        let (_tmp, project) = setup_temp_project();
+        let task = project
+            .create_task(
+                "In-process task",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let task_id = task.id.clone();
+
+        let (ws_tx, _) = broadcast::channel::<String>(16);
+        let app = build_app(project, ws_tx, 4200, true);
+
+        let (status, list) = oneshot_json(&app, "GET", "/api/tasks").await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&task_id.as_str()));
+
+        let (status, one) = oneshot_json(&app, "GET", &format!("/api/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(one["data"]["id"], task_id);
+        assert_eq!(one["data"]["title"], "In-process task");
+    }
+
+    #[tokio::test]
+    async fn config_returns_project_settings() {
+        let (_tmp, project) = setup_temp_project();
+        let (ws_tx, _) = broadcast::channel::<String>(16);
+        let app = build_app(project, ws_tx, 4200, true);
+
+        let (status, json) = oneshot_json(&app, "GET", "/api/config").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["project"]["name"], "Serve Test");
+    }
+
+    #[tokio::test]
+    async fn websocket_handshake_headers_reach_upgrade() {
+        let (_tmp, project) = setup_temp_project();
+        let (ws_tx, _) = broadcast::channel::<String>(16);
+        let app = build_app(project, ws_tx, 4200, true);
+
+        // oneshot has no hyper connection-upgrade state, so a valid handshake
+        // cannot return 101. Getting 426 (not 404/400) means the /ws route ran
+        // and accepted the WebSocket handshake headers.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ws")
+                    .header("connection", "upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8_lossy(&body).contains("couldn't be upgraded"),
+            "expected ConnectionNotUpgradable body, got {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // Missing handshake headers must fail validation (not 404).
+        let bad = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/ws")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
 
     #[test]
     fn test_diff_vec_no_change() {
