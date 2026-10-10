@@ -1,8 +1,9 @@
 ---
 id: MAP-3fjjb
 title: markplane serve 多项目切换、后台运行与 HTTPS
-status: active
-specs: []
+status: done
+specs:
+- EPIC-rm3zt
 related: []
 tags: []
 created: 2026-10-10
@@ -39,10 +40,15 @@ updated: 2026-10-10
 
 ## Decisions so far
 
-## Not yet specified
+- 静态导出的前端能否在 /p/<id>/ 路径前缀下运行 [[TASK-rm5w6]]: 可行：后端在路由前改写 /p/<id>/ 前缀；前端用 useSyncExternalStore 读项目 id，链接统一走 ProjectLink/useProjectRouter 并用 ESLint 强制；原型分支 prototype/project-prefix-routing
 
-- 后端多 Project 的生命周期：何时加载、文件监听的开关与共享、首次打开是否先 sync、注册表与 CLI 并发写入。待原型与 Spec 阶段再定。
-- 开机自启（launchd / systemd）：先不做，以后再看是否需要。
+- markplane 在 macOS/Linux 上把 serve 放到后台运行的做法 [[TASK-fixyf]]: 重新启动自身并用 process_group/setsid 脱离终端；flock 锁住的 serve.pid 做单实例与存活判断；SIGTERM + axum 优雅关闭；前台 serve 检测已有服务只读写本地文件、不走网络
+
+- axum 怎么接 rustls 提供 HTTPS/wss，并用 rcgen 生成浏览器可接受的自签名证书 [[TASK-zaagz]]: axum-server 0.8（tls-rustls，只用 aws-lc-rs）；rcgen 签 ECDSA 叶子证书（SAN localhost/127.0.0.1/::1、EKU serverAuth、CA:FALSE、≤825 天）；macOS 钥匙串 / Linux NSS 信任，换证书需重新信任
+
+- 一个 serve 进程如何管理多个 Project 的加载、文件监听与 WebSocket [[TASK-iy25u]]: 首次访问时建立运行态（sync_all + 常开监听器 + 独立广播通道）不淘汰；改写层把项目放进 Request extensions；404 project_not_found / 409 project_unavailable；注册表加锁读写不缓存；文档页全局；旧地址跳落地页
+
+## Not yet specified
 
 ## Out of scope
 
@@ -50,3 +56,4 @@ updated: 2026-10-10
 - 局域网访问与访问鉴权（只服务本机）。
 - 自建本地 CA（mkcert 式）证书方案。
 - Windows 上的后台运行与证书信任（Windows 只用前台 `markplane serve`）。
+- 开机自启（launchd / systemd）：本次不做，以后需要时另开新地图。
