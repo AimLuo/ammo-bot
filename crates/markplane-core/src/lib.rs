@@ -24,8 +24,8 @@ pub use agent_stream::{
     session_id_from_events, usage_from_events, verdict_from_events,
 };
 pub use comments::{
-    Comment, ParsedBody, default_comment_author, demote_comment_headings, parse_item_body,
-    with_description,
+    Comment, ParsedBody, default_comment_author, demote_comment_headings,
+    latest_agent_implement_review, parse_item_body, with_description,
 };
 pub use dispatcher::{
     AgentModel, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_MODEL, DEFAULT_TIMEOUT_MINUTES,

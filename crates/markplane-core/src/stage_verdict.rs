@@ -1,8 +1,7 @@
 //! Stage verdict last-line judgment for the Dispatcher.
 //!
 //! Pure helpers so implement / fix / merge endings can be checked without
-//! running agents. Fix Stage may land in a later ticket; the FIX: done rule
-//! lives here so the engine can wire it immediately.
+//! running agents.
 
 /// Parsed implement Stage last line.
 #[derive(Debug, Clone, PartialEq, Eq)]

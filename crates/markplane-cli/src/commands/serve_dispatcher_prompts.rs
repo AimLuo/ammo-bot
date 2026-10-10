@@ -1,6 +1,6 @@
 //! Stage prompt templates (from `prototype/stage-prompts`).
 
-/// Variables for rendering implement / merge prompts.
+/// Variables for rendering implement / fix / merge prompts.
 #[derive(Debug, Clone)]
 pub struct PromptContext {
     pub task_id: String,
@@ -12,6 +12,8 @@ pub struct PromptContext {
     pub main_tree: String,
     pub target_branch: String,
     pub author: String,
+    /// Latest `**Review**` body by `agent-implement` (fix Stage); empty if none.
+    pub review_comment: String,
 }
 
 impl PromptContext {
@@ -32,6 +34,7 @@ impl PromptContext {
             .replace("{{main_tree}}", &self.main_tree)
             .replace("{{target_branch}}", &self.target_branch)
             .replace("{{author}}", &self.author)
+            .replace("{{review_comment}}", &self.review_comment)
     }
 }
 
@@ -85,16 +88,17 @@ BLOCKED: <one-line reason>
 
 const CONTRACT_FIX: &str = r#"## Finishing (required)
 
-1. Leave the worktree clean: commit or discard every change so that `git status --porcelain` prints nothing.
-2. Make the very last line of your final message exactly one of these, on its own line, with no formatting and nothing after it:
+1. Leave the worktree clean: commit or discard every change so that `git status --porcelain` prints nothing (including untracked scratch files and non-ignored build output).
+2. Post the `**Fix report**` comment.
+3. Make the very last line of your final message exactly one of these, on its own line, with no formatting and nothing after it:
 
 ```text
 FIX: done
 FIX: blocked
 ```
 
-- `FIX: done`: must-fix items are addressed (or confirmed false positives in a `**Fix report**` comment).
-- `FIX: blocked`: you could not finish; the Dispatcher hands the ticket to a human."#;
+- `FIX: done`: every must-fix item is either fixed or declined as a false positive with a reason, the full test suite passes, and everything is committed.
+- `FIX: blocked`: at least one must-fix item couldn't be fixed, or the tests don't pass. Commit whatever you did fix and explain the rest in the report. The Dispatcher hands the ticket to a human."#;
 
 const CONTRACT_MERGE: &str = r#"## Finishing (required)
 
@@ -151,24 +155,39 @@ pub fn render_implement_prompt(ctx: &PromptContext) -> String {
     ctx.fill(&body)
 }
 
-/// Render a minimal fix Stage prompt (full Review-inline template is a later ticket).
+/// Render the fix Stage prompt (prototype `templates/fix.md`).
 ///
-/// Present so the engine can run fix judgment (`FIX: done`) when implement ends
-/// with `REVIEW: issues`.
+/// Inlines the latest `agent-implement` `**Review**` comment when the engine
+/// provides it; when the `<review>` block is empty the agent must `markplane show`.
 pub fn render_fix_prompt(ctx: &PromptContext) -> String {
     let mut ctx = ctx.clone();
     ctx.author = "agent-fix".into();
     let body = stitch(&[
-        "You are the **fix** stage for ticket {{task_id}} \"{{title}}\". Fix the must-fix review findings in this worktree and finish with the final line under \"Finishing\".\n\n",
+        "You are the **fix** stage for ticket {{task_id}} \"{{title}}\". An earlier session implemented the ticket on branch `{{branch}}`, and its code review found must-fix items. Fix them, report on the ticket, and finish with the final line described under \"Finishing\". This is a new session, so you don't have the earlier conversation.\n\n",
         "## This run\n\n",
-        "- Ticket: `{{task_id}}`. Read it with `markplane show {{task_id}}` and find the latest `**Review**` comment.\n",
-        "- Worktree: `{{worktree}}` on branch `{{branch}}`.\n\n",
+        "- Ticket: `{{task_id}}`, issue tracker Markplane. Read it with `markplane show {{task_id}}` (it is the spec), including linked plans or epics.\n",
+        "- Worktree: `{{worktree}}` on branch `{{branch}}`, cut from `{{base_branch}}` at `{{base_sha}}`. To see what was done so far, run `git log --oneline {{base_short}}..HEAD` and `git diff {{base_sha}}...HEAD`.\n",
+        "- How to build and test: see `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` in this worktree.\n\n",
+        "## What to fix\n\n",
+        "The Dispatcher copied the latest `**Review**` comment by `agent-implement` from the ticket:\n\n",
+        "<review>\n",
+        "{{review_comment}}\n",
+        "</review>\n\n",
+        "If the block above is empty, find the last comment by `agent-implement` whose first line starts with `**Review**` in `markplane show {{task_id}}`. If there is none, post a `**Fix report**` saying so and end with `FIX: blocked`.\n\n",
+        "- Fix every item under **Must-fix**. Fix an **Optional** item only if it is trivial and clearly inside the ticket's scope; otherwise leave it alone.\n",
+        "- Stay inside the ticket's scope. No refactors beyond what an item needs.\n",
+        "- You may decline a must-fix item only if you are confident it's a false positive, meaning the code is already right according to the ticket or the repo's documented standards. Explain why in the report. Difficulty is not a reason to decline; mark the item blocked instead.\n",
+        "- Run the typecheck and the affected tests as you go, and the full suite once at the end.\n",
+        "- Commit with the `Refs: {{task_id}}` trailer.\n\n",
         HEADLESS,
         "\n\n",
         BOUNDARIES_WORKTREE,
         "\n\n",
         TICKET,
         "\n\n",
+        "## Report\n\n",
+        "Post exactly one comment:\n\n",
+        "```text\n**Fix report** · <a> fixed · <b> declined · <c> blocked\n1. <must-fix item 1, short> — fixed in `<short sha>` | declined: <why> | blocked: <why>\n…\nOptional items done: <list or none>\nTests: <command> → <pass/fail>\n```\n\n",
         CONTRACT_FIX,
         "\n",
     ]);
@@ -230,6 +249,7 @@ mod tests {
             main_tree: "/repo".into(),
             target_branch: "main".into(),
             author: String::new(),
+            review_comment: String::new(),
         }
     }
 
@@ -242,6 +262,31 @@ mod tests {
         assert!(p.contains("**Review**"));
         assert!(p.contains("Unattended run"));
         assert!(p.contains("agent/TASK-abc12"));
+    }
+
+    #[test]
+    fn fix_prompt_inlines_review_and_allows_false_positive() {
+        let mut c = ctx();
+        c.review_comment = "**Review** base `deadbee` · 1 must-fix · 0 optional\n\n**Must-fix**\n1. rename foo\n".into();
+        let p = render_fix_prompt(&c);
+        assert!(p.contains("**fix** stage"));
+        assert!(p.contains("<review>"));
+        assert!(p.contains("rename foo"));
+        assert!(p.contains("</review>"));
+        assert!(p.contains("FIX: done"));
+        assert!(p.contains("FIX: blocked"));
+        assert!(p.contains("**Fix report**"));
+        assert!(p.contains("false positive") || p.contains("declined"));
+        assert!(p.contains("markplane show TASK-abc12"));
+        assert!(p.contains("signs your comments as `agent-fix`"));
+    }
+
+    #[test]
+    fn fix_prompt_empty_review_tells_agent_to_show() {
+        let p = render_fix_prompt(&ctx());
+        assert!(p.contains("<review>\n\n</review>") || p.contains("<review>\n</review>"));
+        assert!(p.contains("If the block above is empty"));
+        assert!(p.contains("markplane show TASK-abc12"));
     }
 
     #[test]

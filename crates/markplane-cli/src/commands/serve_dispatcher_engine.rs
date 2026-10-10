@@ -17,8 +17,8 @@ use markplane_core::{
     Patch, Project, QueryFilter, Run, RunRecord, RunStatus, Stage, StatusCategory, StreamEvent,
     Task, Trigger, UpdateFields, agent_invocation_succeeded, classify_implement_verdict,
     filter_and_sort_pickup_candidates, implement_verdict_failure_reason, is_fix_done,
-    is_merge_done, parse_stream_json_line, read_run_record, round_robin_pickup,
-    usage_from_events, verdict_from_events, write_run_record,
+    is_merge_done, latest_agent_implement_review, parse_stream_json_line, read_run_record,
+    round_robin_pickup, usage_from_events, verdict_from_events, write_run_record,
 };
 use serde_json::json;
 use tokio::sync::{Mutex, broadcast};
@@ -366,6 +366,7 @@ async fn run_pipeline(
         main_tree: proj.project_dir.display().to_string(),
         target_branch: base_branch.clone(),
         author: String::new(),
+        review_comment: String::new(),
     };
 
     // ── implement (silent-stop check at Stage boundary) ──
@@ -446,7 +447,7 @@ async fn run_pipeline(
         .await;
     }
 
-    // ── optional fix (judgment wired; full prompt polish is a later ticket) ──
+    // ── one-shot fix after REVIEW: issues (no second review loop) ──
     if impl_verdict == ImplementVerdict::Issues {
         if !ticket_still_ours(&proj.project, task_id)? {
             {
@@ -467,8 +468,16 @@ async fn run_pipeline(
         update_latest_run(&mut record, &run);
         persist_run(&engine, proj, task_id, &record, &run, true).await?;
 
+        // Snapshot fix Stage settings at Stage start; inline latest Review.
         let fix_settings = proj.settings.stages.fix.clone();
-        let fix_prompt = serve_dispatcher_prompts::render_fix_prompt(&ctx);
+        let review_comment = {
+            let doc: MarkplaneDocument<Task> =
+                proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+            latest_agent_implement_review(&doc.body).unwrap_or_default()
+        };
+        let mut fix_ctx = ctx.clone();
+        fix_ctx.review_comment = review_comment;
+        let fix_prompt = serve_dispatcher_prompts::render_fix_prompt(&fix_ctx);
         let fix_result = run_agent(
             &engine,
             proj,
@@ -711,7 +720,7 @@ async fn run_agent(
     };
     run.attempts.push(attempt.clone());
     update_latest_run(record, run);
-    persist_run(&engine, proj, task_id, record, run, false).await?;
+    persist_run(engine, proj, task_id, record, run, false).await?;
 
     let main_root = proj
         .project_dir
@@ -757,7 +766,7 @@ async fn run_agent(
         a.process_group_id = Some(pid);
     }
     update_latest_run(record, run);
-    persist_run(&engine, proj, task_id, record, run, false).await?;
+    persist_run(engine, proj, task_id, record, run, false).await?;
 
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
@@ -877,7 +886,7 @@ async fn run_agent(
             {
                 a.session_id = Some(sid);
                 update_latest_run(record, run);
-                persist_run(&engine, proj, task_id, record, run, false).await?;
+                persist_run(engine, proj, task_id, record, run, false).await?;
             }
         }
         if wait_handle.is_finished() {
@@ -901,7 +910,7 @@ async fn run_agent(
             a.exit_code = Some(-1);
         }
         update_latest_run(record, run);
-        persist_run(&engine, proj, task_id, record, run, false).await?;
+        persist_run(engine, proj, task_id, record, run, false).await?;
         return Ok(AgentOutcome {
             succeeded: false,
             timed_out: true,
@@ -937,7 +946,7 @@ async fn run_agent(
         a.stderr_tail = Some(stderr_tail);
     }
     update_latest_run(record, run);
-    persist_run(&engine, proj, task_id, record, run, false).await?;
+    persist_run(engine, proj, task_id, record, run, false).await?;
 
     let failure_reason = if !succeeded {
         Some(format!(
@@ -1048,7 +1057,7 @@ async fn success_close(
     run.ended_at = Some(Utc::now().to_rfc3339());
     run.failure_reason = None;
     update_latest_run(record, run);
-    persist_run(&engine, proj, task_id, record, run, true).await?;
+    persist_run(engine, proj, task_id, record, run, true).await?;
     Ok(())
 }
 
@@ -1102,7 +1111,7 @@ async fn fail_run_internal(
     };
     let stage = run.current_stage.unwrap_or(Stage::Implement);
     fail_and_finish(
-        &engine,
+        engine,
         proj,
         task_id,
         &mut record,

@@ -7023,6 +7023,74 @@ mod tests {
         assert!(status.success(), "git commit failed");
     }
 
+    /// Fake agent for REVIEW: issues → one fix → merge (TASK-gxxax).
+    ///
+    /// implement posts a Review with a unique must-fix marker and ends
+    /// `REVIEW: issues`. fix requires that marker in the prompt, same cwd as
+    /// the worktree, then `FIX: done`. merge is the happy-path merge.
+    fn write_issues_fix_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = concat!(
+                "#!/usr/bin/env bash\n",
+                "set -euo pipefail\n",
+                "MARKPLANE=\"__MARKPLANE__\"\n",
+                "AUTHOR=\"${MARKPLANE_AUTHOR:-}\"\n",
+                "PROMPT=\"${@: -1}\"\n",
+                "TASK=\"$(printf '%s' \"$PROMPT\" | sed -n 's/.*\\(TASK-[a-z0-9]*\\).*/\\1/p' | head -1)\"\n",
+                "MARKER=\"UNIQUE-MUST-FIX-gxxax-marker\"\n",
+                "emit() {\n",
+                "  local session=\"$1\" text=\"$2\"\n",
+                "  printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$session\\\",\\\"model\\\":\\\"fake\\\"}\"\n",
+                "  python3 -c 'import json,sys; print(json.dumps({\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":sys.argv[1]}]}}))' \"$text\"\n",
+                "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"inputTokens\":1,\"outputTokens\":2,\"cacheReadTokens\":0,\"cacheWriteTokens\":0},\"duration_api_ms\":10}'\n",
+                "}\n",
+                "if [ \"$AUTHOR\" = \"agent-implement\" ]; then\n",
+                "  echo \"implemented with issues\" > \"feat-${TASK}.txt\"\n",
+                "  git add \"feat-${TASK}.txt\"\n",
+                "  git -c user.email=a@b -c user.name=agent commit -m \"feat: ${TASK}\" -m \"Refs: ${TASK}\"\n",
+                "  printf '%s\\n' \"**Review** base fake · 1 must-fix · 0 optional\" \"\" \"**Must-fix**\" \"1. ${MARKER}\" \"\" \"**Optional**\" \"none\" | \"$MARKPLANE\" comment \"$TASK\" --body-file -\n",
+                "  # Prove workspace for later same-worktree check\n",
+                "  pwd > \".impl-cwd-${TASK}\"\n",
+                "  git add \".impl-cwd-${TASK}\"\n",
+                "  git -c user.email=a@b -c user.name=agent commit -m \"chore: record impl cwd\" -m \"Refs: ${TASK}\"\n",
+                "  emit \"sess-impl-${TASK}\" \"$(printf 'reviewed\\n\\nREVIEW: issues\\n')\"\n",
+                "elif [ \"$AUTHOR\" = \"agent-fix\" ]; then\n",
+                "  case \"$PROMPT\" in\n",
+                "    *\"$MARKER\"*) ;;\n",
+                "    *) echo \"fix prompt missing Review marker\" >&2; exit 42 ;;\n",
+                "  esac\n",
+                "  case \"$PROMPT\" in\n",
+                "    *\"<review>\"*) ;;\n",
+                "    *) echo \"fix prompt missing <review> block\" >&2; exit 43 ;;\n",
+                "  esac\n",
+                "  # Same worktree as implement: cwd must contain .impl-cwd file from implement.\n",
+                "  test -f \".impl-cwd-${TASK}\" || { echo \"not same worktree\" >&2; exit 44; }\n",
+                "  echo \"fixed\" > \"fix-${TASK}.txt\"\n",
+                "  git add \"fix-${TASK}.txt\"\n",
+                "  git -c user.email=a@b -c user.name=agent commit -m \"fix: ${TASK}\" -m \"Refs: ${TASK}\"\n",
+                "  printf '%s\\n' \"**Fix report** · 1 fixed · 0 declined · 0 blocked\" \"1. ${MARKER} — fixed\" \"Optional items done: none\" \"Tests: fake → pass\" | \"$MARKPLANE\" comment \"$TASK\" --body-file -\n",
+                "  emit \"sess-fix-${TASK}\" \"$(printf 'fixed\\n\\nFIX: done\\n')\"\n",
+                "elif [ \"$AUTHOR\" = \"agent-merge\" ]; then\n",
+                "  BRANCH=\"agent/${TASK}\"\n",
+                "  if git merge-base --is-ancestor \"$BRANCH\" HEAD; then\n",
+                "    emit \"sess-merge-${TASK}\" \"$(printf 'already\\n\\nMERGE: done\\n')\"\n",
+                "    exit 0\n",
+                "  fi\n",
+                "  git merge --no-ff --no-commit \"$BRANCH\"\n",
+                "  git -c user.email=a@b -c user.name=agent commit -m \"Merge ${BRANCH}\" -m \"Refs: ${TASK}\"\n",
+                "  emit \"sess-merge-${TASK}\" \"$(printf 'merged\\n\\nMERGE: done\\n')\"\n",
+                "else\n",
+                "  emit \"sess-unknown\" \"noop\"\n",
+                "fi\n",
+            );
+            let script = script.replace("__MARKPLANE__", &markplane_bin.display().to_string());
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     /// Fake agent: implement commits a file + comments; merge does --no-ff merge.
     fn write_happy_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path) {
         #[cfg(unix)]
@@ -7320,6 +7388,112 @@ mod tests {
             }
         }
         assert!(saw_run_changed, "expected run_changed events");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_issues_starts_one_fix_same_worktree_then_merges() {
+        // TASK-gxxax: REVIEW: issues → exactly one fix in the same worktree →
+        // FIX: done → merge → done. No review-after-fix loop.
+        let mut env = setup_engine_env("issues-fix", Some(false));
+        {
+            let mut cfg = Project::new(env.project_dir.join(".markplane"))
+                .load_config()
+                .unwrap();
+            cfg.dispatcher.push_after_merge = Some(false);
+            cfg.dispatcher.stages.fix.model = Some("fake-fix-model-gxxax".into());
+            cfg.dispatcher.stages.fix.timeout_minutes = Some(42);
+            let yaml = serde_yaml::to_string(&cfg).unwrap();
+            fs::write(env.project_dir.join(".markplane/config.yaml"), yaml).unwrap();
+        }
+        let agent = env._tmp.path().join("fake-agent-issues-fix");
+        write_issues_fix_fake_agent(&agent, &markplane_debug_bin());
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        let app = build_app(state.clone());
+        env.state = state;
+        env.app = app;
+
+        let task_id = add_ready_task(&env, "Issues then fix", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.status, "done");
+        assert!(doc.body.contains("UNIQUE-MUST-FIX-gxxax-marker"));
+        assert!(doc.body.contains("**Fix report**"));
+        assert!(doc.body.contains("**Merged**"));
+
+        let record = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        let run = record.runs.last().unwrap();
+        assert_eq!(run.status, markplane_core::RunStatus::Succeeded);
+
+        let impls: Vec<_> = run
+            .attempts
+            .iter()
+            .filter(|a| a.stage == markplane_core::Stage::Implement)
+            .collect();
+        let fixes: Vec<_> = run
+            .attempts
+            .iter()
+            .filter(|a| a.stage == markplane_core::Stage::Fix)
+            .collect();
+        let merges: Vec<_> = run
+            .attempts
+            .iter()
+            .filter(|a| a.stage == markplane_core::Stage::Merge)
+            .collect();
+        assert_eq!(impls.len(), 1, "exactly one implement");
+        assert_eq!(fixes.len(), 1, "exactly one fix — no review-after-fix loop");
+        assert_eq!(merges.len(), 1, "exactly one merge");
+        assert_eq!(
+            impls[0].verdict.as_deref(),
+            Some("REVIEW: issues")
+        );
+        assert_eq!(fixes[0].verdict.as_deref(), Some("FIX: done"));
+        assert_eq!(
+            fixes[0].model, "fake-fix-model-gxxax",
+            "fix Stage uses snapshotted fix model"
+        );
+        assert_eq!(
+            fixes[0].timeout_secs,
+            Some(42 * 60),
+            "fix Stage uses snapshotted fix timeout"
+        );
+        assert_eq!(
+            fixes[0].workspace, impls[0].workspace,
+            "fix runs in the same worktree as implement"
+        );
+        assert!(
+            fixes[0].workspace.contains(&format!(".worktrees/{task_id}")),
+            "workspace={}",
+            fixes[0].workspace
+        );
+        // Stage order: implement → fix → merge (no second implement/review).
+        let stages: Vec<_> = run.attempts.iter().map(|a| a.stage).collect();
+        assert_eq!(
+            stages,
+            vec![
+                markplane_core::Stage::Implement,
+                markplane_core::Stage::Fix,
+                markplane_core::Stage::Merge
+            ]
+        );
     }
 
     #[tokio::test]

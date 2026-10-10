@@ -203,6 +203,27 @@ fn is_h2_heading(trimmed: &str) -> bool {
     trimmed.starts_with("## ") && !trimmed.starts_with("###")
 }
 
+/// Latest `**Review**` comment authored by `agent-implement`, if any.
+///
+/// Used by the Dispatcher to inline review findings into the fix Stage prompt.
+/// Matching is by author and a first-line marker; dates only go to the day, so
+/// we take the last matching comment in document order (prototype `stage.py review`).
+pub fn latest_agent_implement_review(body: &str) -> Option<String> {
+    parse_item_body(body)
+        .comments
+        .into_iter()
+        .filter(|c| c.author == "agent-implement")
+        .filter(|c| {
+            c.body
+                .lines()
+                .next()
+                .map(|line| line.trim_start().starts_with("**Review**"))
+                .unwrap_or(false)
+        })
+        .map(|c| c.body)
+        .next_back()
+}
+
 /// Default author for appended comments.
 ///
 /// Resolution order: `MARKPLANE_AUTHOR` → `$USER` → `$USERNAME` → `me`.
@@ -416,6 +437,46 @@ mod tests {
         assert!(result.contains("#### Also"));
         assert!(!result.contains("\n# Bad"));
         assert!(result.contains("### 2026-10-10 agent-implement"));
+    }
+
+    #[test]
+    fn latest_agent_implement_review_picks_last_matching_comment() {
+        let body = "\
+# Task
+
+## Comments
+
+### 2026-10-10 agent-implement
+
+**Assumptions**
+1. x → y
+
+### 2026-10-10 agent-implement
+
+**Review** base `abc1234` · 1 must-fix · 0 optional
+
+**Must-fix**
+1. rename foo
+
+**Optional**
+none
+
+### 2026-10-10 human
+
+**Review** ignore me — wrong author
+
+### 2026-10-11 agent-implement
+
+**Review** base `abc1234` · 2 must-fix · 0 optional
+
+**Must-fix**
+1. newer finding
+";
+        let review = latest_agent_implement_review(body).unwrap();
+        assert!(review.starts_with("**Review** base `abc1234` · 2 must-fix"));
+        assert!(review.contains("newer finding"));
+        assert!(!review.contains("rename foo"));
+        assert!(latest_agent_implement_review("# no comments\n").is_none());
     }
 
     #[test]
