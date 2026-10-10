@@ -4145,3 +4145,196 @@ fn test_serve_registers_project_and_serves_prefixed_api() {
     let _ = child.wait();
     assert!(ready, "prefixed /api/p/<id>/summary did not become ready");
 }
+
+// ── Serve daemon (start/stop/status/logs) ────────────────────────────────
+
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn serve_cmd(xdg: &TempDir) -> Command {
+    let mut c = cmd();
+    c.env("XDG_CONFIG_HOME", xdg.path());
+    c
+}
+
+#[test]
+fn test_serve_start_status_stop() {
+    let xdg = TempDir::new().unwrap();
+    let port = free_port();
+    let port_s = port.to_string();
+
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("http://localhost:"));
+
+    serve_cmd(&xdg)
+        .args(["serve", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("running").or(predicate::str::contains("Running")))
+        .stdout(predicate::str::contains(&port_s))
+        .stdout(predicate::str::contains("http://localhost:"));
+
+    serve_cmd(&xdg)
+        .args(["serve", "stop"])
+        .assert()
+        .success();
+
+    serve_cmd(&xdg)
+        .args(["serve", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not running").or(predicate::str::contains("Not running")));
+}
+
+#[test]
+fn test_serve_start_when_already_running() {
+    let xdg = TempDir::new().unwrap();
+    let port = free_port();
+    let port_s = port.to_string();
+
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .success();
+
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Already running"));
+
+    serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
+}
+
+#[test]
+fn test_serve_start_ignores_stale_pid_file() {
+    let xdg = TempDir::new().unwrap();
+    let port = free_port();
+    let port_s = port.to_string();
+    let config = xdg.path().join("markplane");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("serve.pid"),
+        r#"{"pid":999999,"port":1,"url":"http://localhost:1","version":"0","startedAt":"2020-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Started"));
+
+    serve_cmd(&xdg)
+        .args(["serve", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Running"))
+        .stdout(predicate::str::contains(&port_s));
+
+    // SIGKILL leaves the pid file behind; lock is released.
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.join("serve.pid")).unwrap()).unwrap();
+    let pid = json["pid"].as_u64().unwrap();
+    std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill -9");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Stale file must not block a new start.
+    let port2 = free_port();
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port2.to_string()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Started"));
+
+    serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
+}
+
+#[test]
+fn test_serve_start_port_in_use() {
+    let xdg = TempDir::new().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let port_s = port.to_string();
+
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--port")
+                .or(predicate::str::contains("lsof"))
+                .or(predicate::str::contains("already in use"))
+                .or(predicate::str::contains("failed to start")),
+        );
+
+    drop(listener);
+}
+
+#[test]
+fn test_serve_foreground_reuses_running_server() {
+    let xdg = TempDir::new().unwrap();
+    let port = free_port();
+    let port_s = port.to_string();
+
+    // Background server (no project in cwd of daemon).
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .success();
+
+    let proj_a = setup_project();
+    let proj_b = setup_project();
+
+    // First foreground serve registers A and exits.
+    serve_cmd(&xdg)
+        .current_dir(proj_a.path())
+        .args(["serve", "--dev", "--port", &port_s])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Registered project"));
+
+    // Second project from another directory.
+    serve_cmd(&xdg)
+        .current_dir(proj_b.path())
+        .args(["serve", "--dev", "--port", &port_s])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Registered project"));
+
+    let registry = xdg.path().join("markplane/projects.json");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry).unwrap()).unwrap();
+    let projects = json["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 2, "both projects should be registered");
+
+    serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
+}
+
+#[test]
+fn test_serve_logs_shows_output() {
+    let xdg = TempDir::new().unwrap();
+    let port = free_port();
+    let port_s = port.to_string();
+
+    serve_cmd(&xdg)
+        .args(["serve", "start", "--dev", "--port", &port_s])
+        .assert()
+        .success();
+
+    serve_cmd(&xdg)
+        .args(["serve", "logs", "-n", "50"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Markplane web UI starting"));
+
+    serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
+}

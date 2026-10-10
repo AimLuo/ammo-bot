@@ -29,6 +29,7 @@ use markplane_core::{
     find_frontier_items, parse_id, split_markdown_sections,
 };
 
+use super::serve_daemon::{self, PidInfo, PidLock};
 use super::serve_registry::{self, RegistryEntry};
 
 #[cfg(feature = "embed-ui")]
@@ -211,32 +212,58 @@ const DOC_MANIFEST: &[DocEntry] = &[
     },
 ];
 
-pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
+pub async fn run(port: u16, open: bool, dev: bool, daemon_child: bool) -> anyhow::Result<()> {
     let config_dir = serve_registry::config_dir();
     fs_create_config_dir(&config_dir)?;
 
-    let open_path = match Project::from_current_dir() {
-        Ok(project) => {
-            let project_dir = project
-                .root()
-                .parent()
-                .unwrap_or(project.root())
-                .to_path_buf();
-            let entry = serve_registry::register(&config_dir, &project_dir)?;
-            println!(
-                "Registered project '{}' ({})",
-                entry.name,
-                project_dir.display()
-            );
-            format!("/p/{}/", entry.id)
+    let mut pid_lock = match PidLock::try_acquire(&config_dir)? {
+        Some(mut lock) => {
+            // Empty content while locked means "starting" (not leftover JSON).
+            lock.clear()?;
+            lock
         }
-        Err(_) => {
-            println!("No Project in current directory — opening landing page");
-            "/".to_string()
+        None => {
+            if daemon_child {
+                anyhow::bail!("another markplane serve instance is already running");
+            }
+            // Reuse the running server: register current Project and exit.
+            if let Some((_info, url)) = serve_daemon::reuse_running_server(&config_dir)? {
+                println!("Server already running — opened {url}");
+                // Spec: always open the browser when reusing a running server.
+                let _ = open::that(&url);
+                return Ok(());
+            }
+            anyhow::bail!("serve.pid is locked but no server info is available");
         }
     };
 
-    let state = AppState::new(config_dir, port, dev);
+    let open_path = if daemon_child {
+        // Daemon cwd is $HOME; do not register from there.
+        "/".to_string()
+    } else {
+        match Project::from_current_dir() {
+            Ok(project) => {
+                let project_dir = project
+                    .root()
+                    .parent()
+                    .unwrap_or(project.root())
+                    .to_path_buf();
+                let entry = serve_registry::register(&config_dir, &project_dir)?;
+                println!(
+                    "Registered project '{}' ({})",
+                    entry.name,
+                    project_dir.display()
+                );
+                format!("/p/{}/", entry.id)
+            }
+            Err(_) => {
+                println!("No Project in current directory — opening landing page");
+                "/".to_string()
+            }
+        }
+    };
+
+    let state = AppState::new(config_dir.clone(), port, dev);
     let app = build_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -254,19 +281,64 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
     }
     println!("Open {url}");
 
-    if open {
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("Port {port} is already in use");
+            eprintln!("Try --port <other> or: lsof -iTCP:{port} -sTCP:LISTEN");
+            return Err(e.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let info = PidInfo {
+        pid: std::process::id(),
+        port,
+        url: base.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        started_at: chrono::Utc::now(),
+    };
+    pid_lock.write_info(&info)?;
+
+    if open && !daemon_child {
         let _ = open::that(&url);
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     // Middleware sits outside the Router so URI rewrite runs before matching.
-    axum::serve(
+    let serve = axum::serve(
         listener,
         axum::ServiceExt::<Request>::into_make_service(app),
     )
-    .await?;
+    .with_graceful_shutdown(shutdown_signal());
 
+    let result = serve.await;
+    let _ = pid_lock.clear();
+    result?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 fn fs_create_config_dir(config_dir: &FsPath) -> anyhow::Result<()> {

@@ -21,6 +21,7 @@ mod plan;
 mod promote;
 mod resolve;
 mod serve;
+mod serve_daemon;
 mod serve_registry;
 mod show;
 mod stale;
@@ -394,15 +395,21 @@ pub enum Commands {
 
     /// Start the web UI server
     Serve {
+        #[command(subcommand)]
+        action: Option<ServeAction>,
+
         /// Port to listen on
-        #[arg(long, default_value = "4200")]
+        #[arg(long, default_value = "4200", global = true)]
         port: u16,
         /// Open browser automatically
-        #[arg(long)]
+        #[arg(long, global = true)]
         open: bool,
         /// Dev mode: API only, no static files
-        #[arg(long)]
+        #[arg(long, global = true)]
         dev: bool,
+        /// Internal: re-exec'd background child (hidden)
+        #[arg(long, hide = true, global = true)]
+        daemon_child: bool,
     },
 
     /// Run the MCP (Model Context Protocol) server over stdio
@@ -423,6 +430,25 @@ pub enum LsKind {
     Notes,
     /// List maps
     Maps,
+}
+
+#[derive(Subcommand)]
+pub enum ServeAction {
+    /// Run the server in the background
+    Start,
+    /// Stop the background server
+    Stop,
+    /// Show whether the server is running
+    Status,
+    /// Show background server logs
+    Logs {
+        /// Number of lines to show
+        #[arg(short = 'n', long, default_value = "100")]
+        lines: usize,
+        /// Follow the log file
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
 }
 
 pub fn execute(cmd: Commands) -> anyhow::Result<()> {
@@ -561,9 +587,23 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
         Commands::Graph { id, depth } => graph::run(id, depth),
         Commands::ClaudeMd => claude_md::run(),
         Commands::Dashboard => dashboard::run(),
-        Commands::Serve { port, open, dev } => {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(serve::run(port, open, dev))
+        Commands::Serve {
+            action,
+            port,
+            open,
+            dev,
+            daemon_child,
+        } => match action {
+            Some(ServeAction::Start) => serve_daemon::start(port, dev),
+            Some(ServeAction::Stop) => serve_daemon::stop(),
+            Some(ServeAction::Status) => serve_daemon::status(),
+            Some(ServeAction::Logs { lines, follow }) => serve_daemon::logs(lines, follow),
+            None => {
+                let rt = tokio::runtime::Runtime::new()?;
+                let result = rt.block_on(serve::run(port, open, dev, daemon_child));
+                rt.shutdown_timeout(std::time::Duration::from_secs(3));
+                result
+            }
         }
         Commands::Mcp { project } => mcp::run(project),
     }
