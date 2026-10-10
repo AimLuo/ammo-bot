@@ -209,6 +209,7 @@ impl AppState {
                 settings,
                 scan_on: true,
                 test_timeout_secs,
+                serve_url: self.serve_url(),
             });
         }
         {
@@ -7662,6 +7663,429 @@ mod tests {
         }
     }
 
+    // ── Merge safety: cross-serve lock, dirty workspace, recovery (TASK-ph3az) ─
+
+    fn git_dir_of(project_dir: &std::path::Path) -> PathBuf {
+        let out = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(project_dir)
+            .args(["rev-parse", "--path-format=absolute", "--git-dir"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        p.canonicalize().unwrap_or(p)
+    }
+
+    /// Hold `<git dir>/markplane/merge.lock` like another serve (for cross-serve tests).
+    struct HeldMergeLock {
+        _file: std::fs::File,
+    }
+
+    fn hold_merge_lock(project_dir: &std::path::Path) -> HeldMergeLock {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        let git_dir = git_dir_of(project_dir);
+        let dir = git_dir.join("markplane");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("merge.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        file.try_lock().expect("test should acquire merge.lock");
+        let _ = file.set_len(0);
+        let meta = serde_json::json!({
+            "pid": 1,
+            "hostname": "other-serve",
+            "serve_url": "http://localhost:9999",
+            "project_path": project_dir.display().to_string(),
+            "task_id": "TASK-other",
+            "acquired_at": "2026-01-01T00:00:00Z",
+        });
+        let mut f = fs::File::create(dir.join("merge.json")).unwrap();
+        writeln!(f, "{meta}").unwrap();
+        HeldMergeLock { _file: file }
+    }
+
+    async fn wait_run_status_or(
+        env: &EngineEnv,
+        task_id: &str,
+        want: &[&str],
+        secs: u64,
+    ) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            let record = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                task_id,
+            )
+            .unwrap();
+            if let Some(rec) = record
+                && let Some(run) = rec.runs.last()
+            {
+                let status = match run.status {
+                    markplane_core::RunStatus::Succeeded => "succeeded",
+                    markplane_core::RunStatus::Failed => "failed",
+                    markplane_core::RunStatus::Running => "running",
+                    markplane_core::RunStatus::MergeQueued => "merge-queued",
+                    markplane_core::RunStatus::Stopped => "stopped",
+                };
+                if want.contains(&status) {
+                    return status.to_string();
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("timeout waiting for run in {want:?} on {task_id}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_cross_serve_merge_lock_waits_at_queue_head() {
+        let env = setup_engine_env("xserve-lock", Some(false));
+        let task_id = add_ready_task(&env, "Wait for other serve", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+
+        // Simulate another serve holding the worktree merge lock.
+        let held = hold_merge_lock(&env.project_dir);
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+
+        let status = wait_run_status_or(&env, &task_id, &["merge-queued"], 30).await;
+        assert_eq!(status, "merge-queued");
+        let pos = env
+            .state
+            .engine
+            .lock()
+            .await
+            .merge_queue_position(&task_id)
+            .await;
+        assert_eq!(pos, Some(1), "stays at queue head while other serve holds lock");
+
+        // Still queued after a beat (not failed, not timed out).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let status = wait_run_status_or(&env, &task_id, &["merge-queued"], 5).await;
+        assert_eq!(status, "merge-queued");
+
+        drop(held);
+        wait_run_status(&env, &task_id, "succeeded", 30).await;
+
+        let git_dir = git_dir_of(&env.project_dir);
+        let merge_json = fs::read_to_string(git_dir.join("markplane/merge.json")).unwrap();
+        assert!(
+            merge_json.contains(&task_id) || merge_json.contains("localhost"),
+            "merge.json records holder for display: {merge_json}"
+        );
+        assert!(git_dir.join("markplane/merge.lock").exists());
+        assert_eq!(
+            fs::metadata(git_dir.join("markplane/merge.lock"))
+                .unwrap()
+                .len(),
+            0,
+            "merge.lock stays empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_two_projects_same_worktree_share_merge_queue() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let root = tmp.path().join("mono");
+        fs::create_dir_all(&root).unwrap();
+        init_git_repo(&root);
+        git_config_identity(&root);
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&root)
+            .args(["checkout", "-b", "main"])
+            .status();
+
+        Project::init(root.join(".markplane"), "mono-a", "shared worktree a").unwrap();
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        Project::init(nested.join(".markplane"), "mono-b", "shared worktree b").unwrap();
+        for dir in [&root, &nested] {
+            let mut cfg = Project::new(dir.join(".markplane")).load_config().unwrap();
+            cfg.dispatcher.push_after_merge = Some(false);
+            fs::write(
+                dir.join(".markplane/config.yaml"),
+                serde_yaml::to_string(&cfg).unwrap(),
+            )
+            .unwrap();
+        }
+        git_commit_all(&root, "init both projects");
+
+        let a_entry = serve_registry::register(&config_dir, &root).unwrap();
+        let b_entry = serve_registry::register(&config_dir, &nested).unwrap();
+        let agent_bin = tmp.path().join("fake-agent");
+        write_happy_fake_agent(&agent_bin, &markplane_debug_bin());
+        let state = AppState::with_options(
+            config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent_bin),
+        );
+        let app = build_app(state.clone());
+        super::super::serve_dispatcher::write_concurrency(&config_dir, 2).unwrap();
+
+        let env_a = EngineEnv {
+            _tmp: tmp,
+            config_dir,
+            project_dir: root.clone(),
+            project_id: a_entry.id.clone(),
+            state: state.clone(),
+            app: app.clone(),
+            remote: None,
+        };
+        // Register runtimes for both projects.
+        let _ = oneshot_json(
+            &env_a.app,
+            "GET",
+            &format!("/api/p/{}/tasks", a_entry.id),
+        )
+        .await;
+        let _ = oneshot_json(
+            &env_a.app,
+            "GET",
+            &format!("/api/p/{}/tasks", b_entry.id),
+        )
+        .await;
+
+        let task_a = {
+            let (status, json) = oneshot_json_body(
+                &env_a.app,
+                "POST",
+                &format!("/api/p/{}/tasks", a_entry.id),
+                Some(serde_json::json!({
+                    "title": "Mono A",
+                    "type": "feature",
+                    "priority": "critical",
+                    "effort": "small",
+                    "tags": ["ready-for-agent"]
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{json}");
+            let id = json["data"]["id"].as_str().unwrap().to_string();
+            let (status, _) = oneshot_json_body(
+                &env_a.app,
+                "PATCH",
+                &format!("/api/p/{}/tasks/{id}", a_entry.id),
+                Some(serde_json::json!({ "status": "planned" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            id
+        };
+        let task_b = {
+            let (status, json) = oneshot_json_body(
+                &env_a.app,
+                "POST",
+                &format!("/api/p/{}/tasks", b_entry.id),
+                Some(serde_json::json!({
+                    "title": "Mono B",
+                    "type": "feature",
+                    "priority": "high",
+                    "effort": "small",
+                    "tags": ["ready-for-agent"]
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{json}");
+            let id = json["data"]["id"].as_str().unwrap().to_string();
+            let (status, _) = oneshot_json_body(
+                &env_a.app,
+                "PATCH",
+                &format!("/api/p/{}/tasks/{id}", b_entry.id),
+                Some(serde_json::json!({ "status": "planned" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            id
+        };
+
+        for id in [&a_entry.id, &b_entry.id] {
+            let (status, json) = oneshot_json_body(
+                &env_a.app,
+                "PATCH",
+                &format!("/api/p/{id}/dispatcher/scan"),
+                Some(serde_json::json!({ "enabled": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+        }
+
+        // Hold merge.lock so both Runs pile into the same worktree queue.
+        let held = hold_merge_lock(&root);
+        let s = state.clone();
+        let t1 = tokio::spawn(async move { s.dispatcher_tick().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.dispatcher_tick().await;
+        t1.await.unwrap();
+
+        // Wait until both are merge-queued (same worktree queue).
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let pos_a = state.engine.lock().await.merge_queue_position(&task_a).await;
+            let pos_b = state.engine.lock().await.merge_queue_position(&task_b).await;
+            if pos_a.is_some() && pos_b.is_some() {
+                let positions = [pos_a.unwrap(), pos_b.unwrap()];
+                assert!(
+                    positions.contains(&1) && positions.contains(&2),
+                    "same worktree queue positions 1 and 2, got {positions:?}"
+                );
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("timeout waiting for both tasks in shared merge queue");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        drop(held);
+        for _ in 0..8 {
+            state.dispatcher_tick().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Wait via root project_dir for task_a; task_b's record is under nested/.markplane.
+        wait_run_status(&env_a, &task_a, "succeeded", 40).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        loop {
+            let record = markplane_core::read_run_record(nested.join(".markplane").as_path(), &task_b)
+                .unwrap();
+            if let Some(rec) = record
+                && let Some(run) = rec.runs.last()
+                && run.status == markplane_core::RunStatus::Succeeded
+            {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("timeout waiting for nested project run succeeded");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_dirty_workspace_blocks_merge_preserves_bytes() {
+        let env = setup_failure_env("dirty-merge", "dirty_blocked");
+        // Seed a tracked file the agent branch will also change.
+        fs::write(env.project_dir.join("conflict.txt"), "main-base\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["add", "conflict.txt"])
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["commit", "-m", "seed conflict.txt"])
+            .status();
+
+        let task_id = add_ready_task(&env, "Dirty block", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+
+        let held = hold_merge_lock(&env.project_dir);
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        let _ = wait_run_status_or(&env, &task_id, &["merge-queued"], 30).await;
+
+        let dirty = b"USER_UNIQUE_BYTES_ph3az_do_not_touch\n";
+        fs::write(env.project_dir.join("conflict.txt"), dirty).unwrap();
+        let before = fs::read(env.project_dir.join("conflict.txt")).unwrap();
+        assert_eq!(before, dirty);
+
+        drop(held);
+        assert_human_handoff(&env, &task_id, "merge").await;
+
+        let after = fs::read(env.project_dir.join("conflict.txt")).unwrap();
+        assert_eq!(after, before, "user dirty bytes must be preserved exactly");
+        // No incomplete merge left behind.
+        let mh = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+            .status()
+            .unwrap();
+        assert!(!mh.success(), "no MERGE_HEAD after dirty merge failure");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_recovers_incomplete_merge_on_merge_failed() {
+        let env = setup_failure_env("leave-mh", "merge_leave_merge_head");
+        let task_id = add_ready_task(&env, "Leave MERGE_HEAD", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "merge").await;
+
+        let mh = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+            .status()
+            .unwrap();
+        assert!(
+            !mh.success(),
+            "Dispatcher must abort incomplete merge left by fake agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_merge_timeout_starts_after_lock_acquire() {
+        let env = setup_engine_env("merge-to", Some(false));
+        // Short Stage timeout — must not fire while waiting on the merge lock.
+        env.state
+            .test_stage_timeout_secs
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+        let task_id = add_ready_task(&env, "Timeout after lock", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+
+        let held = hold_merge_lock(&env.project_dir);
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        let _ = wait_run_status_or(&env, &task_id, &["merge-queued"], 30).await;
+
+        // Hold longer than the Stage timeout while still only queued.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let status = wait_run_status_or(&env, &task_id, &["merge-queued"], 5).await;
+        assert_eq!(
+            status, "merge-queued",
+            "queue/lock wait must not consume merge Stage timeout"
+        );
+
+        drop(held);
+        wait_run_status(&env, &task_id, "succeeded", 30).await;
+    }
+
     #[tokio::test]
     async fn dispatcher_success_close_is_idempotent() {
         let env = setup_engine_env("idem", Some(false));
@@ -7820,6 +8244,40 @@ case "$SCENARIO" in
     elif [ "$AUTHOR" = "agent-merge" ]; then
       # Claim success without merging — target will not contain the branch.
       emit "sess-merge-$TASK" "$(printf 'lied\n\nMERGE: done\n')"
+    else
+      emit "sess-other-$TASK" "noop"
+    fi
+    exit 0
+    ;;
+  dirty_blocked)
+    if [ "$AUTHOR" = "agent-implement" ]; then
+      printf 'agent-side\n' > conflict.txt
+      git add conflict.txt
+      git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+      emit "sess-impl-$TASK" "$(printf 'done\n\nREVIEW: clean\n')"
+    elif [ "$AUTHOR" = "agent-merge" ]; then
+      BRANCH="agent/$TASK"
+      # Dirty main-tree edits must block the merge; never stash/reset/clean/add -A.
+      if git merge --no-ff --no-commit "$BRANCH"; then
+        git merge --abort || true
+      fi
+      emit "sess-merge-$TASK" "$(printf 'blocked by dirty tree\n\nMERGE: failed\n')"
+    else
+      emit "sess-other-$TASK" "noop"
+    fi
+    exit 0
+    ;;
+  merge_leave_merge_head)
+    if [ "$AUTHOR" = "agent-implement" ]; then
+      echo "x" > "feat-$TASK.txt"
+      git add "feat-$TASK.txt"
+      git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+      emit "sess-impl-$TASK" "$(printf 'done\n\nREVIEW: clean\n')"
+    elif [ "$AUTHOR" = "agent-merge" ]; then
+      BRANCH="agent/$TASK"
+      git merge --no-ff --no-commit "$BRANCH" || true
+      # Intentionally leave MERGE_HEAD; Dispatcher must abort on release.
+      emit "sess-merge-$TASK" "$(printf 'gave up mid-merge\n\nMERGE: failed\n')"
     else
       emit "sess-other-$TASK" "noop"
     fi

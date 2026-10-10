@@ -5,13 +5,14 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use std::fs::TryLockError;
 use markplane_core::{
     Attempt, AttemptResult, EffectiveDispatcherSettings, ImplementVerdict, MarkplaneDocument,
     Patch, Project, QueryFilter, Run, RunRecord, RunStatus, Stage, StatusCategory, StreamEvent,
@@ -148,6 +149,8 @@ pub struct ProjectTickInput {
     pub scan_on: bool,
     /// When set (tests), overrides every Stage timeout in seconds.
     pub test_timeout_secs: Option<u64>,
+    /// Serve URL written into `merge.json` (display only).
+    pub serve_url: String,
 }
 
 /// Explicit scan tick (tests call this; production uses a 15s interval).
@@ -540,13 +543,30 @@ async fn run_pipeline(
     // Queue positions for other waiters may have advanced.
     engine.lock().await.broadcast_dispatcher_changed();
 
-    // Cross-serve merge file lock (best-effort; hold while merging).
-    let _merge_lock = acquire_merge_file_lock(&git_dir)?;
+    // Cross-serve merge lock: stay at queue head and retry while another serve holds it.
+    // Queue wait and lock wait are not timed; merge Stage timeout starts after acquire.
+    let merge_lock = acquire_merge_file_lock(
+        &git_dir,
+        &MergeLockHolder {
+            pid: std::process::id(),
+            hostname: super::serve_dispatcher_lock::local_hostname(),
+            serve_url: proj.serve_url.clone(),
+            project_path: proj.project_dir.display().to_string(),
+            task_id: task_id.to_string(),
+            acquired_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .await?;
+    // On drop: abort this Run's incomplete merge (if any), then release the OS lock.
+    let _merge_guard = MergeCriticalGuard {
+        _lock: merge_lock,
+        project_dir: proj.project_dir.clone(),
+        branch: branch.clone(),
+    };
 
-    // Reread ticket after merge queue (silent stop).
+    // Reread ticket after merge queue + lock (silent stop).
     if !ticket_still_ours(&proj.project, task_id)? {
-        {
-            serve_dispatcher_handoff::silent_stop(
+        serve_dispatcher_handoff::silent_stop(
             &proj.project,
             &proj.ws_tx,
             task_id,
@@ -554,9 +574,8 @@ async fn run_pipeline(
             &mut run,
         )
         .await?;
-            engine.lock().await.broadcast_dispatcher_changed();
-            return Ok(());
-        }
+        engine.lock().await.broadcast_dispatcher_changed();
+        return Ok(());
     }
 
     // Refresh target branch (may have moved).
@@ -571,6 +590,7 @@ async fn run_pipeline(
     merge_ctx.target_branch = target_branch.clone();
     let merge_settings = proj.settings.stages.merge.clone();
     let merge_prompt = serve_dispatcher_prompts::render_merge_prompt(&merge_ctx);
+    // Stage timeout starts here — after lock acquire, not during queue/lock wait.
     let merge_result = run_agent(
         &engine,
         proj,
@@ -587,9 +607,7 @@ async fn run_pipeline(
     .await?;
 
     if !ticket_still_ours(&proj.project, task_id)? {
-        let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
-        {
-            serve_dispatcher_handoff::silent_stop(
+        serve_dispatcher_handoff::silent_stop(
             &proj.project,
             &proj.ws_tx,
             task_id,
@@ -597,17 +615,15 @@ async fn run_pipeline(
             &mut run,
         )
         .await?;
-            engine.lock().await.broadcast_dispatcher_changed();
-            return Ok(());
-        }
+        engine.lock().await.broadcast_dispatcher_changed();
+        return Ok(());
     }
 
     if let Some(reason) = stage_agent_failure_reason(Stage::Merge, &merge_result) {
-        let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
-        return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Merge, reason).await;
+        return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Merge, reason)
+            .await;
     }
     if !is_merge_done(merge_result.verdict.as_deref()) {
-        let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
         let line = merge_result.verdict.as_deref().unwrap_or("<none>");
         return fail_and_finish(
             &engine,
@@ -622,7 +638,6 @@ async fn run_pipeline(
     }
 
     if !branch_is_ancestor(&proj.project_dir, &branch)? {
-        let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
         return fail_and_finish(
             &engine,
             proj,
@@ -1251,42 +1266,119 @@ fn tail_chars(s: &str, max: usize) -> String {
     s[start..].to_string()
 }
 
+/// Holder metadata beside the empty `merge.lock` (display only).
+#[derive(Debug, Clone, serde::Serialize)]
+struct MergeLockHolder {
+    pid: u32,
+    hostname: String,
+    serve_url: String,
+    project_path: String,
+    task_id: String,
+    acquired_at: String,
+}
+
+/// OS advisory merge lock under `<git dir>/markplane/merge.lock`.
 struct MergeFileLock {
     _file: File,
 }
 
-fn acquire_merge_file_lock(git_dir: &Path) -> Result<MergeFileLock, String> {
+/// Holds the merge lock and aborts this Run's incomplete merge on drop.
+struct MergeCriticalGuard {
+    _lock: MergeFileLock,
+    project_dir: PathBuf,
+    branch: String,
+}
+
+impl Drop for MergeCriticalGuard {
+    fn drop(&mut self) {
+        abort_our_incomplete_merge(&self.project_dir, &self.branch);
+    }
+}
+
+/// Acquire the worktree merge lock (non-blocking try_lock, retry while contended).
+///
+/// The lock file stays empty and is never deleted. Holder info is written
+/// atomically to sibling `merge.json` for display only. Caller must already be
+/// at the head of the in-process Merge queue; this wait is not timed.
+async fn acquire_merge_file_lock(
+    git_dir: &Path,
+    holder: &MergeLockHolder,
+) -> Result<MergeFileLock, String> {
     let dir = git_dir.join("markplane");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("merge.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|e| format!("open merge.lock: {e}"))?;
-    // Retry a few times for contended happy-path tests.
-    for _ in 0..200 {
+    let meta_path = dir.join("merge.json");
+    loop {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("open merge.lock: {e}"))?;
         match file.try_lock() {
             Ok(()) => {
+                // Keep the lock file empty; never recycle/delete it.
                 let _ = file.set_len(0);
-                let meta = json!({
-                    "pid": std::process::id(),
-                    "acquired_at": Utc::now().to_rfc3339(),
-                });
-                let meta_path = dir.join("merge.json");
-                let _ = fs::write(meta_path, format!("{}\n", meta));
+                write_merge_holder_atomic(&meta_path, holder)
+                    .map_err(|e| format!("write merge.json: {e}"))?;
                 return Ok(MergeFileLock { _file: file });
             }
-            Err(std::fs::TryLockError::WouldBlock) => {
-                std::thread::sleep(Duration::from_millis(50));
+            Err(TryLockError::WouldBlock) => {
+                drop(file);
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(std::fs::TryLockError::Error(e)) => {
+            Err(TryLockError::Error(e)) => {
                 return Err(format!("merge lock: {e}"));
             }
         }
     }
-    Err("timed out waiting for merge.lock".into())
+}
+
+fn write_merge_holder_atomic(path: &Path, holder: &MergeLockHolder) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(".merge.json.tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        let json = serde_json::to_string_pretty(holder)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        f.write_all(json.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// If `MERGE_HEAD` matches this Run's agent branch tip, `git merge --abort`.
+/// Abort failure is logged only — never stash/reset/clean.
+fn abort_our_incomplete_merge(project_dir: &Path, branch: &str) {
+    let merge_head = Command::new("git")
+        .arg("-C")
+        .arg(project_dir)
+        .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .output()
+        .ok();
+    let Some(out) = merge_head else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let merge_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if merge_sha.is_empty() {
+        return;
+    }
+    let Ok(branch_tip) = git_stdout(project_dir, &["rev-parse", branch]) else {
+        return;
+    };
+    if merge_sha != branch_tip.trim() {
+        return;
+    }
+    if let Err(e) = git_run(project_dir, &["merge", "--abort"]) {
+        eprintln!(
+            "dispatcher: git merge --abort failed after merge of {branch}: {e}"
+        );
+    }
 }
 

@@ -218,16 +218,21 @@ pub fn render_merge_prompt(ctx: &PromptContext) -> String {
         "## Steps\n\n",
         "1. **Check the state.** Run `git status --porcelain` and remember the output, because you must restore exactly this if you give up. Also run `git rev-parse --abbrev-ref HEAD` and `git rev-parse {{branch}}`.\n",
         "   - `git merge-base --is-ancestor {{branch}} HEAD` succeeds: already merged. Stop here with `MERGE: done`.\n",
-        "   - `git rev-parse -q --verify MERGE_HEAD` prints the same SHA as `git rev-parse {{branch}}`: an earlier merge session for this ticket was interrupted halfway. Pick it up at step 3.\n",
+        "   - `git rev-parse -q --verify MERGE_HEAD` prints the same SHA as `git rev-parse {{branch}}`: an earlier merge session for this ticket was interrupted halfway. Pick it up at step 3 (`git diff --name-only --diff-filter=U` lists what is still conflicted).\n",
         "   - `MERGE_HEAD` is something else, or a rebase, cherry-pick, revert, or bisect is in progress: someone else is mid-operation. Don't touch it. Post `**Merge failed**` and end with `MERGE: failed`.\n",
         "2. **Start the merge without committing:** `git merge --no-ff --no-commit {{branch}}`.\n",
         "   - If git refuses because local changes would be overwritten, leave those changes alone. Post `**Merge failed**` listing the files and end with `MERGE: failed`.\n",
-        "3. **Resolve conflicts, if any.** For files under `.markplane/`, keep `HEAD`'s version. `git add` each resolved path.\n",
+        "3. **Resolve conflicts, if any.** Keep both sides' intent. Don't use `-X ours`/`-X theirs` or take one side of a whole file unless that is really right for that file. For files under `.markplane/`, keep `HEAD`'s version, because the main tree is the source of truth for tickets. `git add` each resolved path.\n",
         "4. **Verify.**\n",
-        "   - No conflicts: run the project's build or typecheck only.\n",
+        "   - No conflicts: run the project's build or typecheck only. The earlier stages already ran the full suite on this code.\n",
         "   - Conflicts resolved by hand: run the build and the full test suite.\n",
-        "5. **Commit:** `git commit -m \"Merge {{branch}}: {{title}}\" -m \"Refs: {{task_id}}\"`. Then confirm with `git merge-base --is-ancestor {{branch}} HEAD`.\n",
-        "6. **Give up** when needed: `git merge --abort`, restore state, post `**Merge failed**`, end with `MERGE: failed`.\n\n",
+        "   - If verification fails because of the merge and the fix belongs to the conflict resolution, fix it and verify again. Otherwise give up (step 6).\n",
+        "   - Afterwards, delete only untracked files that your commands created; compare against the step 1 output.\n",
+        "5. **Commit:** `git commit -m \"Merge {{branch}}: {{title}}\" -m \"Refs: {{task_id}}\"`. Then confirm with `git merge-base --is-ancestor {{branch}} HEAD`. If you resolved conflicts by hand, post one comment:\n\n",
+        "   ```text\n   **Merge notes** `<merge sha>`\n   - `<path>`: how you resolved it and why\n   Tests: <command> → pass\n   ```\n\n",
+        "6. **Give up** when a conflict needs a product decision that neither the ticket nor the code settles, when the verification failure isn't a merge problem, or when git refuses to merge. Run `git merge --abort`. Confirm that `git rev-parse -q --verify MERGE_HEAD` prints nothing and that `git status --porcelain` matches step 1. Then post:\n\n",
+        "   ```text\n   **Merge failed**\n   - Conflicted / blocking files: …\n   - What I tried: …\n   - What a human needs to decide: …\n   ```\n\n",
+        "   End with `MERGE: failed`.\n\n",
         CONTRACT_MERGE,
         "\n",
     ]);
@@ -298,5 +303,18 @@ mod tests {
         // Pushing is the Dispatcher's job — prompt must not instruct the agent to push.
         assert!(!p.contains("git push"));
         assert!(p.contains("Don't push") || p.contains("push to a remote"));
+    }
+
+    #[test]
+    fn merge_prompt_clean_vs_conflict_verify_and_notes() {
+        let p = render_merge_prompt(&ctx());
+        assert!(p.contains("build or typecheck only"));
+        assert!(p.contains("full test suite"));
+        assert!(p.contains("**Merge notes**"));
+        assert!(p.contains("git merge --abort"));
+        assert!(p.contains("git add -A"));
+        assert!(p.contains("git stash"));
+        assert!(p.contains(".markplane/"));
+        assert!(p.contains("keep `HEAD`'s version"));
     }
 }
