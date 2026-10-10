@@ -1059,7 +1059,7 @@ async fn run_agent(
             failure_reason: Some(format!("{} stage timeout", stage.as_str())),
             saw_init,
         };
-        maybe_auto_close_on_startup_fail(engine, proj, outcome.saw_init).await;
+        maybe_auto_close_on_startup_fail(proj, outcome.saw_init).await;
         return Ok(outcome);
     }
 
@@ -1115,15 +1115,11 @@ async fn run_agent(
         failure_reason,
         saw_init,
     };
-    maybe_auto_close_on_startup_fail(engine, proj, outcome.saw_init).await;
+    maybe_auto_close_on_startup_fail(proj, outcome.saw_init).await;
     Ok(outcome)
 }
 
-async fn maybe_auto_close_on_startup_fail(
-    engine: &Arc<Mutex<EngineState>>,
-    proj: &ProjectTickInput,
-    saw_init: bool,
-) {
+async fn maybe_auto_close_on_startup_fail(proj: &ProjectTickInput, saw_init: bool) {
     let reason = {
         let mut g = proj.scan_auto_close.lock().await;
         g.note_stage_ended(&proj.project_id, saw_init)
@@ -1135,10 +1131,8 @@ async fn maybe_auto_close_on_startup_fail(
         "dispatcher: auto-closing Scan for {}: {reason}",
         proj.project_id
     );
-    let _ = proj
-        .auto_close_tx
-        .send((proj.project_id.clone(), reason.clone()));
-    engine.lock().await.broadcast_dispatcher_changed();
+    // Serve listener flips Scan off then broadcasts; do not push early.
+    let _ = proj.auto_close_tx.send((proj.project_id.clone(), reason));
 }
 
 async fn success_close(

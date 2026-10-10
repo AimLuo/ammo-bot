@@ -372,7 +372,8 @@ export function BacklogContent() {
                 !scan.enabled && !scanError
                   ? scan.autoCloseReason
                   : null;
-              const reason = scanError ?? lockHint ?? autoClose;
+              // Prefer auto-close reason over lock hint when both exist.
+              const reason = scanError ?? autoClose ?? lockHint;
               return reason ? (
                 <span
                   className="text-xs text-destructive max-w-[16rem] truncate"
