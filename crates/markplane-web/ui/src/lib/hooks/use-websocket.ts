@@ -65,6 +65,9 @@ export function useWebSocket() {
             case "doc_changed":
               queryClient.invalidateQueries({ queryKey: ["docs"] });
               break;
+            case "dispatcher_changed":
+              queryClient.invalidateQueries({ queryKey: ["dispatcher"] });
+              break;
             case "connected":
               break;
           }

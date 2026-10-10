@@ -72,7 +72,13 @@ const GLOBAL_API_PREFIXES = [
   "/api/dispatcher/models",
 ];
 
+/** Exact global paths that must not use prefix matching (avoids eating `/api/dispatcher/settings`). */
+const GLOBAL_API_EXACT = ["/api/dispatcher"];
+
 export function apiPath(path: string): string {
+  if (GLOBAL_API_EXACT.includes(path)) {
+    return path;
+  }
   if (GLOBAL_API_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) {
     return path;
   }

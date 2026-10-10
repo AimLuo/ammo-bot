@@ -1,18 +1,27 @@
+import type { DispatcherLockHolder } from "@/lib/types";
+
 /** Structured API failure with optional Markplane error code / path. */
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | null;
   readonly path: string | null;
+  readonly holder: DispatcherLockHolder | null;
 
   constructor(
     message: string,
-    opts: { status: number; code?: string | null; path?: string | null },
+    opts: {
+      status: number;
+      code?: string | null;
+      path?: string | null;
+      holder?: DispatcherLockHolder | null;
+    },
   ) {
     super(message);
     this.name = "ApiError";
     this.status = opts.status;
     this.code = opts.code ?? null;
     this.path = opts.path ?? null;
+    this.holder = opts.holder ?? null;
   }
 
   get isProjectNotFound(): boolean {
@@ -26,6 +35,10 @@ export class ApiError extends Error {
   get isProjectNotInitialized(): boolean {
     return this.status === 409 && this.code === "project_not_initialized";
   }
+
+  get isDispatcherLocked(): boolean {
+    return this.status === 409 && this.code === "dispatcher_locked";
+  }
 }
 
 export async function throwIfNotOk(res: Response): Promise<void> {
@@ -36,5 +49,6 @@ export async function throwIfNotOk(res: Response): Promise<void> {
     status: res.status,
     code: detail?.code ?? null,
     path: detail?.path ?? null,
+    holder: detail?.holder ?? null,
   });
 }

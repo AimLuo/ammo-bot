@@ -24,6 +24,8 @@ mod resolve;
 mod serve;
 mod serve_daemon;
 mod serve_dispatcher;
+mod serve_dispatcher_lock;
+mod serve_git;
 mod serve_registry;
 mod show;
 mod stale;

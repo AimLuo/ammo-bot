@@ -47,6 +47,11 @@ import { buildStatusConfig, categoryOf } from "@/lib/constants";
 import { generateKeyBetween } from "fractional-indexing";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import {
+  scanSwitchErrorMessage,
+  useScanSwitch,
+  useSetScanSwitch,
+} from "@/lib/hooks/use-dispatcher";
 import type { Task, TaskStatus, Priority, Effort, StatusCategory } from "@/lib/types";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -116,6 +121,9 @@ export function BacklogContent() {
   const [filterAssignee, setFilterAssignee] = useState<string>("all");
   const [filterTag, setFilterTag] = useState<string>("all");
   const [showDecisionTickets, setShowDecisionTickets] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const scan = useScanSwitch();
+  const setScan = useSetScanSwitch();
   const [sortKey, setSortKey] = useState<SortKey>("manual");
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
@@ -277,19 +285,61 @@ export function BacklogContent() {
 
         <div className="flex-1" />
 
-        <div className="flex items-center gap-2">
-          <Switch
-            id="show-decision-tickets"
-            size="sm"
-            checked={showDecisionTickets}
-            onCheckedChange={setShowDecisionTickets}
-          />
-          <Label
-            htmlFor="show-decision-tickets"
-            className="text-xs text-muted-foreground cursor-pointer font-normal"
-          >
-            Decision tickets
-          </Label>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="scan-switch"
+              size="sm"
+              checked={scan.enabled}
+              disabled={setScan.isPending || scan.isLoading}
+              onCheckedChange={(enabled) => {
+                setScanError(null);
+                setScan.mutate(enabled, {
+                  onError: (err) => setScanError(scanSwitchErrorMessage(err)),
+                  onSuccess: () => setScanError(null),
+                });
+              }}
+            />
+            <Label
+              htmlFor="scan-switch"
+              className="text-xs text-muted-foreground cursor-pointer font-normal"
+              title={scanError ?? undefined}
+            >
+              Scan
+            </Label>
+            {(() => {
+              const lockHint =
+                !scan.enabled &&
+                !scanError &&
+                scan.lock?.status === "held_by_other" &&
+                scan.lock.holder
+                  ? `Dispatcher held by ${scan.lock.holder.hostname} pid ${scan.lock.holder.pid}`
+                  : null;
+              const reason = scanError ?? lockHint;
+              return reason ? (
+                <span
+                  className="text-xs text-destructive max-w-[16rem] truncate"
+                  title={reason}
+                >
+                  {reason}
+                </span>
+              ) : null;
+            })()}
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="show-decision-tickets"
+              size="sm"
+              checked={showDecisionTickets}
+              onCheckedChange={setShowDecisionTickets}
+            />
+            <Label
+              htmlFor="show-decision-tickets"
+              className="text-xs text-muted-foreground cursor-pointer font-normal"
+            >
+              Decision tickets
+            </Label>
+          </div>
         </div>
 
         <Button

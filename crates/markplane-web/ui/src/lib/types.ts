@@ -84,6 +84,36 @@ export interface AgentModel {
   label: string;
 }
 
+export interface DispatcherLockHolder {
+  pid: number;
+  hostname: string;
+  serve_url: string;
+  config_dir: string;
+  project_path: string;
+  acquired_at: string;
+}
+
+export interface DispatcherLockStatus {
+  status: "free" | "held_by_us" | "held_by_other" | "unavailable";
+  holder?: DispatcherLockHolder;
+}
+
+export interface DispatcherProjectStatus {
+  id: string;
+  name: string;
+  path: string;
+  scan_enabled: boolean;
+  lock: DispatcherLockStatus;
+}
+
+export interface DispatcherStatus {
+  projects: DispatcherProjectStatus[];
+}
+
+export interface ScanSwitch {
+  enabled: boolean;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -413,4 +443,5 @@ export type WsEvent =
   | { type: "config_changed" }
   | { type: "sync_complete" }
   | { type: "doc_changed"; slug: string }
-  | { type: "connected"; version: string };
+  | { type: "connected"; version: string }
+  | { type: "dispatcher_changed" };

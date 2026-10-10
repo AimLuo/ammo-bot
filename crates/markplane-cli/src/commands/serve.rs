@@ -36,6 +36,10 @@ use markplane_core::{
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
+use super::serve_dispatcher_lock::{
+    self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe,
+};
+use super::serve_git::{self, DispatcherLockKey};
 use super::serve_registry::{self, RegistryEntry};
 
 #[cfg(feature = "embed-ui")]
@@ -68,6 +72,21 @@ impl ProjectRuntime {
 #[derive(Clone)]
 struct ProjectWs(broadcast::Sender<String>);
 
+/// Registry Project id attached by the prefix middleware.
+#[derive(Clone)]
+struct ProjectId(String);
+
+/// In-memory Scan switch + Dispatcher locks for this serve process.
+#[derive(Default)]
+struct DispatcherServeState {
+    /// project_id → Scan switch (absent means off).
+    scan_enabled: HashMap<String, bool>,
+    /// Lock key → project_id holding it in this serve.
+    key_to_project: HashMap<DispatcherLockKey, String>,
+    /// project_id → held OS lock (while Scan is on for this ticket).
+    held_locks: HashMap<String, HeldDispatcherLock>,
+}
+
 struct AppState {
     config_dir: PathBuf,
     port: u16,
@@ -84,6 +103,7 @@ struct AppState {
     /// Last-good concurrency from serve.json (`None` until a valid read).
     concurrency_last_good: Mutex<Option<u32>>,
     models_cache: Mutex<super::serve_dispatcher::ModelsCache>,
+    dispatcher: Mutex<DispatcherServeState>,
 }
 
 enum RuntimeError {
@@ -125,7 +145,19 @@ impl AppState {
             dispatcher_last_good: Mutex::new(HashMap::new()),
             concurrency_last_good: Mutex::new(None),
             models_cache: Mutex::new(super::serve_dispatcher::ModelsCache::default()),
+            dispatcher: Mutex::new(DispatcherServeState::default()),
         })
+    }
+
+    fn serve_url(&self) -> String {
+        let scheme = if self.use_tls { "https" } else { "http" };
+        format!("{scheme}://localhost:{}", self.port)
+    }
+
+    fn agent_bin_path(&self) -> PathBuf {
+        self.agent_bin
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("agent"))
     }
 
     async fn get_or_create_runtime(
@@ -486,6 +518,11 @@ fn build_router(state: Arc<AppState>) -> Router {
             get(get_dispatcher_concurrency).patch(patch_dispatcher_concurrency),
         )
         .route("/api/dispatcher/models", get(get_dispatcher_models))
+        .route("/api/dispatcher", get(get_dispatcher_status))
+        .route(
+            "/api/dispatcher/scan",
+            get(get_scan_switch).patch(patch_scan_switch),
+        )
         .route("/api/sync", post(post_sync))
         .route("/api/docs", get(get_docs))
         .route("/api/docs/{slug}", get(get_doc))
@@ -640,6 +677,7 @@ async fn project_prefix_middleware(
             Ok(rt) => {
                 req.extensions_mut().insert(rt.project.clone());
                 req.extensions_mut().insert(ProjectWs(rt.ws_tx.clone()));
+                req.extensions_mut().insert(ProjectId(id.clone()));
                 set_uri_path(&mut req, &rewrite_path(kind, &rest));
                 next.run(req).await
             }
@@ -1323,6 +1361,9 @@ struct ErrorDetail {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    /// Boxed so `ApiError` stays small enough for clippy `result_large_err`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holder: Option<Box<LockHolder>>,
 }
 
 fn error_response(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
@@ -1333,6 +1374,7 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> (StatusCode,
                 code: code.to_string(),
                 message: message.to_string(),
                 path: None,
+                holder: None,
             },
         }),
     )
@@ -1351,6 +1393,24 @@ fn error_response_with_path(
                 code: code.to_string(),
                 message: message.to_string(),
                 path: Some(path.to_string()),
+                holder: None,
+            },
+        }),
+    )
+}
+
+fn error_response_dispatcher_locked(
+    message: &str,
+    holder: Option<LockHolder>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: ErrorDetail {
+                code: "dispatcher_locked".to_string(),
+                message: message.to_string(),
+                path: None,
+                holder: holder.map(Box::new),
             },
         }),
     )
@@ -2680,10 +2740,7 @@ async fn get_dispatcher_models(
         }
     }
 
-    let agent_bin = state
-        .agent_bin
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("agent"));
+    let agent_bin = state.agent_bin_path();
     let models = super::serve_dispatcher::fetch_agent_models(&agent_bin);
     {
         let mut cache = state.models_cache.lock().await;
@@ -2691,6 +2748,242 @@ async fn get_dispatcher_models(
     }
     Ok(Json(ApiResponse {
         data: DispatcherModelsResponse { models },
+    }))
+}
+
+#[derive(Serialize)]
+struct ScanSwitchResponse {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct UpdateScanSwitchRequest {
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct LockStatusResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holder: Option<LockHolder>,
+}
+
+#[derive(Serialize)]
+struct DispatcherProjectStatus {
+    id: String,
+    name: String,
+    path: String,
+    scan_enabled: bool,
+    lock: LockStatusResponse,
+}
+
+#[derive(Serialize)]
+struct DispatcherStatusResponse {
+    projects: Vec<DispatcherProjectStatus>,
+}
+
+async fn broadcast_dispatcher_changed(state: &AppState) {
+    let msg = r#"{"type":"dispatcher_changed"}"#.to_string();
+    let guard = state.runtimes.lock().await;
+    for rt in guard.values() {
+        let _ = rt.ws_tx.send(msg.clone());
+    }
+}
+
+fn project_dir_from_project(project: &Project) -> PathBuf {
+    project
+        .root()
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.root().to_path_buf())
+}
+
+fn lock_status_response(probe: LockProbe) -> LockStatusResponse {
+    match probe {
+        LockProbe::Free => LockStatusResponse {
+            status: "free".into(),
+            holder: None,
+        },
+        LockProbe::HeldByUs => LockStatusResponse {
+            status: "held_by_us".into(),
+            holder: None,
+        },
+        LockProbe::HeldByOther(holder) => LockStatusResponse {
+            status: "held_by_other".into(),
+            holder: Some(holder),
+        },
+    }
+}
+
+async fn get_scan_switch(
+    State(state): State<Arc<AppState>>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+) -> Result<Json<ApiResponse<ScanSwitchResponse>>, (StatusCode, Json<ApiError>)> {
+    let guard = state.dispatcher.lock().await;
+    let enabled = guard.scan_enabled.get(&project_id).copied().unwrap_or(false);
+    Ok(Json(ApiResponse {
+        data: ScanSwitchResponse { enabled },
+    }))
+}
+
+async fn patch_scan_switch(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+    Json(body): Json<UpdateScanSwitchRequest>,
+) -> Result<Json<ApiResponse<ScanSwitchResponse>>, (StatusCode, Json<ApiError>)> {
+    if body.enabled {
+        open_scan_switch(&state, &project, &project_id).await?;
+    } else {
+        close_scan_switch(&state, &project_id).await;
+    }
+    broadcast_dispatcher_changed(&state).await;
+    Ok(Json(ApiResponse {
+        data: ScanSwitchResponse {
+            enabled: body.enabled,
+        },
+    }))
+}
+
+async fn open_scan_switch(
+    state: &AppState,
+    project: &Project,
+    project_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let project_dir = project_dir_from_project(project);
+    let key = serve_git::resolve_lock_key(&project_dir).map_err(|e| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "scan_precondition_failed",
+            &e.to_string(),
+        )
+    })?;
+
+    let agent_bin = state.agent_bin_path();
+    if !serve_dispatcher_lock::agent_available(&agent_bin) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "scan_precondition_failed",
+            &format!(
+                "`{}` is not available on PATH (or is not an executable)",
+                agent_bin.display()
+            ),
+        ));
+    }
+
+    let holder = LockHolder {
+        pid: std::process::id(),
+        hostname: serve_dispatcher_lock::local_hostname(),
+        serve_url: state.serve_url(),
+        config_dir: state.config_dir.display().to_string(),
+        project_path: project_dir.display().to_string(),
+        acquired_at: chrono::Utc::now(),
+    };
+    let local_hostname = holder.hostname.clone();
+
+    // Hold the serve mutex across the same-serve key check and OS try_lock so
+    // two Projects sharing a key get a clear conflict naming the other Project.
+    let mut guard = state.dispatcher.lock().await;
+    if guard.scan_enabled.get(project_id).copied().unwrap_or(false) {
+        return Ok(());
+    }
+    if let Some(other_id) = guard.key_to_project.get(&key)
+        && other_id != project_id
+    {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "dispatcher_lock_conflict",
+            &format!(
+                "Dispatcher lock key is already held by Project '{other_id}' in this serve"
+            ),
+        ));
+    }
+
+    let held = match serve_dispatcher_lock::try_acquire(&key, holder) {
+        Ok(h) => h,
+        Err(AcquireError::Contended { holder }) => {
+            let message = holder
+                .as_ref()
+                .map(|h| serve_dispatcher_lock::locked_message(h, &local_hostname))
+                .unwrap_or_else(|| {
+                    "This repository's Dispatcher lock is held by another process.".into()
+                });
+            return Err(error_response_dispatcher_locked(&message, holder));
+        }
+        Err(AcquireError::Io(msg)) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                &msg,
+            ));
+        }
+    };
+
+    guard.key_to_project.insert(key, project_id.to_string());
+    guard.held_locks.insert(project_id.to_string(), held);
+    guard.scan_enabled.insert(project_id.to_string(), true);
+    Ok(())
+}
+
+async fn close_scan_switch(state: &AppState, project_id: &str) {
+    let mut guard = state.dispatcher.lock().await;
+    guard.scan_enabled.insert(project_id.to_string(), false);
+    if let Some(held) = guard.held_locks.remove(project_id) {
+        guard.key_to_project.remove(&held.key);
+        drop(held);
+    }
+}
+
+async fn get_dispatcher_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DispatcherStatusResponse>>, (StatusCode, Json<ApiError>)> {
+    let entries = serve_registry::list(&state.config_dir).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+
+    let disp = state.dispatcher.lock().await;
+    let mut projects = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let scan_enabled = disp.scan_enabled.get(&entry.id).copied().unwrap_or(false);
+        let project_dir = PathBuf::from(&entry.path);
+        let lock = match serve_git::resolve_lock_key(&project_dir) {
+            Ok(key) => {
+                let held_by_us = disp
+                    .key_to_project
+                    .get(&key)
+                    .map(|id| id == &entry.id)
+                    .unwrap_or(false);
+                match serve_dispatcher_lock::probe(&key, held_by_us) {
+                    Ok(probe) => lock_status_response(probe),
+                    Err(msg) => {
+                        return Err(error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "internal_error",
+                            &msg,
+                        ));
+                    }
+                }
+            }
+            Err(_) => LockStatusResponse {
+                status: "unavailable".into(),
+                holder: None,
+            },
+        };
+        projects.push(DispatcherProjectStatus {
+            id: entry.id,
+            name: entry.name,
+            path: entry.path,
+            scan_enabled,
+            lock,
+        });
+    }
+
+    Ok(Json(ApiResponse {
+        data: DispatcherStatusResponse { projects },
     }))
 }
 
@@ -5322,5 +5615,324 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["slug"], "fake-model-1");
         assert_eq!(models[0]["label"], "Fake Model One");
+    }
+
+    fn init_git_repo(dir: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn write_fake_agent(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(path, "exit 0\n").unwrap();
+        }
+    }
+
+    struct GitTestEnv {
+        _tmp: TempDir,
+        config_dir: PathBuf,
+        project_dir: PathBuf,
+        project_id: String,
+        agent_bin: PathBuf,
+        state: Arc<AppState>,
+        app: tower::util::BoxCloneService<Request, Response, Infallible>,
+    }
+
+    fn setup_git_env(name: &str) -> GitTestEnv {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let project_dir = tmp.path().join(name);
+        fs::create_dir_all(&project_dir).unwrap();
+        init_git_repo(&project_dir);
+        Project::init(
+            project_dir.join(".markplane"),
+            name,
+            "dispatcher scan tests",
+        )
+        .unwrap();
+        let entry = serve_registry::register(&config_dir, &project_dir).unwrap();
+        let agent_bin = tmp.path().join("fake-agent");
+        write_fake_agent(&agent_bin);
+        let state = AppState::with_options(
+            config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent_bin.clone()),
+        );
+        let app = build_app(state.clone());
+        GitTestEnv {
+            _tmp: tmp,
+            config_dir,
+            project_dir,
+            project_id: entry.id,
+            agent_bin,
+            state,
+            app,
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_switch_fails_when_not_a_git_repo() {
+        let env = setup_env("no-git");
+        let agent_bin = env._tmp.path().join("fake-agent");
+        write_fake_agent(&agent_bin);
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent_bin),
+        );
+        let app = build_app(state);
+        let (status, json) = oneshot_json_body(
+            &app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "scan_precondition_failed");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("git repository"),
+            "{}",
+            json["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_switch_fails_when_agent_missing() {
+        let env = setup_git_env("no-agent");
+        let missing = env._tmp.path().join("missing-agent-bin");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(missing),
+        );
+        let app = build_app(state);
+        let (status, json) = oneshot_json_body(
+            &app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "scan_precondition_failed");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not available"),
+            "{}",
+            json["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_switch_second_serve_gets_dispatcher_locked_then_can_open_after_close() {
+        let env = setup_git_env("lock-a");
+        // Second serve: separate config dir + app, same project path.
+        let config_b = env._tmp.path().join("config-b");
+        fs::create_dir_all(&config_b).unwrap();
+        let entry_b = serve_registry::register(&config_b, &env.project_dir).unwrap();
+        let state_b = AppState::with_options(
+            config_b,
+            4201,
+            true,
+            false,
+            None,
+            Some(env.agent_bin.clone()),
+        );
+        let app_b = build_app(state_b);
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["enabled"], true);
+
+        let (status, json) = oneshot_json_body(
+            &app_b,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", entry_b.id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["error"]["code"], "dispatcher_locked");
+        assert!(json["error"]["holder"].is_object());
+        assert_eq!(json["error"]["holder"]["pid"], std::process::id());
+
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json) = oneshot_json_body(
+            &app_b,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", entry_b.id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn scan_switch_same_serve_worktree_conflict_names_other_project() {
+        let env = setup_git_env("wt-main");
+        // Commit so git worktree add works.
+        fs::write(env.project_dir.join("README"), "x").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "README"])
+            .current_dir(&env.project_dir)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "i"])
+            .current_dir(&env.project_dir)
+            .status();
+
+        let wt = env._tmp.path().join("wt-side");
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", wt.to_str().unwrap(), "-b", "side"])
+            .current_dir(&env.project_dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        Project::init(wt.join(".markplane"), "wt-side", "").unwrap();
+        let entry_wt = serve_registry::register(&env.config_dir, &wt).unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+
+        let (status, conflict) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", entry_wt.id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        assert_eq!(conflict["error"]["code"], "dispatcher_lock_conflict");
+        assert!(
+            conflict["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&env.project_id),
+            "{}",
+            conflict["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_switch_off_after_new_serve_state() {
+        let env = setup_git_env("restart-off");
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Fresh AppState = serve restart; Scan must start off.
+        let state2 = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(env.agent_bin.clone()),
+        );
+        let app2 = build_app(state2);
+        let (status, json) = oneshot_json(
+            &app2,
+            "GET",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn get_dispatcher_returns_scan_and_lock_and_ws_on_toggle() {
+        let env = setup_git_env("disp-status");
+        // Establish runtime so WS channel exists.
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+        )
+        .await;
+        let mut rx = {
+            let guard = env.state.runtimes.lock().await;
+            guard.get(&env.project_id).unwrap().ws_tx.subscribe()
+        };
+
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+        assert_eq!(status, StatusCode::OK);
+        let projects = json["data"]["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0]["id"], env.project_id);
+        assert_eq!(projects[0]["scan_enabled"], false);
+        assert_eq!(projects[0]["lock"]["status"], "free");
+
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let msg = rx.try_recv().expect("dispatcher_changed");
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(parsed["type"], "dispatcher_changed");
+
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+        assert_eq!(status, StatusCode::OK);
+        let p = &json["data"]["projects"][0];
+        assert_eq!(p["scan_enabled"], true);
+        assert_eq!(p["lock"]["status"], "held_by_us");
     }
 }
