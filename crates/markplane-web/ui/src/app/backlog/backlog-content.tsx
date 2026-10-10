@@ -368,7 +368,11 @@ export function BacklogContent() {
                 scan.lock.holder
                   ? `Dispatcher held by ${scan.lock.holder.hostname} pid ${scan.lock.holder.pid}`
                   : null;
-              const reason = scanError ?? lockHint;
+              const autoClose =
+                !scan.enabled && !scanError
+                  ? scan.autoCloseReason
+                  : null;
+              const reason = scanError ?? lockHint ?? autoClose;
               return reason ? (
                 <span
                   className="text-xs text-destructive max-w-[16rem] truncate"

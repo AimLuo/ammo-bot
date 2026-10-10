@@ -15,6 +15,15 @@ Scan switches live in Settings' sibling board UI (memory only; every serve start
 
 Unset fields are omitted on write-back so future default changes apply. Edit via **Settings → Dispatcher**, or hand-edit the files; changes hot-reload without restarting serve.
 
+## Auto-close Scan
+
+Serve turns Scan off by itself when pickup would be unsafe or wasteful:
+
+- **Startup fail**: same Project hits 3 consecutive Stage ends with no `system/init` (threshold hardcoded). One successful init clears the streak.
+- **Lock lost**: each scan checks that the Dispatcher lock file is still the same inode; delete/replace closes Scan and stops pickup.
+
+Both cases store a reason in memory, log to `serve.log`, and push `dispatcher_changed`. `GET /api/dispatcher` exposes `auto_close_reason` beside the switch; manually turning Scan back on clears it.
+
 ## Security
 
 Agents run **as the same OS user as `markplane serve`**, with **no sandbox**:

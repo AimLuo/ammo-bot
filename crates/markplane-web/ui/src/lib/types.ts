@@ -112,6 +112,8 @@ export interface DispatcherProjectStatus {
   name: string;
   path: string;
   scan_enabled: boolean;
+  /** Present when Scan was auto-closed; cleared on manual reopen. */
+  auto_close_reason?: string | null;
   lock: DispatcherLockStatus;
   active_runs: DispatcherActiveRun[];
 }

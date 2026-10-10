@@ -37,7 +37,7 @@ use markplane_core::{
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
-use super::serve_dispatcher_engine::{self, EngineState};
+use super::serve_dispatcher_engine::{self, EngineState, ScanAutoCloseState};
 use super::serve_dispatcher_lock::{
     self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe,
 };
@@ -106,6 +106,10 @@ struct AppState {
     concurrency_last_good: Mutex<Option<u32>>,
     models_cache: Mutex<super::serve_dispatcher::ModelsCache>,
     dispatcher: Mutex<DispatcherServeState>,
+    /// Startup-fail streak + auto-close reasons (shared with the engine).
+    scan_auto_close: Arc<Mutex<ScanAutoCloseState>>,
+    /// Engine → serve: apply Scan auto-close (flip switch, release lock, broadcast).
+    auto_close_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     /// Pickup / Slot / merge-queue state for the Dispatcher engine.
     engine: Arc<Mutex<EngineState>>,
     /// Test-only Stage timeout override in seconds (`0` = use config).
@@ -140,7 +144,8 @@ impl AppState {
         home_override: Option<PathBuf>,
         agent_bin: Option<PathBuf>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let (auto_close_tx, auto_close_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(Self {
             config_dir,
             port,
             dev,
@@ -152,9 +157,30 @@ impl AppState {
             concurrency_last_good: Mutex::new(None),
             models_cache: Mutex::new(super::serve_dispatcher::ModelsCache::default()),
             dispatcher: Mutex::new(DispatcherServeState::default()),
+            scan_auto_close: Arc::new(Mutex::new(ScanAutoCloseState::default())),
+            auto_close_tx,
             engine: Arc::new(Mutex::new(EngineState::default())),
             test_stage_timeout_secs: std::sync::atomic::AtomicU64::new(0),
-        })
+        });
+        let listener = state.clone();
+        tokio::spawn(async move {
+            let mut rx = auto_close_rx;
+            while let Some((project_id, reason)) = rx.recv().await {
+                listener.apply_auto_close(&project_id, &reason).await;
+            }
+        });
+        state
+    }
+
+    /// Flip Scan off after startup-fail / lock-lost; reason already stored in
+    /// [`ScanAutoCloseState`].
+    async fn apply_auto_close(self: &Arc<Self>, project_id: &str, _reason: &str) {
+        close_scan_switch(self, project_id).await;
+        {
+            let mut auto = self.scan_auto_close.lock().await;
+            auto.clear_immediate_off(project_id);
+        }
+        broadcast_dispatcher_changed(self).await;
     }
 
     fn serve_url(&self) -> String {
@@ -172,13 +198,44 @@ impl AppState {
     async fn dispatcher_tick(self: &Arc<Self>) {
         let concurrency = load_concurrency(self).await;
         let agent_bin = self.agent_bin_path();
+
+        // Verify lock-file identity for every Scan-on Project before pickup.
+        let lock_lost_ids: Vec<String> = {
+            let guard = self.dispatcher.lock().await;
+            guard
+                .held_locks
+                .iter()
+                .filter(|(id, held)| {
+                    guard.scan_enabled.get(*id).copied().unwrap_or(false)
+                        && !held.still_same_file()
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in lock_lost_ids {
+            let reason = {
+                let mut auto = self.scan_auto_close.lock().await;
+                auto.note_lock_lost(&id)
+            };
+            eprintln!("dispatcher: auto-closing Scan for {id}: {reason}");
+            self.apply_auto_close(&id, &reason).await;
+        }
+
         let scan_enabled = {
             let guard = self.dispatcher.lock().await;
             guard.scan_enabled.clone()
         };
+        let immediate_off = {
+            let auto = self.scan_auto_close.lock().await;
+            scan_enabled
+                .keys()
+                .filter(|id| auto.is_immediate_off(id))
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
         let project_ids: Vec<String> = scan_enabled
             .iter()
-            .filter(|(_, on)| **on)
+            .filter(|(id, on)| **on && !immediate_off.contains(*id))
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -210,6 +267,8 @@ impl AppState {
                 scan_on: true,
                 test_timeout_secs,
                 serve_url: self.serve_url(),
+                scan_auto_close: self.scan_auto_close.clone(),
+                auto_close_tx: self.auto_close_tx.clone(),
             });
         }
         {
@@ -2920,6 +2979,8 @@ struct DispatcherProjectStatus {
     name: String,
     path: String,
     scan_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_close_reason: Option<String>,
     lock: LockStatusResponse,
     active_runs: Vec<DispatcherActiveRun>,
 }
@@ -2992,6 +3053,10 @@ async fn patch_scan_switch(
 ) -> Result<Json<ApiResponse<ScanSwitchResponse>>, (StatusCode, Json<ApiError>)> {
     if body.enabled {
         open_scan_switch(&state, &project, &project_id).await?;
+        {
+            let mut auto = state.scan_auto_close.lock().await;
+            auto.clear_on_manual_open(&project_id);
+        }
     } else {
         close_scan_switch(&state, &project_id).await;
     }
@@ -3204,9 +3269,11 @@ async fn get_dispatcher_status(
     }
 
     let disp = state.dispatcher.lock().await;
+    let auto = state.scan_auto_close.lock().await;
     let mut projects = Vec::with_capacity(entries.len());
     for entry in entries {
         let scan_enabled = disp.scan_enabled.get(&entry.id).copied().unwrap_or(false);
+        let auto_close_reason = auto.reason(&entry.id).map(str::to_string);
         let project_dir = PathBuf::from(&entry.path);
         let lock = match serve_git::resolve_lock_key(&project_dir) {
             Ok(key) => {
@@ -3238,6 +3305,7 @@ async fn get_dispatcher_status(
             name: entry.name,
             path: entry.path,
             scan_enabled,
+            auto_close_reason,
             lock,
             active_runs,
         });
@@ -8294,6 +8362,22 @@ case "$SCENARIO" in
     wait "$CHILD" || true
     exit 0
     ;;
+  no_init)
+    # Exit before any system/init (startup-fail streak).
+    exit 1
+    ;;
+  no_init_reset)
+    # 1–2: no init; 3: init then fail (clears streak); 4+: no init again.
+    COUNT_FILE="${{MARKPLANE_ROOT:-.}}/.no-init-count"
+    n=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+    n=$((n+1))
+    echo "$n" > "$COUNT_FILE"
+    if [ "$n" -eq 3 ]; then
+      emit "sess-reset-$TASK" "$(printf 'boom\\n')"
+      exit 1
+    fi
+    exit 1
+    ;;
   slow_then_clean)
     if [ "$AUTHOR" = "agent-implement" ]; then
       sleep 2
@@ -9098,5 +9182,131 @@ esac
 
             t1.await.unwrap();
         }
+    }
+
+    // ── Scan auto-close (TASK-rhzty) ─────────────────────────────────────────
+
+    async fn wait_scan_auto_closed(env: &EngineEnv, secs: u64) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            let projects = json["data"]["projects"].as_array().unwrap();
+            let mine = projects
+                .iter()
+                .find(|p| p["id"] == env.project_id)
+                .expect("project in dispatcher status");
+            if mine["scan_enabled"] == false
+                && let Some(reason) = mine["auto_close_reason"].as_str()
+            {
+                return reason.to_string();
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("timed out waiting for Scan auto-close: {mine}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_auto_closes_after_three_stages_without_init() {
+        let env = setup_failure_env("auto-close-no-init", "no_init");
+        let t1 = add_ready_task(&env, "No init 1", "high").await;
+        let t2 = add_ready_task(&env, "No init 2", "high").await;
+        let t3 = add_ready_task(&env, "No init 3", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &t1, "failed", 40).await;
+        wait_run_status(&env, &t2, "failed", 40).await;
+        wait_run_status(&env, &t3, "failed", 40).await;
+        let reason = wait_scan_auto_closed(&env, 10).await;
+        assert!(
+            reason.contains("system/init"),
+            "reason should mention system/init: {reason}"
+        );
+
+        // Manual reopen clears the reason.
+        enable_scan(&env).await;
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+        assert_eq!(status, StatusCode::OK);
+        let mine = json["data"]["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == env.project_id)
+            .unwrap();
+        assert_eq!(mine["scan_enabled"], true);
+        assert!(
+            mine.get("auto_close_reason").is_none()
+                || mine["auto_close_reason"].is_null(),
+            "reason cleared on reopen: {mine}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_startup_fail_streak_resets_on_init() {
+        let env = setup_failure_env("auto-close-reset", "no_init_reset");
+        // Five Stage calls: no-init, no-init, init+fail, no-init, no-init → still open.
+        for i in 1..=5 {
+            let id = add_ready_task(&env, &format!("Reset {i}"), "high").await;
+            let _ = oneshot_json(
+                &env.app,
+                "GET",
+                &format!("/api/p/{}/tasks", env.project_id),
+            )
+            .await;
+            if i == 1 {
+                enable_scan(&env).await;
+            }
+            env.state.dispatcher_tick().await;
+            wait_run_status(&env, &id, "failed", 40).await;
+        }
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+        assert_eq!(status, StatusCode::OK);
+        let mine = json["data"]["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == env.project_id)
+            .unwrap();
+        assert_eq!(
+            mine["scan_enabled"], true,
+            "init mid-streak must reset counter; status={mine}"
+        );
+
+        // Sixth no-init reaches threshold after reset → close.
+        let t6 = add_ready_task(&env, "Reset 6", "high").await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &t6, "failed", 40).await;
+        let reason = wait_scan_auto_closed(&env, 10).await;
+        assert!(reason.contains("system/init"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn scan_auto_closes_when_lock_file_replaced() {
+        let env = setup_engine_env("auto-close-lock", Some(false));
+        enable_scan(&env).await;
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["projects"][0]["scan_enabled"], true);
+
+        let key = serve_git::resolve_lock_key(&env.project_dir).unwrap();
+        let (lock_path, _) = serve_git::lock_paths(&key);
+        assert!(lock_path.is_file());
+        fs::remove_file(&lock_path).unwrap();
+        fs::write(&lock_path, "").unwrap();
+
+        env.state.dispatcher_tick().await;
+        let reason = wait_scan_auto_closed(&env, 5).await;
+        assert!(
+            reason.to_lowercase().contains("lock"),
+            "reason should mention lock: {reason}"
+        );
     }
 }

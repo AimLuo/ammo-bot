@@ -48,6 +48,30 @@ impl std::fmt::Debug for HeldDispatcherLock {
     }
 }
 
+impl HeldDispatcherLock {
+    /// Whether the path on disk is still the same file this hold opened.
+    ///
+    /// Delete or replace (unlink + recreate) makes this return `false` even
+    /// though the OS advisory lock on the original inode may still be held.
+    pub fn still_same_file(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let Ok(held) = self.file.metadata() else {
+                return false;
+            };
+            let Ok(on_disk) = fs::metadata(&self.lock_path) else {
+                return false;
+            };
+            held.dev() == on_disk.dev() && held.ino() == on_disk.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            self.lock_path.exists()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AcquireError {
     /// Another process holds the OS lock.
@@ -370,6 +394,23 @@ mod tests {
             assert!(flags >= 0);
             assert_ne!(flags & libc::FD_CLOEXEC, 0);
         }
+    }
+
+    #[test]
+    fn still_same_file_false_after_delete_or_replace() {
+        let tmp = TempDir::new().unwrap();
+        let key = sample_key(&tmp);
+        let held = try_acquire(&key, sample_holder("/p")).unwrap();
+        assert!(held.still_same_file());
+
+        let (lock_path, _) = serve_git::lock_paths(&key);
+        fs::remove_file(&lock_path).unwrap();
+        assert!(!held.still_same_file(), "deleted lock path is a mismatch");
+
+        // Recreate at the same path → new inode, still a mismatch.
+        fs::write(&lock_path, "").unwrap();
+        assert!(!held.still_same_file(), "replaced lock file is a mismatch");
+        drop(held);
     }
 
     #[test]

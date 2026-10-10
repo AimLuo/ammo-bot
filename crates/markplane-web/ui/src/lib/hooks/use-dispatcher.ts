@@ -21,6 +21,7 @@ export function useScanSwitch() {
     ...dispatcher,
     enabled: project?.scan_enabled ?? false,
     lock: project?.lock,
+    autoCloseReason: project?.auto_close_reason ?? null,
   };
 }
 

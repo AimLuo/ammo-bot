@@ -30,8 +30,111 @@ use super::serve_dispatcher_prompts::{self, PromptContext};
 /// Scan interval when Scan switch is on.
 pub const SCAN_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Consecutive Stage ends without `system/init` before Scan auto-closes.
+pub const STARTUP_FAIL_THRESHOLD: u32 = 3;
+
 /// How long to wait after SIGTERM before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(10);
+
+/// Per-serve bookkeeping for Scan auto-close (startup fail + lock lost).
+#[derive(Debug, Default)]
+pub struct ScanAutoCloseState {
+    /// project_id → consecutive Stage ends that never saw `system/init`.
+    startup_fail_streak: HashMap<String, u32>,
+    /// project_id → human-readable reason (cleared on manual reopen).
+    auto_close_reason: HashMap<String, String>,
+    /// project_ids flipped off immediately; drained when serve applies close.
+    immediate_off: HashSet<String>,
+}
+
+impl ScanAutoCloseState {
+    pub fn reason(&self, project_id: &str) -> Option<&str> {
+        self.auto_close_reason.get(project_id).map(String::as_str)
+    }
+
+    pub fn is_immediate_off(&self, project_id: &str) -> bool {
+        self.immediate_off.contains(project_id)
+    }
+
+    pub fn clear_on_manual_open(&mut self, project_id: &str) {
+        self.auto_close_reason.remove(project_id);
+        self.startup_fail_streak.remove(project_id);
+        self.immediate_off.remove(project_id);
+    }
+
+    /// Record a Stage end. Returns a close reason when the threshold is hit.
+    pub fn note_stage_ended(&mut self, project_id: &str, saw_init: bool) -> Option<String> {
+        if saw_init {
+            self.startup_fail_streak.remove(project_id);
+            return None;
+        }
+        let streak = self
+            .startup_fail_streak
+            .entry(project_id.to_string())
+            .or_insert(0);
+        *streak = streak.saturating_add(1);
+        if *streak < STARTUP_FAIL_THRESHOLD {
+            return None;
+        }
+        self.startup_fail_streak.remove(project_id);
+        let reason = format!(
+            "Scan closed: {STARTUP_FAIL_THRESHOLD} consecutive Stage starts failed before system/init"
+        );
+        self.mark_closed(project_id, reason)
+    }
+
+    /// Lock file identity mismatch → close reason.
+    pub fn note_lock_lost(&mut self, project_id: &str) -> String {
+        self.startup_fail_streak.remove(project_id);
+        let reason =
+            "Scan closed: Dispatcher lock file was deleted or replaced".to_string();
+        self.mark_closed(project_id, reason)
+            .expect("mark_closed always returns Some")
+    }
+
+    fn mark_closed(&mut self, project_id: &str, reason: String) -> Option<String> {
+        self.auto_close_reason
+            .insert(project_id.to_string(), reason.clone());
+        self.immediate_off.insert(project_id.to_string());
+        Some(reason)
+    }
+
+    pub fn clear_immediate_off(&mut self, project_id: &str) {
+        self.immediate_off.remove(project_id);
+    }
+}
+
+#[cfg(test)]
+mod scan_auto_close_tests {
+    use super::*;
+
+    #[test]
+    fn three_no_init_closes_and_init_resets_streak() {
+        let mut s = ScanAutoCloseState::default();
+        assert!(s.note_stage_ended("p1", false).is_none());
+        assert!(s.note_stage_ended("p1", false).is_none());
+        // Successful init clears streak.
+        assert!(s.note_stage_ended("p1", true).is_none());
+        assert!(s.note_stage_ended("p1", false).is_none());
+        assert!(s.note_stage_ended("p1", false).is_none());
+        let reason = s.note_stage_ended("p1", false).expect("third no-init closes");
+        assert!(reason.contains("system/init"));
+        assert_eq!(s.reason("p1"), Some(reason.as_str()));
+        assert!(s.is_immediate_off("p1"));
+
+        s.clear_on_manual_open("p1");
+        assert!(s.reason("p1").is_none());
+        assert!(!s.is_immediate_off("p1"));
+    }
+
+    #[test]
+    fn lock_lost_sets_reason() {
+        let mut s = ScanAutoCloseState::default();
+        let reason = s.note_lock_lost("p1");
+        assert!(reason.contains("lock"));
+        assert_eq!(s.reason("p1"), Some(reason.as_str()));
+    }
+}
 
 /// Slot + merge-queue bookkeeping shared across Projects in one serve.
 #[derive(Default)]
@@ -151,6 +254,10 @@ pub struct ProjectTickInput {
     pub test_timeout_secs: Option<u64>,
     /// Serve URL written into `merge.json` (display only).
     pub serve_url: String,
+    /// Shared Scan auto-close bookkeeping (startup fail streak / reasons).
+    pub scan_auto_close: Arc<Mutex<ScanAutoCloseState>>,
+    /// Notify serve to flip Scan off, log, and broadcast (`project_id`, reason).
+    pub auto_close_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
 }
 
 /// Explicit scan tick (tests call this; production uses a 15s interval).
@@ -700,6 +807,7 @@ struct AgentOutcome {
     exit_code: Option<i32>,
     verdict: Option<String>,
     failure_reason: Option<String>,
+    saw_init: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -930,6 +1038,11 @@ async fn run_agent(
     if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
         let _ = reader_handle.await;
         let stderr_tail = stderr_handle.await.unwrap_or_default();
+        let saw_init = run
+            .attempts
+            .last()
+            .and_then(|a| a.session_id.as_ref())
+            .is_some();
         if let Some(a) = run.attempts.last_mut() {
             a.ended_at = Some(Utc::now().to_rfc3339());
             a.result = Some(AttemptResult::Timeout);
@@ -938,13 +1051,16 @@ async fn run_agent(
         }
         update_latest_run(record, run);
         persist_run(engine, proj, task_id, record, run, false).await?;
-        return Ok(AgentOutcome {
+        let outcome = AgentOutcome {
             succeeded: false,
             timed_out: true,
             exit_code: Some(-1),
             verdict: None,
             failure_reason: Some(format!("{} stage timeout", stage.as_str())),
-        });
+            saw_init,
+        };
+        maybe_auto_close_on_startup_fail(engine, proj, outcome.saw_init).await;
+        return Ok(outcome);
     }
 
     let (events, session_id) = reader_handle.await.map_err(|e| e.to_string())?;
@@ -959,6 +1075,12 @@ async fn run_agent(
     } else {
         AttemptResult::Failed
     };
+    let saw_init = session_id.is_some()
+        || run
+            .attempts
+            .last()
+            .and_then(|a| a.session_id.as_ref())
+            .is_some();
 
     if let Some(a) = run.attempts.last_mut() {
         if a.session_id.is_none() {
@@ -985,13 +1107,38 @@ async fn run_agent(
         None
     };
 
-    Ok(AgentOutcome {
+    let outcome = AgentOutcome {
         succeeded,
         timed_out: false,
         exit_code: Some(exit_code),
         verdict,
         failure_reason,
-    })
+        saw_init,
+    };
+    maybe_auto_close_on_startup_fail(engine, proj, outcome.saw_init).await;
+    Ok(outcome)
+}
+
+async fn maybe_auto_close_on_startup_fail(
+    engine: &Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    saw_init: bool,
+) {
+    let reason = {
+        let mut g = proj.scan_auto_close.lock().await;
+        g.note_stage_ended(&proj.project_id, saw_init)
+    };
+    let Some(reason) = reason else {
+        return;
+    };
+    eprintln!(
+        "dispatcher: auto-closing Scan for {}: {reason}",
+        proj.project_id
+    );
+    let _ = proj
+        .auto_close_tx
+        .send((proj.project_id.clone(), reason.clone()));
+    engine.lock().await.broadcast_dispatcher_changed();
 }
 
 async fn success_close(
