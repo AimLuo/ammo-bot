@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useWithProject, stripProject } from "@/lib/project-prefix";
 import { MarkplaneLogo } from "@/components/ui/markplane-logo";
+import { ProjectSwitcher } from "@/components/layout/project-switcher";
 
 const ICON_MAP = {
   LayoutDashboard,
@@ -67,7 +68,7 @@ export function AppSidebar() {
 
   return (
     <Sidebar collapsible="icon">
-      <SidebarHeader className="p-2 pt-3">
+      <SidebarHeader className="p-2 pt-3 gap-2">
         <Link
           href={withProject("/dashboard")}
           className="flex items-center gap-2 overflow-hidden rounded-md p-1"
@@ -75,6 +76,7 @@ export function AppSidebar() {
           <MarkplaneLogo className="size-6 text-primary shrink-0" />
           <span className="text-lg font-semibold tracking-tight font-mono whitespace-nowrap">Markplane</span>
         </Link>
+        <ProjectSwitcher />
       </SidebarHeader>
 
       <SidebarContent>

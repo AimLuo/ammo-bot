@@ -209,6 +209,39 @@ pub fn touch_last_opened(config_dir: &Path, id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Remove a Project from the registry. Does not delete any project files.
+///
+/// Returns the removed entry, or `None` if the id was not registered.
+pub fn remove(config_dir: &Path, id: &str) -> anyhow::Result<Option<RegistryEntry>> {
+    with_lock(config_dir, || {
+        let mut registry = read_unlocked(config_dir)?;
+        let Some(pos) = registry.projects.iter().position(|e| e.id == id) else {
+            return Ok(None);
+        };
+        let entry = registry.projects.remove(pos);
+        write_unlocked(config_dir, &registry)?;
+        Ok(Some(entry))
+    })
+}
+
+/// Rename a Project's display name. Id and path are unchanged.
+pub fn rename(config_dir: &Path, id: &str, name: &str) -> anyhow::Result<Option<RegistryEntry>> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("project name must not be empty");
+    }
+    with_lock(config_dir, || {
+        let mut registry = read_unlocked(config_dir)?;
+        let Some(entry) = registry.projects.iter_mut().find(|e| e.id == id) else {
+            return Ok(None);
+        };
+        entry.name = name.to_string();
+        let updated = entry.clone();
+        write_unlocked(config_dir, &registry)?;
+        Ok(Some(updated))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

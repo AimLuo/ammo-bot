@@ -49,3 +49,16 @@ export function apiPath(path: string): string {
 export function stripProject(pathname: string): string {
   return pathname.replace(/^\/p\/[^/]+/, "") || "/";
 }
+
+/** Parse Project id from a pathname (updates with Next.js client navigations). */
+export function projectIdFromPathname(pathname: string): string | null {
+  const m = pathname.match(/^\/p\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** Absolute href into a Project (or landing when id is null). */
+export function projectHref(id: string | null, path = "/dashboard/"): string {
+  if (!id) return "/";
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `/p/${encodeURIComponent(id)}${normalized.endsWith("/") ? normalized : `${normalized}/`}`;
+}

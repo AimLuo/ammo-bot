@@ -10,8 +10,8 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Json, Redirect, Response};
-use axum::routing::{get, post};
+use axum::response::{IntoResponse, Json, Redirect, Response};
+use axum::routing::{get, patch, post};
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -285,8 +285,11 @@ fn build_app(
 
 fn build_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
-        .route("/", get(landing_page))
         .route("/api/projects", get(list_projects))
+        .route(
+            "/api/projects/{id}",
+            patch(rename_project).delete(remove_project),
+        )
         .route("/api/summary", get(get_summary))
         .route("/api/tasks", get(get_tasks).post(create_task))
         .route(
@@ -454,21 +457,34 @@ async fn project_prefix_middleware(
                 set_uri_path(&mut req, &rewrite_path(kind, &rest));
                 next.run(req).await
             }
-            Err(RuntimeError::NotFound) => error_response(
-                StatusCode::NOT_FOUND,
-                "project_not_found",
-                &format!("Project '{id}' is not in the registry"),
-            )
-            .into_response(),
+            Err(RuntimeError::NotFound) => match kind {
+                PrefixKind::Api => error_response(
+                    StatusCode::NOT_FOUND,
+                    "project_not_found",
+                    &format!("Project '{id}' is not in the registry"),
+                )
+                .into_response(),
+                // Serve the SPA so the client can show a full-page recovery UI.
+                PrefixKind::Page => {
+                    set_uri_path(&mut req, &rewrite_path(kind, &rest));
+                    next.run(req).await
+                }
+            },
             Err(RuntimeError::Unavailable { path }) => {
                 state.drop_runtime(&id).await;
-                error_response_with_path(
-                    StatusCode::CONFLICT,
-                    "project_unavailable",
-                    "Project path is unavailable",
-                    &path,
-                )
-                .into_response()
+                match kind {
+                    PrefixKind::Api => error_response_with_path(
+                        StatusCode::CONFLICT,
+                        "project_unavailable",
+                        "Project path is unavailable",
+                        &path,
+                    )
+                    .into_response(),
+                    PrefixKind::Page => {
+                        set_uri_path(&mut req, &rewrite_path(kind, &rest));
+                        next.run(req).await
+                    }
+                }
             }
         }
     } else {
@@ -485,6 +501,17 @@ struct ProjectListItem {
     last_opened: String,
 }
 
+fn registry_entry_to_list_item(e: serve_registry::RegistryEntry) -> ProjectListItem {
+    let path_valid = FsPath::new(&e.path).join(".markplane").is_dir();
+    ProjectListItem {
+        id: e.id,
+        name: e.name,
+        path: e.path,
+        path_valid,
+        last_opened: e.last_opened.to_rfc3339(),
+    }
+}
+
 async fn list_projects(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiListResponse<ProjectListItem>>, (StatusCode, Json<ApiError>)> {
@@ -496,19 +523,7 @@ async fn list_projects(
         )
     })?;
     projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
-    let data: Vec<ProjectListItem> = projects
-        .into_iter()
-        .map(|e| {
-            let path_valid = FsPath::new(&e.path).join(".markplane").is_dir();
-            ProjectListItem {
-                id: e.id,
-                name: e.name,
-                path: e.path,
-                path_valid,
-                last_opened: e.last_opened.to_rfc3339(),
-            }
-        })
-        .collect();
+    let data: Vec<ProjectListItem> = projects.into_iter().map(registry_entry_to_list_item).collect();
     let total = data.len();
     Ok(Json(ApiListResponse {
         data,
@@ -516,34 +531,61 @@ async fn list_projects(
     }))
 }
 
-async fn landing_page(State(state): State<Arc<AppState>>) -> Html<String> {
-    let projects = serve_registry::list(&state.config_dir).unwrap_or_default();
-    let mut items = String::new();
-    if projects.is_empty() {
-        items.push_str("<li>No projects registered. Run <code>markplane serve</code> inside a Project.</li>");
-    } else {
-        let mut sorted = projects;
-        sorted.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
-        for e in sorted {
-            items.push_str(&format!(
-                "<li><a href=\"/p/{id}/\">{name}</a> <span style=\"color:#666\">{path}</span></li>",
-                id = html_escape(&e.id),
-                name = html_escape(&e.name),
-                path = html_escape(&e.path),
-            ));
-        }
-    }
-    Html(format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Markplane</title></head>\
-         <body><h1>Markplane</h1><p>Projects</p><ul>{items}</ul></body></html>"
-    ))
+#[derive(Deserialize)]
+struct RenameProjectRequest {
+    name: String,
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+async fn remove_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<ProjectListItem>>, (StatusCode, Json<ApiError>)> {
+    let removed = serve_registry::remove(&state.config_dir, &id).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    let Some(entry) = removed else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "project_not_found",
+            &format!("Project '{id}' is not in the registry"),
+        ));
+    };
+    state.drop_runtime(&id).await;
+    Ok(Json(ApiResponse {
+        data: registry_entry_to_list_item(entry),
+    }))
+}
+
+async fn rename_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameProjectRequest>,
+) -> Result<Json<ApiResponse<ProjectListItem>>, (StatusCode, Json<ApiError>)> {
+    let renamed = serve_registry::rename(&state.config_dir, &id, &body.name).map_err(|e| {
+        if e.to_string().contains("must not be empty") {
+            error_response(StatusCode::BAD_REQUEST, "invalid_field", &e.to_string())
+        } else {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                &e.to_string(),
+            )
+        }
+    })?;
+    let Some(entry) = renamed else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "project_not_found",
+            &format!("Project '{id}' is not in the registry"),
+        ));
+    };
+    Ok(Json(ApiResponse {
+        data: registry_entry_to_list_item(entry),
+    }))
 }
 
 // ── Embedded Static File Server ──────────────────────────────────────────
@@ -3426,8 +3468,10 @@ mod tests {
 
     struct TestEnv {
         _tmp: TempDir,
+        config_dir: PathBuf,
         project_dir: PathBuf,
         project_id: String,
+        state: Arc<AppState>,
         app: tower::util::BoxCloneService<Request, Response, Infallible>,
     }
 
@@ -3444,12 +3488,14 @@ mod tests {
         )
         .unwrap();
         let entry = serve_registry::register(&config_dir, &project_dir).unwrap();
-        let state = AppState::new(config_dir, 4200, true);
-        let app = build_app(state);
+        let state = AppState::new(config_dir.clone(), 4200, true);
+        let app = build_app(state.clone());
         TestEnv {
             _tmp: tmp,
+            config_dir,
             project_dir,
             project_id: entry.id,
+            state,
             app,
         }
     }
@@ -3459,15 +3505,25 @@ mod tests {
         method: &str,
         uri: &str,
     ) -> (StatusCode, serde_json::Value) {
+        oneshot_json_body(app, method, uri, None).await
+    }
+
+    async fn oneshot_json_body(
+        app: &tower::util::BoxCloneService<Request, Response, Infallible>,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        let req_body = if let Some(json) = body {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&json).unwrap())
+        } else {
+            Body::empty()
+        };
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(builder.body(req_body).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -3475,6 +3531,111 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
         (status, json)
+    }
+
+    #[tokio::test]
+    async fn list_projects_orders_by_last_opened_and_marks_path_validity() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let older = tmp.path().join("older-proj");
+        let newer = tmp.path().join("newer-proj");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        Project::init(older.join(".markplane"), "Older", "").unwrap();
+        Project::init(newer.join(".markplane"), "Newer", "").unwrap();
+        let id_older = serve_registry::register(&config_dir, &older).unwrap().id;
+        let id_newer = serve_registry::register(&config_dir, &newer).unwrap().id;
+        serve_registry::touch_last_opened(&config_dir, &id_older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        serve_registry::touch_last_opened(&config_dir, &id_newer).unwrap();
+
+        // Invalidate newer project's path after registration.
+        fs::remove_dir_all(newer.join(".markplane")).unwrap();
+
+        let state = AppState::new(config_dir, 4200, true);
+        let app = build_app(state);
+        let (status, json) = oneshot_json(&app, "GET", "/api/projects").await;
+        assert_eq!(status, StatusCode::OK);
+        let data = json["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["id"], id_newer);
+        assert_eq!(data[0]["path_valid"], false);
+        assert_eq!(data[1]["id"], id_older);
+        assert_eq!(data[1]["path_valid"], true);
+    }
+
+    #[tokio::test]
+    async fn remove_project_drops_registry_entry_and_runtime_without_deleting_files() {
+        let env = setup_env("remove-me");
+        let marker = env.project_dir.join("keep-me.txt");
+        fs::write(&marker, "safe").unwrap();
+
+        // Establish runtime so remove must release it.
+        let (status, _) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/summary", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(env.state.runtimes.lock().await.contains_key(&env.project_id));
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "DELETE",
+            &format!("/api/projects/{}", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["id"], env.project_id);
+
+        let listed = serve_registry::list(&env.config_dir).unwrap();
+        assert!(listed.iter().all(|e| e.id != env.project_id));
+        assert!(!env.state.runtimes.lock().await.contains_key(&env.project_id));
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "safe");
+        assert!(env.project_dir.join(".markplane").is_dir());
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/summary", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "project_not_found");
+    }
+
+    #[tokio::test]
+    async fn rename_project_updates_display_name_keeps_id_and_url() {
+        let env = setup_env("rename-me");
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/projects/{}", env.project_id),
+            Some(serde_json::json!({ "name": "Friendly Name" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["id"], env.project_id);
+        assert_eq!(json["data"]["name"], "Friendly Name");
+
+        let entry = serve_registry::find(&env.config_dir, &env.project_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.name, "Friendly Name");
+        assert_eq!(entry.id, env.project_id);
+
+        let (status, list) = oneshot_json(&env.app, "GET", "/api/projects").await;
+        assert_eq!(status, StatusCode::OK);
+        let item = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == env.project_id)
+            .unwrap();
+        assert_eq!(item["name"], "Friendly Name");
     }
 
     #[tokio::test]
