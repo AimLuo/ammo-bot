@@ -3,21 +3,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import { useWebSocket } from "@/lib/hooks/use-websocket";
 import { useKeyboardNav } from "@/lib/hooks/use-keyboard-nav";
+import { projectIdFromPathname } from "@/lib/project-prefix";
 
-function WebSocketProvider({ children }: { children: React.ReactNode }) {
+function WebSocketProvider({ children }: { children: ReactNode }) {
   useWebSocket();
   return <>{children}</>;
 }
 
-function KeyboardNavProvider({ children }: { children: React.ReactNode }) {
+function KeyboardNavProvider({ children }: { children: ReactNode }) {
   useKeyboardNav();
   return <>{children}</>;
 }
 
-export function Providers({ children }: { children: React.ReactNode }) {
+function ScopedProviders({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -29,7 +31,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
             retry: 1,
           },
         },
-      })
+      }),
   );
 
   return (
@@ -43,4 +45,14 @@ export function Providers({ children }: { children: React.ReactNode }) {
       </ThemeProvider>
     </QueryClientProvider>
   );
+}
+
+/**
+ * Remount the app providers (and clear the QueryClient) whenever the Project
+ * in the URL changes, so Project A data never bleeds into Project B.
+ */
+export function Providers({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const scopeKey = projectIdFromPathname(pathname) ?? "__landing__";
+  return <ScopedProviders key={scopeKey}>{children}</ScopedProviders>;
 }

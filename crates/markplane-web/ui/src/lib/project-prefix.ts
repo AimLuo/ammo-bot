@@ -16,7 +16,10 @@ export function useWithProject(): (path: string) => string {
   const id = useProjectId();
   return useCallback(
     (path: string) =>
-      !id || !path.startsWith("/") || path.startsWith("/p/")
+      !id ||
+      path === "/" ||
+      !path.startsWith("/") ||
+      path.startsWith("/p/")
         ? path
         : `/p/${encodeURIComponent(id)}${path}`,
     [id],
@@ -54,7 +57,9 @@ export function currentProjectId(): string | null {
 
 export function withProject(path: string): string {
   const id = currentProjectId();
-  if (!id || !path.startsWith("/") || path.startsWith("/p/")) return path;
+  if (!id || path === "/" || !path.startsWith("/") || path.startsWith("/p/")) {
+    return path;
+  }
   return `/p/${encodeURIComponent(id)}${path}`;
 }
 
@@ -72,4 +77,17 @@ export function apiPath(path: string): string {
 /** Strip /p/<id> so existing `pathname.startsWith("/backlog")` checks keep working. */
 export function stripProject(pathname: string): string {
   return pathname.replace(/^\/p\/[^/]+/, "") || "/";
+}
+
+/** Parse Project id from a pathname (updates with Next.js client navigations). */
+export function projectIdFromPathname(pathname: string): string | null {
+  const m = pathname.match(/^\/p\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/** Absolute href into a Project (or landing when id is null). */
+export function projectHref(id: string | null, path = "/dashboard/"): string {
+  if (!id) return "/";
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `/p/${encodeURIComponent(id)}${normalized.endsWith("/") ? normalized : `${normalized}/`}`;
 }
