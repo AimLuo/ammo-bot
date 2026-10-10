@@ -76,13 +76,13 @@ See the [AI Integration Guide](docs/ai-integration.md) for the full context laye
 ### Shell script (macOS and Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/integrate/EPIC-7m4ss/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/main/install.sh | sh
 ```
 
 Downloads the latest release, verifies the SHA256 checksum, and installs to `~/.local/bin/`. Customize with environment variables:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/integrate/EPIC-7m4ss/install.sh | INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/main/install.sh | INSTALL_DIR=/usr/local/bin sh
 ```
 
 Verify the fork build: `markplane --version` should report a `+skills.N` suffix (e.g. `0.1.4+skills.1`).

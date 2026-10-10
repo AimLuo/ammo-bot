@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install script for Markplane
-# Usage: curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/integrate/EPIC-7m4ss/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/main/install.sh | sh
 #
 # Environment variables:
 #   INSTALL_DIR  - Installation directory (default: ~/.local/bin)
