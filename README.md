@@ -122,15 +122,16 @@ This creates the `.markplane/` directory with config, templates, and starter con
 
 ## Web UI
 
-Launch the local web dashboard to see your project:
+Launch the local web dashboard (HTTPS by default):
 
 ```bash
-markplane serve --open
+markplane serve start --open   # background (macOS/Linux)
+# or: markplane serve --open   # foreground
 ```
 
-This opens `http://localhost:4200` in your browser with a dashboard, kanban board, Maps route graphs, dependency graph, and more.
+This opens `https://localhost:4200` — a Project landing page at `/`, or `/p/<id>/` when run inside a Project. One server hosts every Project in your registry; use `serve status` / `logs` / `stop` to manage the background process. First start prints how to trust the localhost certificate.
 
-See the [Web UI Guide](docs/web-ui-guide.md) for keyboard shortcuts, views, and details.
+See the [Web UI Guide](docs/web-ui-guide.md) for multi-Project switching, keyboard shortcuts, views, and details.
 
 ## AI Integration
 

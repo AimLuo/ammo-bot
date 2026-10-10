@@ -41,8 +41,6 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // PM2 config (removed in a later ticket); CommonJS require trips TS eslint.
-    "ecosystem.config.cjs",
   ]),
 ]);
 

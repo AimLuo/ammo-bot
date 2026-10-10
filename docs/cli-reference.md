@@ -788,32 +788,95 @@ markplane resolve TASK-q1 --answer-file answer.md --gist "Use Redis for sessions
 Start the web UI server.
 
 ```
-markplane serve [OPTIONS]
+markplane serve [OPTIONS] [COMMAND]
 ```
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `start` | Run the server in the background |
+| `stop` | Stop the background server |
+| `status` | Show whether the server is running |
+| `logs` | Show background server logs |
 
 **Options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--port <PORT>` | `4200` | Port to listen on |
-| `--open` | `false` | Open browser automatically after starting |
-| `--dev` | `false` | Dev mode: API only, no static file serving, permissive CORS (use with Next.js dev server) |
+| `--open` | `false` | Open browser automatically |
+| `--dev` | `false` | Dev mode: API only over HTTP (no static files, no TLS) |
+| `--no-tls` | `false` | Disable TLS and serve plain HTTP (escape hatch) |
 
-Starts an HTTP server that serves the web dashboard and a REST API backed by `markplane-core`. Also runs a WebSocket server at `/ws` that broadcasts real-time file change events.
+One server process serves every Project in the user-level Project registry. Run `markplane serve` inside a Project directory to register that Project and open `https://localhost:4200/p/<id>/`. Outside a Project, it opens the landing page at `/`. If a background server is already running, the foreground command registers the current Project (when applicable), opens the browser, and exits.
 
-In production builds compiled with `--features embed-ui`, the web UI is embedded in the binary. Otherwise, it serves static files from `crates/markplane-web/ui/out/`.
+Default mode uses HTTPS with a localhost self-signed certificate under `~/.config/markplane/certs/` (honours `XDG_CONFIG_HOME`). On first generate or renewal, the CLI prints OS-specific trust commands. Use `--dev` for the Next.js proxy workflow, or `--no-tls` to fall back to HTTP.
+
+User config directory files (`~/.config/markplane/`, or `$XDG_CONFIG_HOME/markplane/`):
+
+| File | Purpose |
+|------|---------|
+| `projects.json` | Project registry |
+| `certs/` | Self-signed `cert.pem` / `key.pem` |
+| `serve.pid` | Background/foreground server lock and status |
+| `serve.log` | Background server log (`serve start`) |
+
+In production builds compiled with `--features embed-ui`, the web UI is embedded in the binary. Otherwise, it serves static files from `crates/markplane-web/ui/out/`. Project-scoped API routes live under `/api/p/<id>/...`; WebSocket is `/api/p/<id>/ws` (`wss://` when TLS is on).
+
+### serve start
+
+```
+markplane serve start [OPTIONS]
+```
+
+Same options as `serve`. Detaches a background server, writes `serve.pid` / `serve.log`, and returns. macOS and Linux only.
+
+### serve stop
+
+```
+markplane serve stop
+```
+
+Stops the background server (SIGTERM, then SIGKILL after a grace period).
+
+### serve status
+
+```
+markplane serve status
+```
+
+Prints running state, pid, port, URL, version, and start time when healthy.
+
+### serve logs
+
+```
+markplane serve logs [OPTIONS]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-n`, `--lines <LINES>` | `100` | Number of lines to show |
+| `-f`, `--follow` | `false` | Follow the log file |
 
 **Example:**
 
 ```bash
 markplane serve
-# Markplane web UI starting on http://localhost:4200
+# Markplane web UI starting on https://localhost:4200
+# Open https://localhost:4200/p/<id>/
+
+markplane serve start
+markplane serve status
+markplane serve logs -f
+markplane serve stop
 
 markplane serve --port 8080 --open
-# Starts on port 8080 and opens the browser
-
 markplane serve --dev
-# API only on :4200 — run `npm run dev` in ui/ for the frontend
+# API only over HTTP on :4200 — run `npm run dev` in ui/ for the frontend
+
+markplane serve --no-tls
+# Plain HTTP escape hatch
 ```
 
 ---

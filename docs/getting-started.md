@@ -54,13 +54,25 @@ Markplane organizes work into four item types:
 
 ## 2. Start the Web UI
 
-Launch the local web dashboard to see your project:
+Launch the local web dashboard. Prefer a background server so the UI stays up after you close the terminal (macOS/Linux):
+
+```bash
+markplane serve start --open
+markplane serve status
+```
+
+Default mode is HTTPS on `https://localhost:4200`. The first start generates a self-signed certificate under `~/.config/markplane/certs/` and prints a trust command for your OS — run it once so the browser accepts the certificate. If you are inside a Project directory, that Project is registered and the browser opens `/p/<id>/`; otherwise you land on `/` and can add Projects from the UI.
+
+To register a second Project without starting another server, `cd` into it and run:
 
 ```bash
 markplane serve --open
+# Reuses the running server, registers this Project, opens /p/<id>/, then exits
 ```
 
-This opens `http://localhost:4200` in your browser. You'll see the seeded starter content on the dashboard — an epic, tasks, a plan, and a note.
+Useful companions: `markplane serve logs -f`, `markplane serve stop`. Escape hatches: `--no-tls` (plain HTTP) and `--dev` (API-only HTTP for frontend contributors). Foreground `markplane serve` works the same way if you prefer to keep the process in the terminal.
+
+You'll see the seeded starter content on the Project dashboard — an epic, tasks, a plan, and a note.
 
 The web UI provides:
 

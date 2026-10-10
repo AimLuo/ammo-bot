@@ -1,31 +1,42 @@
 # Web UI Guide
 
-Markplane includes a local web dashboard for visual project management. It runs entirely on your machine — no external services, no accounts. The Rust binary serves both the API and the static frontend.
+Markplane includes a local web dashboard for visual project management. It runs entirely on your machine — no external services, no accounts. One `markplane serve` process can host multiple Projects from a user-level Project registry, with HTTPS by default.
 
 ## Quick Start
 
 ```bash
-markplane serve         # Start on http://localhost:4200
-markplane serve --open  # Start and open browser automatically
+markplane serve              # HTTPS on https://localhost:4200 (registers cwd Project if any)
+markplane serve --open       # Start and open the browser
 markplane serve --port 8080  # Custom port
+markplane serve start        # Background server (macOS/Linux)
+markplane serve status       # pid, port, URL, version
+markplane serve logs -f      # Follow serve.log
+markplane serve stop         # Stop the background server
 ```
+
+Running inside a Project directory adds it to the registry and opens `/p/<id>/`. Outside a Project, the browser opens the landing page at `/`, where you can browse directories, paste a path, init a new Project, rename, or remove entries (removing does not delete files). Unprefixed URLs such as `/backlog/` redirect to `/`.
+
+User files live under `~/.config/markplane/` (honours `XDG_CONFIG_HOME`): `projects.json`, `certs/`, `serve.pid`, `serve.log`. First HTTPS start prints OS-specific commands to trust the self-signed certificate. Use `--no-tls` for plain HTTP, or `--dev` when developing the frontend.
 
 > **Note**: `markplane serve` needs the web UI frontend to be available. If you built markplane with `--features embed-ui`, the frontend is baked into the binary and this just works. Otherwise, you need to build the frontend first — see [Production Build](#production-build).
 
 ## Pages
 
+Project pages are under `/p/<id>/...`. The table below shows the path after that prefix.
+
 | Page | URL | Description |
 |------|-----|-------------|
-| Dashboard | `/dashboard` | Summary metrics, active work, blocked items, epic progress, AI context panel |
-| Backlog | `/backlog` | Kanban board, list view, and table view with filtering |
-| Roadmap | `/roadmap` | Epics with progress tracking, status breakdowns, and linked tasks |
-| Maps | `/maps` | Wayfinder maps list and route-graph detail |
-| Plans | `/plans` | Implementation plans with detail view |
-| Notes | `/notes` | Research notes, ideas, and decisions |
-| Graph | `/graph` | Interactive dependency graph |
-| Archive | `/archive` | Archived items with restore action |
-| Docs | `/docs` | Searchable documentation viewer for user-facing guides |
-| Settings | `/settings/*` | Configure project info, task types, note types, workflow, and documentation paths |
+| Landing | `/` | Project registry cards (not under `/p/<id>/`) |
+| Dashboard | `/p/<id>/dashboard` | Summary metrics, active work, blocked items, epic progress, AI context panel |
+| Backlog | `/p/<id>/backlog` | Kanban board, list view, and table view with filtering |
+| Roadmap | `/p/<id>/roadmap` | Epics with progress tracking, status breakdowns, and linked tasks |
+| Maps | `/p/<id>/maps` | Wayfinder maps list and route-graph detail |
+| Plans | `/p/<id>/plans` | Implementation plans with detail view |
+| Notes | `/p/<id>/notes` | Research notes, ideas, and decisions |
+| Graph | `/p/<id>/graph` | Interactive dependency graph |
+| Archive | `/p/<id>/archive` | Archived items with restore action |
+| Docs | `/docs` | Bundled Markplane documentation (global, not Project-scoped) |
+| Settings | `/p/<id>/settings/*` | Configure project info, task types, note types, workflow, and documentation paths |
 
 ## Views
 
@@ -180,13 +191,13 @@ You need two terminals — one for the Rust API server, one for the Next.js dev 
 # Terminal 1: Rust API server (from repo root)
 cargo run -p markplane-cli -- serve --dev
 
-# Terminal 2: Next.js dev server (from repo root)
+# Terminal 2: Next.js dev server
 cd crates/markplane-web/ui
 npm install   # first time only
-npm run dev
+npm run dev   # http://localhost:4201
 ```
 
-In dev mode (`--dev`), the Rust server only serves the API (no static files) and enables permissive CORS (allowing the Next.js dev server's origin). In production mode, CORS is restricted to `localhost` and `127.0.0.1` on the server's port. The Next.js dev server runs on port 3000 and proxies `/api/*` and `/ws` requests to the Rust server on port 4200. You get hot reload for frontend changes this way.
+`--dev` serves the API over HTTP only (no static files, no TLS) with permissive CORS for the Next.js origin. `npm run dev` listens on port 4201, rewrites `/p/:id/...` for the SPA, and proxies `/api/*` and `/ws` to the Rust server on port 4200.
 
 ## Production Build
 
@@ -279,7 +290,7 @@ All list endpoints (`/api/tasks`, `/api/epics`, `/api/plans`, `/api/maps`, `/api
 
 ### WebSocket Events
 
-Connect to `ws://localhost:4200/ws` for real-time updates:
+Connect to `/api/p/<id>/ws` (browser uses `wss://` under HTTPS, or `ws://` with `--dev` / `--no-tls`) for real-time updates:
 
 ```json
 { "type": "file_changed", "entity": "task", "id": "TASK-fq2x8", "action": "modified" }

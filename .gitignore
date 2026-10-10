@@ -7,7 +7,6 @@ crates/markplane-web/ui/out/
 crates/markplane-web/ui/.next/
 crates/markplane-web/ui/build/
 crates/markplane-web/ui/coverage/
-crates/markplane-web/ui/logs/
 
 # Next.js / Node (anywhere)
 .next/

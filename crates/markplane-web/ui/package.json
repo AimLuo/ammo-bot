@@ -6,11 +6,7 @@
     "dev": "next dev --port 4201",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "pm2": "pm2 start ecosystem.config.cjs",
-    "pm2:stop": "pm2 stop ecosystem.config.cjs",
-    "pm2:restart": "pm2 restart ecosystem.config.cjs",
-    "pm2:delete": "pm2 delete ecosystem.config.cjs"
+    "lint": "eslint"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -44,6 +44,14 @@ cargo install --path crates/markplane-cli --features embed-ui # Single binary wi
 
 After code changes, `cargo install --path crates/markplane-cli` to update the local `markplane` binary.
 
+Frontend contrib: `cargo run -p markplane-cli -- serve --dev` plus `npm run dev` in `crates/markplane-web/ui` (port 4201). No pm2.
+
+## markplane serve
+
+- One process serves the Project registry; pages at `/p/<id>/...`, landing at `/`
+- `serve` / `serve start|stop|status|logs`; default HTTPS; `--dev` / `--no-tls` for HTTP
+- User config (`~/.config/markplane/` or `$XDG_CONFIG_HOME/markplane/`): `projects.json`, `certs/`, `serve.pid`, `serve.log`
+
 ## Workspace Structure
 
 | Crate | Type | Role |
