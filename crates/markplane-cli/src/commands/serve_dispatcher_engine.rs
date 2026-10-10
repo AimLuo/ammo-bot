@@ -219,18 +219,6 @@ async fn run_pipeline(
         .cloned()
         .ok_or_else(|| "no active status in workflow".to_string())?;
 
-    // Pickup writes.
-    proj.project
-        .update_item(
-            task_id,
-            UpdateFields {
-                status: Some(active_status),
-                assignee: Patch::Set("dispatcher".into()),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| e.to_string())?;
-
     let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
     let title = doc.frontmatter.title.clone();
 
@@ -240,6 +228,7 @@ async fn run_pipeline(
     let branch = format!("agent/{task_id}");
     let git_dir = git_dir_realpath(&proj.project_dir)?;
 
+    // Write Run record first, then mutate the ticket (status transition order).
     let started_at = Utc::now().to_rfc3339();
     let mut record = read_run_record(proj.project.root(), task_id)
         .map_err(|e| e.to_string())?
@@ -267,6 +256,17 @@ async fn run_pipeline(
     };
     record.runs.push(run.clone());
     persist_run(proj, task_id, &record, &run).await?;
+
+    proj.project
+        .update_item(
+            task_id,
+            UpdateFields {
+                status: Some(active_status),
+                assignee: Patch::Set("dispatcher".into()),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
 
     // Worktree
     let _ = git_run(&proj.project_dir, &["worktree", "prune"]);
@@ -727,23 +727,13 @@ async fn success_close(
         return Ok(());
     }
 
-    let mut pushed = run.pushed;
-    // Push merge commits first (working tree may still have uncommitted ticket edits).
-    if proj.settings.push_after_merge && !run.pushed {
-        match git_run(&proj.project_dir, &["push", "origin", "HEAD"]) {
-            Ok(()) => pushed = true,
-            Err(e) => {
-                eprintln!("dispatcher: push failed for {task_id}: {e}");
-                pushed = false;
-            }
-        }
-    }
-
+    // Comment records whether we *will* push (setting), then commit ticket, then push once.
+    let want_push = proj.settings.push_after_merge && !run.pushed;
     let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
     let already_commented = doc.body.contains(&format!("`{merge_sha}`"))
         && doc.body.contains("**Merged**");
     if !already_commented {
-        let flag = if pushed { "yes" } else { "no" };
+        let flag = if want_push { "yes" } else { "no" };
         let comment_text =
             format!("**Merged** into `{target_branch}` at `{merge_sha}` · pushed: {flag}");
         proj.project
@@ -764,10 +754,15 @@ async fn success_close(
         git_run(&proj.project_dir, &["add", "--", &rel_str])?;
         let msg = format!("Mark ticket {task_id} done\n\nRefs: {task_id}");
         git_run(&proj.project_dir, &["commit", "-m", &msg])?;
-        if pushed {
-            // Include the ticket commit on the remote when merge push already succeeded.
-            if let Err(e) = git_run(&proj.project_dir, &["push", "origin", "HEAD"]) {
-                eprintln!("dispatcher: ticket push failed for {task_id}: {e}");
+    }
+
+    let mut pushed = run.pushed;
+    if want_push {
+        match git_run(&proj.project_dir, &["push", "origin", "HEAD"]) {
+            Ok(()) => pushed = true,
+            Err(e) => {
+                eprintln!("dispatcher: push failed for {task_id}: {e}");
+                pushed = false;
             }
         }
     }

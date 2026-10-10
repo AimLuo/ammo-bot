@@ -7140,6 +7140,12 @@ mod tests {
                 .any(|a| a.session_id.as_deref() == Some(&format!("sess-impl-{task_id}")))
         );
         assert!(run.attempts.iter().any(|a| a.usage.is_some()));
+        assert!(
+            run.attempts
+                .iter()
+                .all(|a| !a.model.is_empty() && a.timeout_secs.is_some()),
+            "model and timeout snapshot required on every attempt"
+        );
 
         // Main branch contains merge; ticket-only commit has Refs trailer.
         let log = std::process::Command::new("git")
