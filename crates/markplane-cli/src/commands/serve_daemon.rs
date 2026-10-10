@@ -168,7 +168,7 @@ fn tail_log(config_dir: &Path, lines: usize) -> String {
 }
 
 /// Start the server in the background (no tokio runtime in this process).
-pub fn start(port: u16, dev: bool) -> anyhow::Result<()> {
+pub fn start(port: u16, dev: bool, no_tls: bool) -> anyhow::Result<()> {
     let config_dir = serve_registry::config_dir();
     fs::create_dir_all(&config_dir)?;
 
@@ -218,6 +218,9 @@ pub fn start(port: u16, dev: bool) -> anyhow::Result<()> {
 
     if dev {
         command.arg("--dev");
+    }
+    if no_tls {
+        command.arg("--no-tls");
     }
 
     // Detach from the controlling terminal when possible.

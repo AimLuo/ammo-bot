@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 import { useSearchParams } from "next/navigation";
 import { useMaps } from "@/lib/hooks/use-maps";
 import { Button } from "@/components/ui/button";
@@ -32,7 +32,7 @@ function MapCard({ map }: { map: MapListItem }) {
   const pct = (map.decided_count / total) * 100;
 
   return (
-    <Link
+    <ProjectLink
       href={`/maps?map=${map.id}`}
       className="block rounded-lg border bg-card p-4 hover:border-ring transition-colors no-underline text-inherit"
     >
@@ -62,7 +62,7 @@ function MapCard({ map }: { map: MapListItem }) {
         </span>
         <span>{map.updated}</span>
       </div>
-    </Link>
+    </ProjectLink>
   );
 }
 

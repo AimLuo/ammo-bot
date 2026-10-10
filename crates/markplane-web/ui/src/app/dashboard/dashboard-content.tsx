@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import { useSummary } from "@/lib/hooks/use-summary";
 import { StatusBadge } from "@/components/domain/status-badge";
 import { PriorityIndicator } from "@/components/domain/priority-indicator";
@@ -14,7 +15,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { postAction } from "@/lib/api";
 import { toast } from "sonner";
 import { RefreshCw } from "lucide-react";
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 import { PageTransition } from "@/components/domain/page-transition";
 
 function relativeTime(dateStr: string): string {
@@ -31,7 +32,7 @@ function relativeTime(dateStr: string): string {
 export function DashboardContent() {
   const { data, isLoading, error, refetch } = useSummary();
   const queryClient = useQueryClient();
-  const router = useRouter();
+  const router = useProjectRouter();
   const searchParams = useSearchParams();
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
@@ -190,9 +191,9 @@ export function DashboardContent() {
               <h2 className="text-sm font-semibold mb-3">Epic Progress</h2>
               <div className="space-y-4">
                 {data.now_epics.map((epic) => (
-                  <Link key={epic.id} href="/roadmap">
+                  <ProjectLink key={epic.id} href="/roadmap">
                     <EpicProgress epic={epic} />
-                  </Link>
+                  </ProjectLink>
                 ))}
               </div>
             </section>

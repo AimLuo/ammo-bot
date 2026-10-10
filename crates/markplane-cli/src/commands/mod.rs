@@ -1,5 +1,6 @@
 mod add;
 mod archive;
+mod certs;
 mod check;
 mod claude_md;
 mod comment;
@@ -404,9 +405,12 @@ pub enum Commands {
         /// Open browser automatically
         #[arg(long, global = true)]
         open: bool,
-        /// Dev mode: API only, no static files
+        /// Dev mode: API only over HTTP (no static files, no TLS)
         #[arg(long, global = true)]
         dev: bool,
+        /// Disable TLS and serve plain HTTP (escape hatch)
+        #[arg(long, global = true)]
+        no_tls: bool,
         /// Internal: re-exec'd background child (hidden)
         #[arg(long, hide = true, global = true)]
         daemon_child: bool,
@@ -592,15 +596,16 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
             port,
             open,
             dev,
+            no_tls,
             daemon_child,
         } => match action {
-            Some(ServeAction::Start) => serve_daemon::start(port, dev),
+            Some(ServeAction::Start) => serve_daemon::start(port, dev, no_tls),
             Some(ServeAction::Stop) => serve_daemon::stop(),
             Some(ServeAction::Status) => serve_daemon::status(),
             Some(ServeAction::Logs { lines, follow }) => serve_daemon::logs(lines, follow),
             None => {
                 let rt = tokio::runtime::Runtime::new()?;
-                let result = rt.block_on(serve::run(port, open, dev, daemon_child));
+                let result = rt.block_on(serve::run(port, open, dev, no_tls, daemon_child));
                 rt.shutdown_timeout(std::time::Duration::from_secs(3));
                 result
             }

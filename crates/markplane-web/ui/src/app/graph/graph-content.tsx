@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import dynamic from "next/dynamic";
 
 import { useGraph } from "@/lib/hooks/use-graph";
@@ -36,7 +37,7 @@ function getSelectedFromParams(searchParams: URLSearchParams): { id: string; pre
 
 export function GraphContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useProjectRouter();
   const focusId = searchParams.get("focus") ?? undefined;
 
   const selected = getSelectedFromParams(searchParams);

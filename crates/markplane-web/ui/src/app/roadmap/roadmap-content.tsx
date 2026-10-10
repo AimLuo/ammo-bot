@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useMemo, useCallback } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import { useEpics } from "@/lib/hooks/use-epics";
 import { useTasks } from "@/lib/hooks/use-tasks";
 import { useConfig } from "@/lib/hooks/use-config";
@@ -278,7 +279,7 @@ function RoadmapColumn({
 
 export function RoadmapContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useProjectRouter();
   const { data: epicsData, isLoading: epicsLoading, error, refetch } = useEpics();
   const { data: tasksData } = useTasks();
   const updateEpic = useUpdateEpic();
