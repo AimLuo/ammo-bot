@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   ArrowUp,
   Folder,
@@ -34,6 +34,9 @@ export function AddProjectDialog({ open, onOpenChange }: AddProjectDialogProps) 
   const router = useProjectRouter();
   const [browsePath, setBrowsePath] = useState<string | null>(null);
   const [pathInput, setPathInput] = useState("");
+  const [syncedListingPath, setSyncedListingPath] = useState<string | null>(
+    null,
+  );
   const [actionError, setActionError] = useState<string | null>(null);
 
   const listing = useFsListing(browsePath, open);
@@ -41,20 +44,24 @@ export function AddProjectDialog({ open, onOpenChange }: AddProjectDialogProps) 
   const init = useInitProject();
   const busy = add.isPending || init.isPending;
 
-  useEffect(() => {
-    if (!open) {
+  // Keep the path input aligned with the latest successful listing without an effect.
+  const listingPath = listing.data?.path ?? null;
+  if (listingPath !== syncedListingPath) {
+    setSyncedListingPath(listingPath);
+    if (listingPath !== null) {
+      setPathInput(listingPath);
+    }
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) {
       setBrowsePath(null);
       setPathInput("");
+      setSyncedListingPath(null);
       setActionError(null);
-      return;
     }
-  }, [open]);
-
-  useEffect(() => {
-    if (listing.data) {
-      setPathInput(listing.data.path);
-    }
-  }, [listing.data]);
+    onOpenChange(next);
+  }
 
   async function goToPath(raw: string) {
     setActionError(null);
@@ -67,7 +74,7 @@ export function AddProjectDialog({ open, onOpenChange }: AddProjectDialogProps) 
     setActionError(null);
     try {
       const project = await add.mutateAsync(path);
-      onOpenChange(false);
+      handleOpenChange(false);
       router.push(projectHref(project.id));
     } catch (err) {
       if (err instanceof ApiError) {
@@ -84,7 +91,7 @@ export function AddProjectDialog({ open, onOpenChange }: AddProjectDialogProps) 
     setActionError(null);
     try {
       const project = await init.mutateAsync(path);
-      onOpenChange(false);
+      handleOpenChange(false);
       router.push(projectHref(project.id));
     } catch (err) {
       if (err instanceof ApiError) {
@@ -104,7 +111,7 @@ export function AddProjectDialog({ open, onOpenChange }: AddProjectDialogProps) 
         : null;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-xl gap-3">
         <DialogHeader>
           <DialogTitle>添加 Project</DialogTitle>
@@ -203,7 +210,7 @@ export function AddProjectDialog({ open, onOpenChange }: AddProjectDialogProps) 
           <Button
             type="button"
             variant="outline"
-            onClick={() => onOpenChange(false)}
+            onClick={() => handleOpenChange(false)}
             disabled={busy}
           >
             Cancel
