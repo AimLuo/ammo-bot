@@ -3271,6 +3271,14 @@ async fn update_task(
         Some(s) => Patch::Set(s.clone()),
     };
 
+    // When `description` is set, it owns the non-comment body and preserves the
+    // on-disk Comments section — do not also apply `body` (full replace) in the
+    // same request, which would wipe comments before the description write.
+    let body_update = if body.description.is_some() {
+        None
+    } else {
+        body.body
+    };
     let has_changes = body.title.is_some()
         || body.status.is_some()
         || body.priority.is_some()
@@ -3280,7 +3288,7 @@ async fn update_task(
         || !remove_tags.is_empty()
         || !matches!(assignee, Patch::Unchanged)
         || !matches!(position, Patch::Unchanged)
-        || body.body.is_some();
+        || body_update.is_some();
     if has_changes {
         project
             .update_task(
@@ -3295,7 +3303,7 @@ async fn update_task(
                     position,
                     add_tags,
                     remove_tags,
-                    body: body.body,
+                    body: body_update,
                 },
             )
             .map_err(map_core_error)?;
@@ -6099,6 +6107,46 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_task_ignores_comment_headings_inside_fences() {
+        let env = setup_env("comment-fence");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane);
+        let task = project
+            .create_task(
+                "Fence",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                Some(
+                    "# Fence\n\n```\n## Comments\n### 2026-10-10 fake\n```\n\n## Comments\n\n### 2026-10-10 alice\n\nReal\n```\n### 2099-01-01 no\n```\n",
+                ),
+            )
+            .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks/{}", env.project_id, task.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let comments = json["data"]["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["author"], "alice");
+        assert!(comments[0]["body"].as_str().unwrap().contains("### 2099-01-01 no"));
+        assert!(
+            json["data"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("## Comments\n### 2026-10-10 fake")
+        );
     }
 
     #[tokio::test]
