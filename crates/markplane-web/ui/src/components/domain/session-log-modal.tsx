@@ -332,14 +332,18 @@ function RunNavBlock({
   );
 }
 
-function ToolRow({
-  name,
-  input,
+/** One expandable line for all tool_use blocks in an assistant turn. */
+function ToolTurnRow({
+  tools,
 }: {
-  name: string;
-  input: Record<string, unknown>;
+  tools: { name: string; input: Record<string, unknown> }[];
 }) {
   const [open, setOpen] = useState(false);
+  if (tools.length === 0) return null;
+  const summary =
+    tools.length === 1
+      ? `${tools[0]!.name} ${toolSummary(tools[0]!.input)}`.trim()
+      : `${tools.length} tools · ${tools.map((t) => t.name).join(", ")}`;
   return (
     <div className="font-mono text-[11px]">
       <button
@@ -348,13 +352,21 @@ function ToolRow({
         className="flex w-full cursor-pointer items-center gap-1.5 text-left text-muted-foreground hover:text-foreground"
       >
         <Terminal className="size-3 shrink-0" />
-        <span className="font-semibold text-foreground/80">{name}</span>
-        <span className="truncate">{toolSummary(input)}</span>
+        <span className="truncate font-semibold text-foreground/80">
+          {summary}
+        </span>
       </button>
       {open && (
-        <pre className="mt-1 max-h-60 overflow-auto rounded bg-muted p-2 whitespace-pre-wrap break-all">
-          {JSON.stringify(input, null, 2)}
-        </pre>
+        <div className="mt-1 space-y-2">
+          {tools.map((t, i) => (
+            <div key={i}>
+              <div className="text-foreground/80">{t.name}</div>
+              <pre className="max-h-60 overflow-auto rounded bg-muted p-2 whitespace-pre-wrap break-all">
+                {JSON.stringify(t.input, null, 2)}
+              </pre>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -396,23 +408,30 @@ function MessageRow({
       </div>
     );
   }
+  const textBlocks = message.blocks.filter(
+    (b): b is Extract<typeof b, { type: "text" }> => b.type === "text",
+  );
+  const tools = message.blocks
+    .filter(
+      (b): b is Extract<typeof b, { type: "tool_use" }> => b.type === "tool_use",
+    )
+    .map((b) => ({ name: b.name, input: b.input ?? {} }));
+
   return (
     <div className="grid grid-cols-[64px_1fr] gap-2">
       <span className="pt-0.5 text-[10px] font-medium uppercase text-muted-foreground">
         agent
       </span>
       <div className="min-w-0 space-y-1">
-        {message.blocks.map((b, i) =>
-          b.type === "text" ? (
-            show.text && b.text.trim() ? (
+        {show.text &&
+          textBlocks.map((b, i) =>
+            b.text.trim() ? (
               <div key={i} className="text-sm [&_.prose]:text-sm">
                 <MarkdownRenderer content={b.text} />
               </div>
-            ) : null
-          ) : show.tools ? (
-            <ToolRow key={i} name={b.name} input={b.input ?? {}} />
-          ) : null,
-        )}
+            ) : null,
+          )}
+        {show.tools && <ToolTurnRow tools={tools} />}
       </div>
     </div>
   );
@@ -572,7 +591,7 @@ function SessionPane({
           >
             Σ {total.unknown ? "≥" : ""}
             {fmtTokens(total.inputTokens)} in · {fmtTokens(total.outputTokens)}{" "}
-            out · {fmtTokens(total.cacheReadTokens)} cache read
+            out
           </span>
           {transcript?.status === "ok" && (
             <span>
