@@ -66,12 +66,12 @@ export function RunSection({
       {latest ? (
         <LatestRunBlock
           run={latest}
-          earlierCount={earlier.length}
           earlier={earlier}
           onViewSessions={() => setOpen(true)}
         />
       ) : (
         <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">Run</span>
           <span className="text-xs text-muted-foreground">
             No local Run record — it ran on another machine
           </span>
@@ -160,12 +160,10 @@ function ResultIcon({
 
 function LatestRunBlock({
   run,
-  earlierCount,
   earlier,
   onViewSessions,
 }: {
   run: Run;
-  earlierCount: number;
   earlier: Run[];
   onViewSessions: () => void;
 }) {
@@ -174,7 +172,9 @@ function LatestRunBlock({
   const total = sumUsage(run.attempts);
 
   return (
-    <div className="space-y-2 rounded-md border px-3 py-2.5">
+    <div className="space-y-2">
+      <div className="text-sm font-medium">Run</div>
+      <div className="space-y-2 rounded-md border px-3 py-2.5">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <RunBadgeStub run={run} />
@@ -218,9 +218,10 @@ function LatestRunBlock({
 
       <DetailsFold run={run} total={total} />
 
-      {earlierCount > 0 ? (
-        <EarlierRunsFold runs={earlier} count={earlierCount} />
+      {earlier.length > 0 ? (
+        <EarlierRunsFold runs={earlier} count={earlier.length} />
       ) : null}
+      </div>
     </div>
   );
 }

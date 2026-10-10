@@ -116,7 +116,7 @@ export function remnantStatusLine(run: Run): string | null {
   const wtGone = !!run.worktree_removed_at;
   const brGone = !!run.branch_removed_at;
   if (wtGone && brGone) {
-    return `Cleaned up ${fmtDurationFriendly(run.worktree_removed_at!)}`;
+    return `Cleaned up ${fmtTimestamp(run.worktree_removed_at!)}`;
   }
   if (wtGone && !brGone) {
     const blocked = formatCleanupBlocked(run.cleanup_blocked);
@@ -158,8 +158,8 @@ function formatCleanupBlocked(reason: string | null | undefined): string | null 
   }
 }
 
-/** Absolute-ish time for "Cleaned up …" (reuse locale formatting). */
-function fmtDurationFriendly(iso: string): string {
+/** Locale timestamp for "Cleaned up …". */
+function fmtTimestamp(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleString("en-US", {
     month: "short",
@@ -170,6 +170,14 @@ function fmtDurationFriendly(iso: string): string {
   });
 }
 
+/** Start time for the current Stage's elapsed duration (RunBadge). */
+export function currentStageStartedAt(run: Run): string {
+  const stage = run.current_stage;
+  if (!stage) return run.started_at;
+  const first = run.attempts.find((a) => a.stage === stage);
+  return first?.started_at ?? run.started_at;
+}
+
 /** Ending Stage for earlier-runs list (last attempt's stage, else current). */
 export function endingStage(run: Run): Stage | null {
   const last = run.attempts[run.attempts.length - 1];
@@ -178,13 +186,14 @@ export function endingStage(run: Run): Stage | null {
 
 /** Compact status label used until TASK-gtgfz ships RunBadge. */
 export function runStatusStubLabel(run: Run): string {
+  const stageElapsed = fmtDuration(currentStageStartedAt(run), run.ended_at);
   switch (run.status) {
     case "running":
       return run.current_stage
-        ? `${run.current_stage} · ${fmtDuration(run.started_at, null)}`
+        ? `${run.current_stage} · ${stageElapsed}`
         : "running";
     case "merge-queued":
-      return `merge queue · ${fmtDuration(run.started_at, null)}`;
+      return `merge queue · ${stageElapsed}`;
     case "succeeded":
       return "succeeded";
     case "failed":
