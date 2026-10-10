@@ -30,9 +30,10 @@ use markplane_core::{
     EpicStatus, EpicUpdate, EffectiveDispatcherSettings, IdPrefix, LinkAction, LinkRelation, Map,
     MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, Plan, PlanUpdate, Priority,
     Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow,
-    default_comment_author, effective_dispatcher_settings, find_blocked_items, find_frontier_items,
-    parse_id, parse_item_body, split_markdown_sections, validate_concurrency,
-    validate_dispatcher_config, validate_model, validate_timeout_minutes,
+    cursor_data_dir, default_comment_author, effective_dispatcher_settings, find_blocked_items,
+    find_frontier_items, parse_id, parse_item_body, read_session_transcript,
+    split_markdown_sections, validate_concurrency, validate_dispatcher_config, validate_model,
+    validate_timeout_minutes,
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
@@ -531,6 +532,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/graph", get(get_graph_all))
         .route("/api/graph/{id}", get(get_graph_focused))
         .route("/api/runs/{task_id}", get(get_run_record))
+        .route(
+            "/api/runs/{task_id}/sessions/{session_id}",
+            get(get_session_transcript),
+        )
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
@@ -4419,6 +4424,62 @@ async fn get_run_record(
     }
 }
 
+/// `GET /api/runs/{task_id}/sessions/{session_id}` — agent transcript, or unavailable.
+async fn get_session_transcript(
+    Extension(project): Extension<Project>,
+    Path((task_id, session_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
+    let (prefix, _) = parse_id(&task_id).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("Invalid ID format: {}", task_id),
+        )
+    })?;
+    if prefix != markplane_core::IdPrefix::Task {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("sessions are only available for Task IDs, got {}", task_id),
+        ));
+    }
+    if session_id.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            "session_id must not be empty",
+        ));
+    }
+
+    let record = match project.read_run_record(&task_id).map_err(map_core_error)? {
+        Some(r) => r,
+        None => {
+            let value = serde_json::to_value(markplane_core::SessionTranscript::Unavailable {
+                path: String::new(),
+                reason: "No local Run record for this task".into(),
+            })
+            .map_err(|e| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "serialize_error",
+                    &format!("Failed to serialize transcript: {e}"),
+                )
+            })?;
+            return Ok(Json(ApiResponse { data: value }));
+        }
+    };
+
+    let transcript = read_session_transcript(&record, &session_id, &cursor_data_dir());
+    let value = serde_json::to_value(transcript).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "serialize_error",
+            &format!("Failed to serialize transcript: {e}"),
+        )
+    })?;
+    Ok(Json(ApiResponse { data: value }))
+}
+
 fn build_graph(project: &Project, focus_id: Option<&str>) -> anyhow::Result<GraphResponse> {
     use std::collections::HashSet;
 
@@ -5292,6 +5353,464 @@ mod tests {
             1000
         );
         assert_eq!(json["data"]["runs"][0]["attempts"][1]["result"], "timeout");
+    }
+
+    /// Serialize env mutation for CURSOR_DATA_DIR session-transcript tests.
+    fn cursor_data_dir_guard(value: Option<&std::path::Path>) -> impl Drop {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        struct EnvGuard {
+            prev: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.prev {
+                        Some(v) => std::env::set_var("CURSOR_DATA_DIR", v),
+                        None => std::env::remove_var("CURSOR_DATA_DIR"),
+                    }
+                }
+            }
+        }
+        let prev = std::env::var_os("CURSOR_DATA_DIR");
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("CURSOR_DATA_DIR", v),
+                None => std::env::remove_var("CURSOR_DATA_DIR"),
+            }
+        }
+        EnvGuard {
+            prev,
+            _lock: guard,
+        }
+    }
+
+    fn write_session_fixture(
+        cursor_data: &std::path::Path,
+        workspace: &str,
+        session_id: &str,
+        contents: &str,
+    ) -> PathBuf {
+        let slug = markplane_core::workspace_transcript_slug(workspace);
+        let path = cursor_data
+            .join("projects")
+            .join(slug)
+            .join("agent-transcripts")
+            .join(session_id)
+            .join(format!("{session_id}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn sample_jsonl() -> &'static str {
+        concat!(
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}"#,
+            "\n",
+            r#"{"type":"turn_ended","status":"success"}"#,
+            "\n",
+        )
+    }
+
+    #[tokio::test]
+    async fn get_session_transcript_reads_fixture_via_workspace_slug() {
+        use markplane_core::{
+            Attempt, AttemptResult, Run, RunRecord, RunStatus, Stage, Trigger, write_run_record,
+        };
+
+        let env = setup_env("sess-ok");
+        let cursor = env._tmp.path().join("cursor-data");
+        let _guard = cursor_data_dir_guard(Some(&cursor));
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Session ok",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspace = format!(
+            "/Users/chuck/agent-space/ammo-bot/.worktrees/{}",
+            task.id
+        );
+        let session_id = "sess-abc12";
+        let expected_path = write_session_fixture(&cursor, &workspace, session_id, sample_jsonl());
+
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Succeeded,
+                    current_stage: Some(Stage::Implement),
+                    worktree: workspace.clone(),
+                    branch: format!("agent/{}", task.id),
+                    base_sha: "abc".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: Some("2026-10-10T10:00:00+08:00".into()),
+                    failure_reason: None,
+                    worktree_removed_at: Some("2026-10-10T11:00:00+08:00".into()),
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![Attempt {
+                        stage: Stage::Implement,
+                        model: "claude-opus-4.5".into(),
+                        timeout_secs: None,
+                        session_id: Some(session_id.into()),
+                        workspace,
+                        transcript_path: None,
+                        pid: None,
+                        process_group_id: None,
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:00:01+08:00".into(),
+                        ended_at: Some("2026-10-10T09:30:00+08:00".into()),
+                        exit_code: Some(0),
+                        verdict: None,
+                        result: Some(AttemptResult::Ok),
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: None,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/p/{}/runs/{}/sessions/{}",
+                env.project_id, task.id, session_id
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["status"], "ok");
+        assert_eq!(
+            json["data"]["path"].as_str().unwrap(),
+            expected_path.to_str().unwrap()
+        );
+        assert_eq!(json["data"]["ended"], "success");
+        assert_eq!(json["data"]["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(json["data"]["messages"][0]["role"], "user");
+        assert_eq!(
+            json["data"]["messages"][0]["blocks"][0]["text"],
+            "hello"
+        );
+        assert_eq!(
+            json["data"]["messages"][1]["blocks"][1]["name"],
+            "Shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_session_transcript_prefers_resolved_transcript_path() {
+        use markplane_core::{
+            Attempt, AttemptResult, Run, RunRecord, RunStatus, Stage, Trigger, write_run_record,
+        };
+
+        let env = setup_env("sess-path");
+        let cursor = env._tmp.path().join("cursor-data");
+        let _guard = cursor_data_dir_guard(Some(&cursor));
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Session path",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let session_id = "sess-direct";
+        let direct = env._tmp.path().join("direct").join(format!("{session_id}.jsonl"));
+        fs::create_dir_all(direct.parent().unwrap()).unwrap();
+        fs::write(&direct, sample_jsonl()).unwrap();
+
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Succeeded,
+                    current_stage: Some(Stage::Implement),
+                    worktree: "/tmp/gone-worktree".into(),
+                    branch: format!("agent/{}", task.id),
+                    base_sha: "abc".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: None,
+                    failure_reason: None,
+                    worktree_removed_at: Some("2026-10-10T11:00:00+08:00".into()),
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![Attempt {
+                        stage: Stage::Implement,
+                        model: "claude-opus-4.5".into(),
+                        timeout_secs: None,
+                        session_id: Some(session_id.into()),
+                        workspace: "/tmp/gone-worktree".into(),
+                        transcript_path: Some(direct.to_str().unwrap().into()),
+                        pid: None,
+                        process_group_id: None,
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:00:01+08:00".into(),
+                        ended_at: None,
+                        exit_code: None,
+                        verdict: None,
+                        result: Some(AttemptResult::Ok),
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: None,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/p/{}/runs/{}/sessions/{}",
+                env.project_id, task.id, session_id
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["status"], "ok");
+        assert_eq!(
+            json["data"]["path"].as_str().unwrap(),
+            direct.to_str().unwrap()
+        );
+        assert_eq!(json["data"]["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_session_transcript_missing_file_returns_unavailable() {
+        use markplane_core::{
+            Attempt, AttemptResult, Run, RunRecord, RunStatus, Stage, Trigger, write_run_record,
+        };
+
+        let env = setup_env("sess-miss");
+        let cursor = env._tmp.path().join("cursor-data");
+        let _guard = cursor_data_dir_guard(Some(&cursor));
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Session miss",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspace = format!("/tmp/.worktrees/{}", task.id);
+        let session_id = "sess-missing";
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Failed,
+                    current_stage: Some(Stage::Implement),
+                    worktree: workspace.clone(),
+                    branch: format!("agent/{}", task.id),
+                    base_sha: "abc".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: None,
+                    failure_reason: None,
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![Attempt {
+                        stage: Stage::Implement,
+                        model: "claude-opus-4.5".into(),
+                        timeout_secs: None,
+                        session_id: Some(session_id.into()),
+                        workspace,
+                        transcript_path: None,
+                        pid: None,
+                        process_group_id: None,
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:00:01+08:00".into(),
+                        ended_at: None,
+                        exit_code: None,
+                        verdict: None,
+                        result: Some(AttemptResult::Failed),
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: None,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/p/{}/runs/{}/sessions/{}",
+                env.project_id, task.id, session_id
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["status"], "unavailable");
+        assert!(json["data"]["path"].as_str().unwrap().contains(session_id));
+        assert!(json["data"]["reason"].as_str().unwrap().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn get_session_transcript_truncated_last_line_returns_unavailable() {
+        use markplane_core::{
+            Attempt, Run, RunRecord, RunStatus, Stage, Trigger, write_run_record,
+        };
+
+        let env = setup_env("sess-trunc");
+        let cursor = env._tmp.path().join("cursor-data");
+        let _guard = cursor_data_dir_guard(Some(&cursor));
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Session trunc",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspace = format!("/tmp/.worktrees/{}", task.id);
+        let session_id = "sess-trunc";
+        let truncated = concat!(
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"hi"#,
+            "\n",
+        );
+        write_session_fixture(&cursor, &workspace, session_id, truncated);
+
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Running,
+                    current_stage: Some(Stage::Implement),
+                    worktree: workspace.clone(),
+                    branch: format!("agent/{}", task.id),
+                    base_sha: "abc".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: None,
+                    failure_reason: None,
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![Attempt {
+                        stage: Stage::Implement,
+                        model: "claude-opus-4.5".into(),
+                        timeout_secs: None,
+                        session_id: Some(session_id.into()),
+                        workspace,
+                        transcript_path: None,
+                        pid: None,
+                        process_group_id: None,
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:00:01+08:00".into(),
+                        ended_at: None,
+                        exit_code: None,
+                        verdict: None,
+                        result: None,
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: None,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/p/{}/runs/{}/sessions/{}",
+                env.project_id, task.id, session_id
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["status"], "unavailable");
+        assert!(
+            json["data"]["reason"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("truncat")
+                || json["data"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("parse")
+        );
     }
 
     #[test]

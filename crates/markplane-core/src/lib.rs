@@ -14,6 +14,7 @@ pub mod references;
 pub mod runs;
 pub mod sections;
 pub mod templates;
+pub mod transcripts;
 
 pub use comments::{
     Comment, ParsedBody, default_comment_author, demote_comment_headings, parse_item_body,
@@ -49,6 +50,11 @@ pub use references::{
 pub use runs::{
     Attempt, AttemptResult, Run, RunRecord, RunStatus, STAGE_ORDER, Stage, Trigger, Usage,
     ensure_runs_dir, read_run_record, run_record_path, write_run_record,
+};
+pub use transcripts::{
+    SessionTranscript, TranscriptBlock, TranscriptMessage, cursor_data_dir,
+    read_session_transcript, read_transcript_file, resolve_transcript_path,
+    workspace_transcript_slug,
 };
 pub use sections::{
     REQUIRED_MAP_SECTIONS, append_line_to_section, missing_map_sections, set_answer_section,

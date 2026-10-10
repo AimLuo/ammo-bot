@@ -220,6 +220,26 @@ export interface RunRecord {
   runs: Run[];
 }
 
+export type TranscriptBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; name: string; input: Record<string, unknown> };
+
+export interface TranscriptMessage {
+  idx: number;
+  role: "user" | "assistant" | string;
+  blocks: TranscriptBlock[];
+}
+
+/** `GET /api/runs/{task_id}/sessions/{session_id}` — ok or unavailable, never a hard error. */
+export type SessionTranscript =
+  | {
+      status: "ok";
+      path: string;
+      messages: TranscriptMessage[];
+      ended: string | null;
+    }
+  | { status: "unavailable"; path: string; reason: string };
+
 export interface Epic {
   id: string;
   title: string;
