@@ -1,5 +1,6 @@
 mod add;
 mod archive;
+mod certs;
 mod check;
 mod claude_md;
 mod comment;
@@ -399,9 +400,12 @@ pub enum Commands {
         /// Open browser automatically
         #[arg(long)]
         open: bool,
-        /// Dev mode: API only, no static files
+        /// Dev mode: API only over HTTP (no static files, no TLS)
         #[arg(long)]
         dev: bool,
+        /// Disable TLS and serve plain HTTP (escape hatch)
+        #[arg(long)]
+        no_tls: bool,
     },
 
     /// Run the MCP (Model Context Protocol) server over stdio
@@ -560,9 +564,14 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
         Commands::Graph { id, depth } => graph::run(id, depth),
         Commands::ClaudeMd => claude_md::run(),
         Commands::Dashboard => dashboard::run(),
-        Commands::Serve { port, open, dev } => {
+        Commands::Serve {
+            port,
+            open,
+            dev,
+            no_tls,
+        } => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(serve::run(port, open, dev))
+            rt.block_on(serve::run(port, open, dev, no_tls))
         }
         Commands::Mcp { project } => mcp::run(project),
     }

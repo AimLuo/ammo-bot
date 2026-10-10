@@ -1,16 +1,22 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::convert::Infallible;
-
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, Query, Request, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json};
+
+#[cfg(test)]
+use std::convert::Infallible;
+#[cfg(test)]
+use axum::extract::Request;
+#[cfg(test)]
+use axum::response::Response;
 use axum::routing::{get, post};
 use futures::SinkExt;
 use futures::stream::StreamExt;
@@ -45,6 +51,8 @@ struct AppState {
     ws_tx: broadcast::Sender<String>,
     port: u16,
     dev: bool,
+    /// When true, CORS / WebSocket Origin checks use `https://`.
+    use_tls: bool,
 }
 
 // ── Documentation Manifest ───────────────────────────────────────────────
@@ -88,7 +96,7 @@ const DOC_MANIFEST: &[DocEntry] = &[
     },
 ];
 
-pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
+pub async fn run(port: u16, open: bool, dev: bool, no_tls: bool) -> anyhow::Result<()> {
     let project = Project::from_current_dir()?;
 
     // Full sync on startup to ensure derived files are up-to-date
@@ -105,63 +113,131 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
         }
     });
 
-    let app = build_app(project, ws_tx, port, dev);
+    let use_tls = !dev && !no_tls;
+    let state = Arc::new(AppState {
+        ws_tx,
+        port,
+        dev,
+        use_tls,
+    });
+    // hyper::Incoming so axum-server / axum::serve can hand off request bodies.
+    let app = layer_project::<hyper::body::Incoming>(project, build_router(state));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let url = format!("http://localhost:{}", port);
+    let scheme = if use_tls { "https" } else { "http" };
+    let ws_scheme = if use_tls { "wss" } else { "ws" };
+    let url = format!("{scheme}://localhost:{port}");
 
-    println!("Markplane web UI starting on {}", url);
-    if dev {
-        println!("Running in dev mode — API only (use Next.js dev server for UI)");
-    } else {
+    if use_tls {
+        let certs_dir = super::certs::markplane_certs_dir()?;
+        let ensured = super::certs::ensure_certs(&certs_dir)?;
+        if ensured.renewed {
+            println!(
+                "Generated localhost TLS certificate at {}",
+                ensured.cert_path.display()
+            );
+            println!("{}", super::certs::trust_instructions(&ensured.cert_path));
+            let _ = std::io::stdout().flush();
+        }
+
+        println!("Markplane web UI starting on {url}");
         #[cfg(feature = "embed-ui")]
         println!("Serving embedded UI from binary");
         #[cfg(not(feature = "embed-ui"))]
         println!("Serving static UI from crates/markplane-web/ui/out/");
-    }
-    println!("WebSocket available at ws://localhost:{}/ws", port);
+        println!("WebSocket available at {ws_scheme}://localhost:{port}/ws");
+        let _ = std::io::stdout().flush();
 
-    if open {
-        let _ = open::that(&url);
-    }
+        if open {
+            let _ = open::that(&url);
+        }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    // MapRequestLayer sits outside the Router (before route matching); that
-    // requires into_make_service rather than passing the Router directly.
-    axum::serve(
-        listener,
-        axum::ServiceExt::<Request>::into_make_service(app),
-    )
-    .await?;
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &ensured.cert_path,
+            &ensured.key_path,
+        )
+        .await?;
+        // MapRequestLayer sits outside the Router (before route matching); that
+        // requires into_make_service rather than passing the Router directly.
+        axum_server::bind_rustls(addr, tls)
+            .serve(axum::ServiceExt::into_make_service(app))
+            .await?;
+    } else {
+        println!("Markplane web UI starting on {url}");
+        if dev {
+            println!("Running in dev mode — API only (use Next.js dev server for UI)");
+        } else {
+            #[cfg(feature = "embed-ui")]
+            println!("Serving embedded UI from binary");
+            #[cfg(not(feature = "embed-ui"))]
+            println!("Serving static UI from crates/markplane-web/ui/out/");
+            if no_tls {
+                println!("TLS disabled (--no-tls); serving plain HTTP");
+            }
+        }
+        println!("WebSocket available at {ws_scheme}://localhost:{port}/ws");
+        let _ = std::io::stdout().flush();
+
+        if open {
+            let _ = open::that(&url);
+        }
+
+        // Use axum-server for HTTP too so the service body type matches TLS
+        // (hyper::Incoming). MapRequestLayer requires into_make_service.
+        axum_server::bind(addr)
+            .serve(axum::ServiceExt::into_make_service(app))
+            .await?;
+    }
 
     Ok(())
 }
 
 /// Inject the active [`Project`] into request extensions before route matching.
-fn inject_project(project: Project) -> impl Fn(Request) -> Request + Clone {
-    move |mut req: Request| {
+fn inject_project<B>(
+    project: Project,
+) -> impl Fn(axum::http::Request<B>) -> axum::http::Request<B> + Clone {
+    move |mut req: axum::http::Request<B>| {
         req.extensions_mut().insert(project.clone());
         req
     }
 }
 
+/// Wrap a router with the project-injection layer (body-type generic).
+fn layer_project<B>(
+    project: Project,
+    router: Router,
+) -> tower::util::MapRequest<
+    Router,
+    impl Fn(axum::http::Request<B>) -> axum::http::Request<B> + Clone,
+> {
+    tower::Layer::layer(
+        &tower::util::MapRequestLayer::new(inject_project::<B>(project)),
+        router,
+    )
+}
+
 /// Assemble the serve Router and wrap it with the project-injection layer.
 ///
 /// The layer runs before route matching so handlers can read [`Project`] from
-/// request extensions instead of global state.
+/// request extensions instead of global state. Boxed for in-process oneshot tests.
+#[cfg(test)]
 fn build_app(
     project: Project,
     ws_tx: broadcast::Sender<String>,
     port: u16,
     dev: bool,
+    use_tls: bool,
 ) -> tower::util::BoxCloneService<Request, Response, Infallible> {
-    let state = Arc::new(AppState { ws_tx, port, dev });
-    let router = build_router(state);
-    let app = tower::Layer::layer(
-        &tower::util::MapRequestLayer::new(inject_project(project)),
-        router,
-    );
-    tower::util::BoxCloneService::new(app)
+    let state = Arc::new(AppState {
+        ws_tx,
+        port,
+        dev,
+        use_tls,
+    });
+    tower::util::BoxCloneService::new(layer_project::<axum::body::Body>(
+        project,
+        build_router(state),
+    ))
 }
 
 fn build_router(state: Arc<AppState>) -> Router {
@@ -196,10 +272,11 @@ fn build_router(state: Arc<AppState>) -> Router {
     let cors = if state.dev {
         CorsLayer::permissive()
     } else {
-        let localhost = format!("http://localhost:{}", state.port)
+        let scheme = if state.use_tls { "https" } else { "http" };
+        let localhost = format!("{scheme}://localhost:{}", state.port)
             .parse::<HeaderValue>()
             .unwrap();
-        let loopback = format!("http://127.0.0.1:{}", state.port)
+        let loopback = format!("{scheme}://127.0.0.1:{}", state.port)
             .parse::<HeaderValue>()
             .unwrap();
         CorsLayer::new()
@@ -392,8 +469,9 @@ async fn ws_handler(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
     // Validate Origin header in non-dev mode
     if !state.dev {
-        let allowed_localhost = format!("http://localhost:{}", state.port);
-        let allowed_loopback = format!("http://127.0.0.1:{}", state.port);
+        let scheme = if state.use_tls { "https" } else { "http" };
+        let allowed_localhost = format!("{scheme}://localhost:{}", state.port);
+        let allowed_loopback = format!("{scheme}://127.0.0.1:{}", state.port);
         match headers.get(axum::http::header::ORIGIN) {
             Some(origin) => {
                 let origin_str = origin.to_str().unwrap_or("");
@@ -406,7 +484,7 @@ async fn ws_handler(
                 }
             }
             None => {
-                // No Origin header — allow (same-origin requests may omit it)
+                // No Origin header — allow (same-origin requests may omit it).
             }
         }
     }
@@ -3152,7 +3230,7 @@ mod tests {
     async fn summary_returns_project_name_from_temp_dir() {
         let (_tmp, project) = setup_temp_project();
         let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true);
+        let app = build_app(project, ws_tx, 4200, true, false);
 
         let (status, json) = oneshot_json(&app, "GET", "/api/summary").await;
         assert_eq!(status, StatusCode::OK);
@@ -3179,7 +3257,7 @@ mod tests {
         let task_id = task.id.clone();
 
         let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true);
+        let app = build_app(project, ws_tx, 4200, true, false);
 
         let (status, list) = oneshot_json(&app, "GET", "/api/tasks").await;
         assert_eq!(status, StatusCode::OK);
@@ -3201,7 +3279,7 @@ mod tests {
     async fn config_returns_project_settings() {
         let (_tmp, project) = setup_temp_project();
         let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true);
+        let app = build_app(project, ws_tx, 4200, true, false);
 
         let (status, json) = oneshot_json(&app, "GET", "/api/config").await;
         assert_eq!(status, StatusCode::OK);
@@ -3212,7 +3290,7 @@ mod tests {
     async fn websocket_handshake_headers_reach_upgrade() {
         let (_tmp, project) = setup_temp_project();
         let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true);
+        let app = build_app(project, ws_tx, 4200, true, false);
 
         // oneshot has no hyper connection-upgrade state, so a valid handshake
         // cannot return 101. Getting 426 (not 404/400) means the /ws route ran
