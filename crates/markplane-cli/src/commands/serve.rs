@@ -2276,15 +2276,23 @@ async fn load_dispatcher_config(
     }
 }
 
-/// Resolve effective concurrency from serve.json with last-good / defaults.
+/// Resolve effective concurrency from serve.json.
+///
+/// Unreadable / unparseable `serve.json` → default. Out-of-range values after a
+/// successful parse keep last-good when available.
 async fn load_concurrency(state: &AppState) -> u32 {
+    use super::serve_dispatcher::ConcurrencyReadError;
     match super::serve_dispatcher::read_concurrency(&state.config_dir) {
         Ok(value) => {
             let mut guard = state.concurrency_last_good.lock().await;
             *guard = Some(value);
             value
         }
-        Err(msg) => {
+        Err(ConcurrencyReadError::Unreadable(msg)) => {
+            eprintln!("warning: {msg}; using default concurrency");
+            DEFAULT_CONCURRENCY
+        }
+        Err(ConcurrencyReadError::Invalid(msg)) => {
             eprintln!("warning: {msg}; using last-good or default concurrency");
             let guard = state.concurrency_last_good.lock().await;
             guard.unwrap_or(DEFAULT_CONCURRENCY)
@@ -2406,8 +2414,14 @@ async fn patch_config(
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<ApiResponse<ConfigResponse>>, (StatusCode, Json<ApiError>)> {
     let mut config = project.load_config().map_err(map_core_error)?;
-    // Prefer last-good Dispatcher settings when the on-disk values are illegal.
-    config.dispatcher = load_dispatcher_config(&state, &project).await;
+    // Keep on-disk dispatcher bytes unless this PATCH updates them. Serving
+    // uses last-good when on-disk values are illegal; do not heal the file on
+    // unrelated saves.
+    let disk_dispatcher = config.dispatcher.clone();
+    let safe_dispatcher = load_dispatcher_config(&state, &project).await;
+    if body.dispatcher.is_some() {
+        config.dispatcher = safe_dispatcher;
+    }
 
     // Helper: validate a type list — trim, lowercase, reject empty/duplicate, require ≥1
     fn validate_types(
@@ -2556,6 +2570,7 @@ async fn patch_config(
         config.workflows.task = new_workflow;
     }
 
+    let dispatcher_patched = body.dispatcher.is_some();
     if let Some(dispatcher) = body.dispatcher {
         if let Some(push_after_merge) = dispatcher.push_after_merge {
             config.dispatcher.push_after_merge = Some(push_after_merge);
@@ -2574,14 +2589,19 @@ async fn patch_config(
         validate_dispatcher_config(&config.dispatcher).map_err(|e| {
             error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
         })?;
+    } else {
+        config.dispatcher = disk_dispatcher;
     }
 
     project.save_config(&config).map_err(map_core_error)?;
 
-    {
+    if dispatcher_patched {
         let mut guard = state.dispatcher_last_good.lock().await;
         guard.insert(dispatcher_key(&project), config.dispatcher.clone());
     }
+
+    // Response always shows effective (validated / last-good) dispatcher values.
+    config.dispatcher = load_dispatcher_config(&state, &project).await;
 
     Ok(Json(ApiResponse {
         data: config_to_response(config),
@@ -5204,12 +5224,12 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "validation_error");
 
-        // Unreadable serve.json → defaults (or last-good=7 from earlier valid write).
+        // Unreadable serve.json → defaults (not last-good).
         fs::write(env.config_dir.join("serve.json"), "{{{").unwrap();
         let (status, json) =
             oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["data"]["concurrency"], 7);
+        assert_eq!(json["data"]["concurrency"], 20);
     }
 
     #[tokio::test]

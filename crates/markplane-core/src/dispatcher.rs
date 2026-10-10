@@ -127,7 +127,7 @@ pub fn validate_model(raw: &str) -> Result<String, DispatcherValidationError> {
             message: "Model must not contain whitespace".into(),
         });
     }
-    if model.len() > MAX_MODEL_LEN {
+    if model.chars().count() > MAX_MODEL_LEN {
         return Err(DispatcherValidationError {
             message: format!("Model must be {MAX_MODEL_LEN} characters or fewer"),
         });

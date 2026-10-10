@@ -28,20 +28,39 @@ pub fn serve_json_path(config_dir: &Path) -> PathBuf {
     config_dir.join("serve.json")
 }
 
+/// Why reading concurrency from `serve.json` failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConcurrencyReadError {
+    /// File missing is OK (defaults); this is IO / JSON parse failure.
+    Unreadable(String),
+    /// JSON parsed but `concurrency` is out of range.
+    Invalid(String),
+}
+
+impl std::fmt::Display for ConcurrencyReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(msg) | Self::Invalid(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Read concurrency from `serve.json`.
 ///
 /// - Missing file → default 20 (no warning).
-/// - Unreadable / invalid JSON / out-of-range → `Err` message for the caller to
-///   log a warning and fall back to last-good or default.
-pub fn read_concurrency(config_dir: &Path) -> Result<u32, String> {
+/// - Unreadable / invalid JSON → [`ConcurrencyReadError::Unreadable`].
+/// - Out-of-range → [`ConcurrencyReadError::Invalid`].
+pub fn read_concurrency(config_dir: &Path) -> Result<u32, ConcurrencyReadError> {
     let path = serve_json_path(config_dir);
     if !path.exists() {
         return Ok(DEFAULT_CONCURRENCY);
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read serve.json: {e}"))?;
-    let file: ServeFile = serde_json::from_str(&content)
-        .map_err(|e| format!("cannot parse serve.json: {e}"))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        ConcurrencyReadError::Unreadable(format!("cannot read serve.json: {e}"))
+    })?;
+    let file: ServeFile = serde_json::from_str(&content).map_err(|e| {
+        ConcurrencyReadError::Unreadable(format!("cannot parse serve.json: {e}"))
+    })?;
     let Some(concurrency) = file
         .dispatcher
         .as_ref()
@@ -49,7 +68,8 @@ pub fn read_concurrency(config_dir: &Path) -> Result<u32, String> {
     else {
         return Ok(DEFAULT_CONCURRENCY);
     };
-    validate_concurrency(concurrency).map_err(|e| e.message)?;
+    validate_concurrency(concurrency)
+        .map_err(|e| ConcurrencyReadError::Invalid(e.message))?;
     Ok(concurrency)
 }
 
@@ -163,7 +183,10 @@ mod tests {
     fn unreadable_serve_json_errors() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(serve_json_path(tmp.path()), "not-json{{{").unwrap();
-        assert!(read_concurrency(tmp.path()).is_err());
+        assert!(matches!(
+            read_concurrency(tmp.path()),
+            Err(ConcurrencyReadError::Unreadable(_))
+        ));
     }
 
     #[test]
@@ -174,6 +197,9 @@ mod tests {
             r#"{ "dispatcher": { "concurrency": 0 } }"#,
         )
         .unwrap();
-        assert!(read_concurrency(tmp.path()).is_err());
+        assert!(matches!(
+            read_concurrency(tmp.path()),
+            Err(ConcurrencyReadError::Invalid(_))
+        ));
     }
 }
