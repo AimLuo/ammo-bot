@@ -585,40 +585,52 @@ async fn run_agent(
     });
 
     let wait_handle = tokio::task::spawn_blocking(move || child.wait());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    tokio::pin!(wait_handle);
 
-    // Persist session_id as soon as system/init arrives.
-    let sid_project_root = proj.project.root().to_path_buf();
-    let sid_task_id = task_id.to_string();
-    let sid_ws = proj.ws_tx.clone();
-    let sid_writer = tokio::spawn(async move {
-        if let Some(sid) = sid_rx.recv().await
-            && let Ok(Some(mut rec)) = read_run_record(&sid_project_root, &sid_task_id)
-            && let Some(run) = rec.runs.last_mut()
-            && let Some(attempt) = run.attempts.last_mut()
-            && attempt.session_id.is_none()
-        {
-            attempt.session_id = Some(sid);
-            let snap = run.clone();
-            let _ = write_run_record(&sid_project_root, &sid_task_id, &rec);
-            broadcast_run_changed(&sid_ws, &sid_task_id, &snap);
+    enum WaitDone {
+        Finished(Result<std::process::ExitStatus, String>),
+        TimedOut,
+    }
+    let mut sid_open = true;
+    let wait_done = loop {
+        tokio::select! {
+            biased;
+            sid = sid_rx.recv(), if sid_open => {
+                match sid {
+                    Some(sid) => {
+                        if let Some(a) = run.attempts.last_mut()
+                            && a.session_id.is_none()
+                        {
+                            a.session_id = Some(sid);
+                            update_latest_run(record, run);
+                            persist_run(proj, task_id, record, run).await?;
+                        }
+                    }
+                    None => sid_open = false,
+                }
+            }
+            status = &mut wait_handle => {
+                break WaitDone::Finished(
+                    status
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| format!("wait: {e}")),
+                );
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                break WaitDone::TimedOut;
+            }
         }
-    });
+    };
 
-    let timed = tokio::time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
-        wait_handle,
-    )
-    .await;
-
-    let (exit_code, events, session_id, stderr_tail) = match timed {
-        Ok(Ok(Ok(status))) => {
+    let (exit_code, events, session_id, stderr_tail) = match wait_done {
+        WaitDone::Finished(Ok(status)) => {
             let (events, session_id) = reader_handle.await.map_err(|e| e.to_string())?;
             let stderr_tail = stderr_handle.await.unwrap_or_default();
             (status.code().unwrap_or(-1), events, session_id, stderr_tail)
         }
-        Ok(Ok(Err(e))) => return Err(format!("wait: {e}")),
-        Ok(Err(e)) => return Err(e.to_string()),
-        Err(_) => {
+        WaitDone::Finished(Err(e)) => return Err(e),
+        WaitDone::TimedOut => {
             #[cfg(unix)]
             {
                 unsafe {
@@ -635,7 +647,6 @@ async fn run_agent(
             }
             let _ = reader_handle.await;
             let stderr_tail = stderr_handle.await.unwrap_or_default();
-            let _ = sid_writer.await;
             if let Some(a) = run.attempts.last_mut() {
                 a.ended_at = Some(Utc::now().to_rfc3339());
                 a.result = Some(AttemptResult::Timeout);
@@ -651,7 +662,6 @@ async fn run_agent(
             });
         }
     };
-    let _ = sid_writer.await;
 
     let verdict = verdict_from_events(&events);
     let (usage, duration_api_ms) = usage_from_events(&events);
@@ -663,7 +673,9 @@ async fn run_agent(
     };
 
     if let Some(a) = run.attempts.last_mut() {
-        a.session_id = session_id.or(a.session_id.clone());
+        if a.session_id.is_none() {
+            a.session_id = session_id;
+        }
         a.ended_at = Some(Utc::now().to_rfc3339());
         a.exit_code = Some(exit_code);
         a.verdict = verdict.clone();
@@ -727,13 +739,25 @@ async fn success_close(
         return Ok(());
     }
 
-    // Comment records whether we *will* push (setting), then commit ticket, then push once.
-    let want_push = proj.settings.push_after_merge && !run.pushed;
+    // Push merge commits first (ticket file may still be dirty), so the success
+    // comment can record the real push outcome; then commit the ticket once and
+    // push again to publish that commit when the first push succeeded.
+    let mut pushed = run.pushed;
+    if proj.settings.push_after_merge && !run.pushed {
+        match git_run(&proj.project_dir, &["push", "origin", "HEAD"]) {
+            Ok(()) => pushed = true,
+            Err(e) => {
+                eprintln!("dispatcher: push failed for {task_id}: {e}");
+                pushed = false;
+            }
+        }
+    }
+
     let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
     let already_commented = doc.body.contains(&format!("`{merge_sha}`"))
         && doc.body.contains("**Merged**");
     if !already_commented {
-        let flag = if want_push { "yes" } else { "no" };
+        let flag = if pushed { "yes" } else { "no" };
         let comment_text =
             format!("**Merged** into `{target_branch}` at `{merge_sha}` · pushed: {flag}");
         proj.project
@@ -754,16 +778,10 @@ async fn success_close(
         git_run(&proj.project_dir, &["add", "--", &rel_str])?;
         let msg = format!("Mark ticket {task_id} done\n\nRefs: {task_id}");
         git_run(&proj.project_dir, &["commit", "-m", &msg])?;
-    }
-
-    let mut pushed = run.pushed;
-    if want_push {
-        match git_run(&proj.project_dir, &["push", "origin", "HEAD"]) {
-            Ok(()) => pushed = true,
-            Err(e) => {
-                eprintln!("dispatcher: push failed for {task_id}: {e}");
-                pushed = false;
-            }
+        if pushed
+            && let Err(e) = git_run(&proj.project_dir, &["push", "origin", "HEAD"])
+        {
+            eprintln!("dispatcher: ticket push failed for {task_id}: {e}");
         }
     }
 

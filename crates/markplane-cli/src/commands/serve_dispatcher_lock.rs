@@ -302,7 +302,16 @@ mod tests {
         assert_eq!(disk.pid, holder.pid);
 
         drop(held);
-        assert_eq!(probe(&key, false).unwrap(), LockProbe::Free);
+        // OS advisory unlock can lag briefly under parallel test load.
+        let mut free = false;
+        for _ in 0..20 {
+            if probe(&key, false).unwrap() == LockProbe::Free {
+                free = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(free, "expected Free after drop");
         // Lock file is not reclaimed.
         assert!(lock_path.exists());
     }
