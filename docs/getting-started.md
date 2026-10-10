@@ -4,7 +4,7 @@ This guide walks you through setting up Markplane and managing your project usin
 
 ## Prerequisites
 
-See the [Markplane README](https://github.com/zerowand01/markplane#installation) for installation instructions. Verify the installation by running:
+See the [Markplane README](../README.md#installation) for installation instructions. Verify the installation by running:
 
 ```bash
 markplane --version

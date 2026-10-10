@@ -73,22 +73,16 @@ See the [AI Integration Guide](docs/ai-integration.md) for the full context laye
 
 ## Installation
 
-This fork ships **source installs only** (no Homebrew tap, release tarballs, or `install.sh` support). Upstream packaging files may still exist in-tree; they are not the supported path here.
-
-### Build from source
-
-Requires Rust 1.93.0+. To include the web UI, also requires Node.js 24. Versions are pinned in [`mise.toml`](mise.toml) — with [mise](https://mise.jdx.dev/): `mise trust && mise install`.
+### Shell script (macOS and Linux)
 
 ```bash
-git clone <url-of-this-repository>
-cd ammo-bot   # or your local checkout name
+curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/integrate/EPIC-7m4ss/install.sh | sh
+```
 
-# CLI only
-cargo install --path crates/markplane-cli
+Downloads the latest release, verifies the SHA256 checksum, and installs to `~/.local/bin/`. Customize with environment variables:
 
-# CLI + Web UI (single binary)
-cd crates/markplane-web/ui && npm install && npm run build && cd ../../..
-cargo install --path crates/markplane-cli --features embed-ui
+```bash
+curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/integrate/EPIC-7m4ss/install.sh | INSTALL_DIR=/usr/local/bin sh
 ```
 
 Verify the fork build: `markplane --version` should report a `+skills.N` suffix (e.g. `0.1.4+skills.1`).

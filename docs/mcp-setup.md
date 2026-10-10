@@ -4,7 +4,7 @@ MCP (Model Context Protocol) is the standard protocol for connecting AI coding t
 
 ## Installation
 
-The MCP server is built into the `markplane` CLI as the `mcp` subcommand — no separate installation needed. See the [Markplane README](https://github.com/zerowand01/markplane#installation) for installation instructions. Verify it's available:
+The MCP server is built into the `markplane` CLI as the `mcp` subcommand — no separate installation needed. See the [Markplane README](../README.md#installation) for installation instructions. Verify it's available:
 
 ```bash
 markplane mcp --help
