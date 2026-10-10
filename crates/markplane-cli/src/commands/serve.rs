@@ -26,10 +26,13 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use markplane_core::{
-    Effort, Epic, EpicStatus, EpicUpdate, LinkAction, LinkRelation, Map, MarkplaneDocument,
-    MarkplaneError, Note, NoteUpdate, Patch, Plan, PlanUpdate, Priority, Project, QueryFilter,
-    ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow, find_blocked_items,
-    find_frontier_items, parse_id, split_markdown_sections,
+    AgentModel, DEFAULT_CONCURRENCY, DispatcherConfig, DispatcherStageConfig, Effort, Epic,
+    EpicStatus, EpicUpdate, EffectiveDispatcherSettings, LinkAction, LinkRelation, Map,
+    MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, Plan, PlanUpdate, Priority,
+    Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow,
+    effective_dispatcher_settings, find_blocked_items, find_frontier_items, parse_id,
+    split_markdown_sections, validate_concurrency, validate_dispatcher_config, validate_model,
+    validate_timeout_minutes,
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
@@ -73,7 +76,14 @@ struct AppState {
     use_tls: bool,
     /// Optional HOME override (tests); production leaves this `None`.
     home_override: Option<PathBuf>,
+    /// Override for the `agent` binary (tests); `None` → `"agent"` on PATH.
+    agent_bin: Option<PathBuf>,
     runtimes: Mutex<HashMap<String, Arc<ProjectRuntime>>>,
+    /// Last-good shared Dispatcher config per Project root path.
+    dispatcher_last_good: Mutex<HashMap<String, DispatcherConfig>>,
+    /// Last-good concurrency from serve.json (`None` until a valid read).
+    concurrency_last_good: Mutex<Option<u32>>,
+    models_cache: Mutex<super::serve_dispatcher::ModelsCache>,
 }
 
 enum RuntimeError {
@@ -93,13 +103,28 @@ impl AppState {
         use_tls: bool,
         home_override: Option<PathBuf>,
     ) -> Arc<Self> {
+        Self::with_options(config_dir, port, dev, use_tls, home_override, None)
+    }
+
+    fn with_options(
+        config_dir: PathBuf,
+        port: u16,
+        dev: bool,
+        use_tls: bool,
+        home_override: Option<PathBuf>,
+        agent_bin: Option<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             config_dir,
             port,
             dev,
             use_tls,
             home_override,
+            agent_bin,
             runtimes: Mutex::new(HashMap::new()),
+            dispatcher_last_good: Mutex::new(HashMap::new()),
+            concurrency_last_good: Mutex::new(None),
+            models_cache: Mutex::new(super::serve_dispatcher::ModelsCache::default()),
         })
     }
 
@@ -224,6 +249,11 @@ const DOC_MANIFEST: &[DocEntry] = &[
         slug: "web-ui-guide",
         title: "Web UI Guide",
         path: "docs/web-ui-guide.md",
+    },
+    DocEntry {
+        slug: "dispatcher",
+        title: "Dispatcher",
+        path: "docs/dispatcher.md",
     },
 ];
 
@@ -447,6 +477,15 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/items/{id}/unarchive", post(post_unarchive_item))
         .route("/api/link", post(post_link))
         .route("/api/config", get(get_config).patch(patch_config))
+        .route(
+            "/api/dispatcher/settings",
+            get(get_dispatcher_settings_snapshot),
+        )
+        .route(
+            "/api/dispatcher/concurrency",
+            get(get_dispatcher_concurrency).patch(patch_dispatcher_concurrency),
+        )
+        .route("/api/dispatcher/models", get(get_dispatcher_models))
         .route("/api/sync", post(post_sync))
         .route("/api/docs", get(get_docs))
         .route("/api/docs/{slug}", get(get_doc))
@@ -1214,6 +1253,45 @@ struct ConfigResponse {
     task_types: Vec<String>,
     note_types: Vec<String>,
     workflows: WorkflowsResponse,
+    dispatcher: DispatcherConfigResponse,
+}
+
+#[derive(Serialize, Clone)]
+struct DispatcherConfigResponse {
+    push_after_merge: bool,
+    stages: DispatcherStagesResponse,
+}
+
+#[derive(Serialize, Clone)]
+struct DispatcherStagesResponse {
+    implement: DispatcherStageResponse,
+    fix: DispatcherStageResponse,
+    merge: DispatcherStageResponse,
+}
+
+#[derive(Serialize, Clone)]
+struct DispatcherStageResponse {
+    model: String,
+    timeout_minutes: u32,
+}
+
+#[derive(Serialize)]
+struct DispatcherConcurrencyResponse {
+    concurrency: u32,
+    /// Slot usage; 0 until the Dispatcher Slot counter exists.
+    in_use: u32,
+}
+
+#[derive(Serialize)]
+struct DispatcherModelsResponse {
+    models: Vec<AgentModel>,
+}
+
+#[derive(Serialize)]
+struct DispatcherSettingsSnapshot {
+    push_after_merge: bool,
+    stages: DispatcherStagesResponse,
+    concurrency: u32,
 }
 
 #[derive(Serialize)]
@@ -2136,10 +2214,90 @@ async fn get_summary(
     Ok(Json(ApiResponse { data: summary }))
 }
 
+fn dispatcher_key(project: &Project) -> String {
+    project.root().to_string_lossy().into_owned()
+}
+
+fn effective_to_response(effective: &EffectiveDispatcherSettings) -> DispatcherConfigResponse {
+    DispatcherConfigResponse {
+        push_after_merge: effective.push_after_merge,
+        stages: DispatcherStagesResponse {
+            implement: DispatcherStageResponse {
+                model: effective.stages.implement.model.clone(),
+                timeout_minutes: effective.stages.implement.timeout_minutes,
+            },
+            fix: DispatcherStageResponse {
+                model: effective.stages.fix.model.clone(),
+                timeout_minutes: effective.stages.fix.timeout_minutes,
+            },
+            merge: DispatcherStageResponse {
+                model: effective.stages.merge.model.clone(),
+                timeout_minutes: effective.stages.merge.timeout_minutes,
+            },
+        },
+    }
+}
+
+/// Load shared Dispatcher config from disk, falling back to last-good on
+/// semantic validation failure. Always re-reads (hot-reload).
+async fn load_dispatcher_config(
+    state: &AppState,
+    project: &Project,
+) -> DispatcherConfig {
+    let key = dispatcher_key(project);
+    let loaded = project.load_config().ok().map(|c| c.dispatcher);
+    match loaded {
+        Some(cfg) => match validate_dispatcher_config(&cfg) {
+            Ok(()) => {
+                let mut guard = state.dispatcher_last_good.lock().await;
+                guard.insert(key, cfg.clone());
+                cfg
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: invalid dispatcher config in {}: {}; using last-good settings",
+                    project.root().join("config.yaml").display(),
+                    e.message
+                );
+                let guard = state.dispatcher_last_good.lock().await;
+                guard
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        },
+        None => {
+            let guard = state.dispatcher_last_good.lock().await;
+            guard
+                .get(&key)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Resolve effective concurrency from serve.json with last-good / defaults.
+async fn load_concurrency(state: &AppState) -> u32 {
+    match super::serve_dispatcher::read_concurrency(&state.config_dir) {
+        Ok(value) => {
+            let mut guard = state.concurrency_last_good.lock().await;
+            *guard = Some(value);
+            value
+        }
+        Err(msg) => {
+            eprintln!("warning: {msg}; using last-good or default concurrency");
+            let guard = state.concurrency_last_good.lock().await;
+            guard.unwrap_or(DEFAULT_CONCURRENCY)
+        }
+    }
+}
+
 async fn get_config(
+    State(state): State<Arc<AppState>>,
     Extension(project): Extension<Project>,
 ) -> Result<Json<ApiResponse<ConfigResponse>>, (StatusCode, Json<ApiError>)> {
-    let config = project.load_config().map_err(map_core_error)?;
+    let mut config = project.load_config().map_err(map_core_error)?;
+    config.dispatcher = load_dispatcher_config(&state, &project).await;
 
     Ok(Json(ApiResponse {
         data: config_to_response(config),
@@ -2154,6 +2312,7 @@ fn config_to_response(config: markplane_core::Config) -> ConfigResponse {
         .iter()
         .map(|(cat, statuses)| (cat.to_string(), statuses.clone()))
         .collect();
+    let dispatcher = effective_to_response(&effective_dispatcher_settings(&config.dispatcher));
     ConfigResponse {
         project: ProjectInfoResponse {
             name: config.project.name,
@@ -2170,6 +2329,7 @@ fn config_to_response(config: markplane_core::Config) -> ConfigResponse {
         workflows: WorkflowsResponse {
             task: task_workflow_map,
         },
+        dispatcher,
     }
 }
 
@@ -2181,6 +2341,26 @@ struct UpdateConfigRequest {
     task_types: Option<Vec<String>>,
     note_types: Option<Vec<String>>,
     workflows: Option<UpdateWorkflowsRequest>,
+    dispatcher: Option<UpdateDispatcherRequest>,
+}
+
+#[derive(Deserialize)]
+struct UpdateDispatcherRequest {
+    push_after_merge: Option<bool>,
+    stages: Option<UpdateDispatcherStagesRequest>,
+}
+
+#[derive(Deserialize)]
+struct UpdateDispatcherStagesRequest {
+    implement: Option<UpdateDispatcherStageRequest>,
+    fix: Option<UpdateDispatcherStageRequest>,
+    merge: Option<UpdateDispatcherStageRequest>,
+}
+
+#[derive(Deserialize)]
+struct UpdateDispatcherStageRequest {
+    model: Option<String>,
+    timeout_minutes: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -2201,11 +2381,33 @@ struct UpdateWorkflowsRequest {
     task: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
+fn apply_dispatcher_stage_update(
+    stage: &mut DispatcherStageConfig,
+    update: UpdateDispatcherStageRequest,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if let Some(model) = update.model {
+        let validated = validate_model(&model).map_err(|e| {
+            error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
+        })?;
+        stage.model = Some(validated);
+    }
+    if let Some(timeout) = update.timeout_minutes {
+        let validated = validate_timeout_minutes(timeout).map_err(|e| {
+            error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
+        })?;
+        stage.timeout_minutes = Some(validated);
+    }
+    Ok(())
+}
+
 async fn patch_config(
+    State(state): State<Arc<AppState>>,
     Extension(project): Extension<Project>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<ApiResponse<ConfigResponse>>, (StatusCode, Json<ApiError>)> {
     let mut config = project.load_config().map_err(map_core_error)?;
+    // Prefer last-good Dispatcher settings when the on-disk values are illegal.
+    config.dispatcher = load_dispatcher_config(&state, &project).await;
 
     // Helper: validate a type list — trim, lowercase, reject empty/duplicate, require ≥1
     fn validate_types(
@@ -2354,10 +2556,121 @@ async fn patch_config(
         config.workflows.task = new_workflow;
     }
 
+    if let Some(dispatcher) = body.dispatcher {
+        if let Some(push_after_merge) = dispatcher.push_after_merge {
+            config.dispatcher.push_after_merge = Some(push_after_merge);
+        }
+        if let Some(stages) = dispatcher.stages {
+            if let Some(implement) = stages.implement {
+                apply_dispatcher_stage_update(&mut config.dispatcher.stages.implement, implement)?;
+            }
+            if let Some(fix) = stages.fix {
+                apply_dispatcher_stage_update(&mut config.dispatcher.stages.fix, fix)?;
+            }
+            if let Some(merge) = stages.merge {
+                apply_dispatcher_stage_update(&mut config.dispatcher.stages.merge, merge)?;
+            }
+        }
+        validate_dispatcher_config(&config.dispatcher).map_err(|e| {
+            error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
+        })?;
+    }
+
     project.save_config(&config).map_err(map_core_error)?;
+
+    {
+        let mut guard = state.dispatcher_last_good.lock().await;
+        guard.insert(dispatcher_key(&project), config.dispatcher.clone());
+    }
 
     Ok(Json(ApiResponse {
         data: config_to_response(config),
+    }))
+}
+
+async fn get_dispatcher_settings_snapshot(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+) -> Result<Json<ApiResponse<DispatcherSettingsSnapshot>>, (StatusCode, Json<ApiError>)> {
+    let dispatcher = load_dispatcher_config(&state, &project).await;
+    let effective = effective_dispatcher_settings(&dispatcher);
+    let concurrency = load_concurrency(&state).await;
+    let stages = effective_to_response(&effective).stages;
+    Ok(Json(ApiResponse {
+        data: DispatcherSettingsSnapshot {
+            push_after_merge: effective.push_after_merge,
+            stages,
+            concurrency,
+        },
+    }))
+}
+
+async fn get_dispatcher_concurrency(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DispatcherConcurrencyResponse>>, (StatusCode, Json<ApiError>)> {
+    let concurrency = load_concurrency(&state).await;
+    Ok(Json(ApiResponse {
+        data: DispatcherConcurrencyResponse {
+            concurrency,
+            in_use: 0,
+        },
+    }))
+}
+
+#[derive(Deserialize)]
+struct UpdateConcurrencyRequest {
+    concurrency: u32,
+}
+
+async fn patch_dispatcher_concurrency(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UpdateConcurrencyRequest>,
+) -> Result<Json<ApiResponse<DispatcherConcurrencyResponse>>, (StatusCode, Json<ApiError>)> {
+    let concurrency = validate_concurrency(body.concurrency).map_err(|e| {
+        error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
+    })?;
+    super::serve_dispatcher::write_concurrency(&state.config_dir, concurrency).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e,
+        )
+    })?;
+    {
+        let mut guard = state.concurrency_last_good.lock().await;
+        *guard = Some(concurrency);
+    }
+    Ok(Json(ApiResponse {
+        data: DispatcherConcurrencyResponse {
+            concurrency,
+            in_use: 0,
+        },
+    }))
+}
+
+async fn get_dispatcher_models(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<DispatcherModelsResponse>>, (StatusCode, Json<ApiError>)> {
+    {
+        let cache = state.models_cache.lock().await;
+        if let Some(models) = cache.get_if_fresh() {
+            return Ok(Json(ApiResponse {
+                data: DispatcherModelsResponse { models },
+            }));
+        }
+    }
+
+    let agent_bin = state
+        .agent_bin
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("agent"));
+    let models = super::serve_dispatcher::fetch_agent_models(&agent_bin);
+    {
+        let mut cache = state.models_cache.lock().await;
+        cache.store(models.clone());
+    }
+    Ok(Json(ApiResponse {
+        data: DispatcherModelsResponse { models },
     }))
 }
 
@@ -4659,5 +4972,335 @@ mod tests {
         let (q, a) = ticket_question_answer(body);
         assert_eq!(q, "Should we fork?");
         assert!(a.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_config_defaults_when_unset() {
+        let env = setup_env("disp-defaults");
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/config", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let d = &json["data"]["dispatcher"];
+        assert_eq!(d["push_after_merge"], true);
+        assert_eq!(d["stages"]["implement"]["model"], "cursor-grok-4.5-high");
+        assert_eq!(d["stages"]["implement"]["timeout_minutes"], 60);
+        assert_eq!(d["stages"]["fix"]["model"], "cursor-grok-4.5-high");
+        assert_eq!(d["stages"]["merge"]["timeout_minutes"], 60);
+
+        let yaml = fs::read_to_string(env.project_dir.join(".markplane/config.yaml")).unwrap();
+        assert!(
+            !yaml.contains("dispatcher"),
+            "unset dispatcher must not be written on init: {yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_config_patch_writes_only_explicit_fields() {
+        let env = setup_env("disp-patch");
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/config", env.project_id),
+            Some(serde_json::json!({
+                "dispatcher": {
+                    "push_after_merge": false,
+                    "stages": {
+                        "implement": { "model": "claude-opus-4.5", "timeout_minutes": 90 }
+                    }
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["dispatcher"]["push_after_merge"], false);
+        assert_eq!(
+            json["data"]["dispatcher"]["stages"]["implement"]["model"],
+            "claude-opus-4.5"
+        );
+        assert_eq!(
+            json["data"]["dispatcher"]["stages"]["implement"]["timeout_minutes"],
+            90
+        );
+        // Unpatched stages keep defaults in the response.
+        assert_eq!(
+            json["data"]["dispatcher"]["stages"]["fix"]["model"],
+            "cursor-grok-4.5-high"
+        );
+
+        let yaml = fs::read_to_string(env.project_dir.join(".markplane/config.yaml")).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let stages = &parsed["dispatcher"]["stages"];
+        assert_eq!(
+            parsed["dispatcher"]["push_after_merge"],
+            serde_yaml::Value::Bool(false)
+        );
+        assert_eq!(
+            stages["implement"]["model"],
+            serde_yaml::Value::String("claude-opus-4.5".into())
+        );
+        assert_eq!(
+            stages["implement"]["timeout_minutes"],
+            serde_yaml::Value::Number(90.into())
+        );
+        assert!(
+            stages.get("fix").is_none(),
+            "unset fix stage must not be written: {yaml}"
+        );
+        assert!(
+            stages.get("merge").is_none(),
+            "unset merge stage must not be written: {yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_config_rejects_out_of_range_with_validation_error() {
+        let env = setup_env("disp-validate");
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/config", env.project_id),
+            Some(serde_json::json!({
+                "dispatcher": {
+                    "stages": { "fix": { "timeout_minutes": 0 } }
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "validation_error");
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/config", env.project_id),
+            Some(serde_json::json!({
+                "dispatcher": {
+                    "stages": { "merge": { "model": "has space" } }
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "validation_error");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_illegal_hand_edit_keeps_last_good() {
+        let env = setup_env("disp-hand-edit");
+        // Establish last-good via API.
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/config", env.project_id),
+            Some(serde_json::json!({
+                "dispatcher": { "push_after_merge": false }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Hand-edit an illegal timeout into config.yaml.
+        let path = env.project_dir.join(".markplane/config.yaml");
+        let mut config = Project::new(env.project_dir.join(".markplane"))
+            .load_config()
+            .unwrap();
+        config.dispatcher.stages.implement.timeout_minutes = Some(9999);
+        // Bypass API validation by writing YAML directly.
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        // Force an out-of-range value that still deserializes.
+        let yaml = yaml.replace("timeout_minutes: 9999", "timeout_minutes: 9999");
+        fs::write(&path, yaml).unwrap();
+        // Confirm file has the illegal value.
+        let on_disk = Project::new(env.project_dir.join(".markplane"))
+            .load_config()
+            .unwrap();
+        assert_eq!(
+            on_disk.dispatcher.stages.implement.timeout_minutes,
+            Some(9999)
+        );
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/config", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Last-good had only push_after_merge: false; implement timeout stays default.
+        assert_eq!(json["data"]["dispatcher"]["push_after_merge"], false);
+        assert_eq!(
+            json["data"]["dispatcher"]["stages"]["implement"]["timeout_minutes"],
+            60
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_hot_reload_reads_file_without_restart() {
+        let env = setup_env("disp-hot");
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/config", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["dispatcher"]["push_after_merge"], true);
+
+        let mut config = Project::new(env.project_dir.join(".markplane"))
+            .load_config()
+            .unwrap();
+        config.dispatcher.push_after_merge = Some(false);
+        Project::new(env.project_dir.join(".markplane"))
+            .save_config(&config)
+            .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/config", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["dispatcher"]["push_after_merge"], false);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_concurrency_global_endpoints() {
+        let env = setup_env("disp-conc");
+        let (status, json) =
+            oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["concurrency"], 20);
+        assert_eq!(json["data"]["in_use"], 0);
+        assert!(
+            !env.config_dir.join("serve.json").exists(),
+            "default concurrency must not create serve.json"
+        );
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            "/api/dispatcher/concurrency",
+            Some(serde_json::json!({ "concurrency": 7 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["concurrency"], 7);
+
+        let content = fs::read_to_string(env.config_dir.join("serve.json")).unwrap();
+        assert!(content.contains("\"concurrency\": 7"));
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            "/api/dispatcher/concurrency",
+            Some(serde_json::json!({ "concurrency": 0 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "validation_error");
+
+        // Unreadable serve.json → defaults (or last-good=7 from earlier valid write).
+        fs::write(env.config_dir.join("serve.json"), "{{{").unwrap();
+        let (status, json) =
+            oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["concurrency"], 7);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_concurrency_unreadable_without_last_good_uses_default() {
+        let env = setup_env("disp-conc-bad");
+        fs::write(env.config_dir.join("serve.json"), "not-json").unwrap();
+        let (status, json) =
+            oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["concurrency"], 20);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_settings_snapshot_combines_shared_and_machine() {
+        let env = setup_env("disp-snap");
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/config", env.project_id),
+            Some(serde_json::json!({
+                "dispatcher": { "push_after_merge": false }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            "/api/dispatcher/concurrency",
+            Some(serde_json::json!({ "concurrency": 11 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/dispatcher/settings", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["push_after_merge"], false);
+        assert_eq!(json["data"]["concurrency"], 11);
+        assert_eq!(
+            json["data"]["stages"]["implement"]["model"],
+            "cursor-grok-4.5-high"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_models_uses_agent_bin_and_parses_output() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let project_dir = tmp.path().join("models-proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        Project::init(
+            project_dir.join(".markplane"),
+            "models-proj",
+            "in-process serve tests",
+        )
+        .unwrap();
+        serve_registry::register(&config_dir, &project_dir).unwrap();
+
+        let agent_bin = tmp.path().join("fake-agent");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(
+                &agent_bin,
+                "#!/bin/sh\nprintf 'Available models\\n\\n%s\\n' 'fake-model-1 - Fake Model One (default)'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&agent_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let state = AppState::with_options(
+            config_dir,
+            4200,
+            true,
+            false,
+            None,
+            Some(agent_bin),
+        );
+        let app = build_app(state);
+
+        let (status, json) = oneshot_json(&app, "GET", "/api/dispatcher/models").await;
+        assert_eq!(status, StatusCode::OK);
+        let models = json["data"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "fake-model-1");
+        assert_eq!(models[0]["label"], "Fake Model One");
     }
 }

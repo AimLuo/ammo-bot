@@ -511,6 +511,17 @@ function mergeConfig(prev: ProjectConfig, updates: UpdateConfigRequest): Project
   if (updates.task_types !== undefined) result.task_types = updates.task_types;
   if (updates.note_types !== undefined) result.note_types = updates.note_types;
   if (updates.workflows) result.workflows = { ...prev.workflows, ...updates.workflows };
+  if (updates.dispatcher) {
+    const d = updates.dispatcher;
+    result.dispatcher = {
+      push_after_merge: d.push_after_merge ?? prev.dispatcher.push_after_merge,
+      stages: {
+        implement: { ...prev.dispatcher.stages.implement, ...d.stages?.implement },
+        fix: { ...prev.dispatcher.stages.fix, ...d.stages?.fix },
+        merge: { ...prev.dispatcher.stages.merge, ...d.stages?.merge },
+      },
+    };
+  }
   return result;
 }
 

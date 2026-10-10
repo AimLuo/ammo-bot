@@ -601,6 +601,9 @@ pub struct Config {
     pub note_types: Vec<String>,
     #[serde(default)]
     pub workflows: WorkflowConfig,
+    /// Dispatcher shared settings. Omitted from YAML when unset.
+    #[serde(default, skip_serializing_if = "crate::dispatcher::DispatcherConfig::is_empty")]
+    pub dispatcher: crate::dispatcher::DispatcherConfig,
 }
 
 impl Config {
@@ -661,6 +664,7 @@ impl Default for Config {
             task_types: default_task_types(),
             note_types: default_note_types(),
             workflows: WorkflowConfig::default(),
+            dispatcher: crate::dispatcher::DispatcherConfig::default(),
         }
     }
 }

@@ -36,7 +36,7 @@ Project pages are under `/p/<id>/...`. The table below shows the path after that
 | Graph | `/p/<id>/graph` | Interactive dependency graph |
 | Archive | `/p/<id>/archive` | Archived items with restore action |
 | Docs | `/docs` | Bundled Markplane documentation (global, not Project-scoped) |
-| Settings | `/p/<id>/settings/*` | Configure project info, task types, note types, workflow, and documentation paths |
+| Settings | `/p/<id>/settings/*` | Configure project info, task types, note types, workflow, Dispatcher, and documentation paths |
 
 ## Views
 
@@ -104,12 +104,13 @@ An interactive node graph built with React Flow showing `blocks`, `depends_on`, 
 
 ### Settings (`/settings/*`)
 
-Manage project configuration visually. Settings uses a sidebar navigation layout with four sections:
+Manage project configuration visually. Settings uses a sidebar navigation layout with five sections:
 
 - **General** (`/settings/general`) — project name and description, documentation paths, and context generation settings (auto-generate toggle, token budget, recent days)
 - **Task Types** (`/settings/task-types`) — the list of allowed values for the `type` field on tasks (e.g., `feature`, `bug`, `chore`)
 - **Note Types** (`/settings/note-types`) — the list of allowed values for the `type` field on notes (e.g., `research`, `idea`, `decision`)
 - **Task Workflow** (`/settings/workflow`) — configure which status strings map to each status category (draft, backlog, planned, active, completed, cancelled)
+- **Dispatcher** (`/settings/dispatcher`) — shared Stage models/timeouts and push-after-merge (written to `config.yaml`), plus this machine's concurrency limit (`serve.json`). Includes a short security notice that agents run with full permissions.
 
 The type and workflow editors let you:
 
@@ -283,8 +284,12 @@ Error:             { "error": { "code": string, "message": string } }
 | GET | `/api/docs/:slug` | Get documentation page content |
 | POST | `/api/items/:id/archive` | Archive any item (task, epic, plan, map, note) |
 | POST | `/api/items/:id/unarchive` | Restore an archived item |
-| GET | `/api/config` | Get project configuration (project info, context settings, documentation paths, item types, note types, workflows) |
-| PATCH | `/api/config` | Update project configuration (partial updates supported at every level). Returns 409 Conflict if workflow changes would strand active tasks using removed statuses. |
+| GET | `/api/config` | Get project configuration (project info, context settings, documentation paths, item types, note types, workflows, dispatcher) |
+| PATCH | `/api/config` | Update project configuration (partial updates supported at every level). Returns 409 Conflict if workflow changes would strand active tasks using removed statuses. Out-of-range dispatcher values return 400 `validation_error`. |
+| GET | `/api/dispatcher/settings` | Effective Dispatcher snapshot (shared settings + concurrency) for Stage start |
+| GET | `/api/dispatcher/concurrency` | Global concurrency limit and in-use Slot count (machine-local; not Project-prefixed) |
+| PATCH | `/api/dispatcher/concurrency` | Update global concurrency (1–100); writes `serve.json` |
+| GET | `/api/dispatcher/models` | Parsed `agent models` list for this machine (cached ~10 minutes; global) |
 
 All list endpoints (`/api/tasks`, `/api/epics`, `/api/plans`, `/api/maps`, `/api/notes`) accept an `?archived=true` query parameter to return archived items instead of active ones.
 

@@ -8,6 +8,8 @@ context:
   auto_generate: true
 documentation_paths:
 - docs
+dispatcher:
+  push_after_merge: false
 task_types:
 - feature
 - bug

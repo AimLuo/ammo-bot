@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { ProjectLink } from "@/components/project-link";
 import { usePathname } from "next/navigation";
 import { stripProject } from "@/lib/project-prefix";
-import { Settings, List, FileText, GitBranch } from "lucide-react";
+import { Settings, List, FileText, GitBranch, Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { href: "/settings/task-types", label: "Task Types", icon: List },
   { href: "/settings/note-types", label: "Note Types", icon: FileText },
   { href: "/settings/workflow", label: "Task Workflow", icon: GitBranch },
+  { href: "/settings/dispatcher", label: "Dispatcher", icon: Bot },
 ];
 
 export default function SettingsLayout({ children }: { children: ReactNode }) {

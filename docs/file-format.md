@@ -317,9 +317,29 @@ note_types:
   - idea
   - decision
   - meeting
+dispatcher:
+  push_after_merge: true
+  stages:
+    implement: { model: cursor-grok-4.5-high, timeout_minutes: 60 }
+    fix: { model: cursor-grok-4.5-high, timeout_minutes: 60 }
+    merge: { model: cursor-grok-4.5-high, timeout_minutes: 60 }
 ```
 
+All `dispatcher` fields are optional. Unset fields are omitted on write-back so future defaults apply. See [Dispatcher](dispatcher.md).
+
 IDs are randomly generated (no counter in config). See [ID System](#id-system) for details.
+
+### dispatcher
+
+Shared Agent Dispatcher policy for this Project (read from the main working tree's `config.yaml`).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `push_after_merge` | `true` | After a successful merge, push the main working tree branch |
+| `stages.<stage>.model` | `cursor-grok-4.5-high` | Model slug for `implement` / `fix` / `merge` (non-empty, no whitespace, ≤200 chars) |
+| `stages.<stage>.timeout_minutes` | `60` | Stage timeout in minutes (1–1440) |
+
+Machine-local concurrency lives in the user config file `serve.json` (`dispatcher.concurrency`, default `20`, range 1–100), not in `config.yaml`.
 
 ### context
 

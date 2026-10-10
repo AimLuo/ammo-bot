@@ -23,6 +23,20 @@ export interface ContextConfig {
   auto_generate: boolean;
 }
 
+export interface DispatcherStageConfig {
+  model: string;
+  timeout_minutes: number;
+}
+
+export interface DispatcherConfig {
+  push_after_merge: boolean;
+  stages: {
+    implement: DispatcherStageConfig;
+    fix: DispatcherStageConfig;
+    merge: DispatcherStageConfig;
+  };
+}
+
 export interface ProjectConfig {
   project: ProjectInfo;
   context: ContextConfig;
@@ -31,6 +45,21 @@ export interface ProjectConfig {
   note_types: string[];
   workflows: {
     task: TaskWorkflow;
+  };
+  dispatcher: DispatcherConfig;
+}
+
+export interface UpdateDispatcherStageRequest {
+  model?: string;
+  timeout_minutes?: number;
+}
+
+export interface UpdateDispatcherRequest {
+  push_after_merge?: boolean;
+  stages?: {
+    implement?: UpdateDispatcherStageRequest;
+    fix?: UpdateDispatcherStageRequest;
+    merge?: UpdateDispatcherStageRequest;
   };
 }
 
@@ -42,6 +71,17 @@ export interface UpdateConfigRequest {
   task_types?: string[];
   note_types?: string[];
   workflows?: { task?: TaskWorkflow };
+  dispatcher?: UpdateDispatcherRequest;
+}
+
+export interface DispatcherConcurrency {
+  concurrency: number;
+  in_use: number;
+}
+
+export interface AgentModel {
+  slug: string;
+  label: string;
 }
 
 export interface Task {

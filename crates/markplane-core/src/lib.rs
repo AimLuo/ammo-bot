@@ -1,5 +1,6 @@
 pub mod comments;
 pub mod context;
+pub mod dispatcher;
 pub mod error;
 pub mod frontmatter;
 pub mod index;
@@ -15,6 +16,13 @@ pub mod sections;
 pub mod templates;
 
 pub use comments::{default_comment_author, demote_comment_headings};
+pub use dispatcher::{
+    AgentModel, DEFAULT_CONCURRENCY, DEFAULT_DISPATCHER_MODEL, DEFAULT_TIMEOUT_MINUTES,
+    DispatcherConfig, DispatcherStageConfig, DispatcherStagesConfig, DispatcherValidationError,
+    EffectiveDispatcherSettings, EffectiveStageSettings, EffectiveStagesSettings,
+    effective_dispatcher_settings, parse_agent_models, strip_ansi, validate_concurrency,
+    validate_dispatcher_config, validate_model, validate_timeout_minutes,
+};
 pub use error::{MarkplaneError, Result};
 pub use frontmatter::{parse_frontmatter, parse_frontmatter_raw, write_frontmatter};
 pub use links::{LinkAction, LinkRelation};

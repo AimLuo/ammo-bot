@@ -23,6 +23,7 @@ mod promote;
 mod resolve;
 mod serve;
 mod serve_daemon;
+mod serve_dispatcher;
 mod serve_registry;
 mod show;
 mod stale;

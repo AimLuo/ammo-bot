@@ -312,8 +312,11 @@ The link endpoint accepts `{ from, to, relation, remove? }` where `relation` is 
 | `GET` | `/api/graph` | Full project dependency graph |
 | `POST` | `/api/sync` | Trigger `markplane sync` (regenerate INDEX.md + .context/) |
 | `GET` | `/api/search?q=...` | Full-text search across all items (2–500 chars) |
-| `GET` | `/api/config` | Get project configuration (project info, context settings, documentation paths, types, workflows) |
+| `GET` | `/api/config` | Get project configuration (project info, context settings, documentation paths, types, workflows, dispatcher) |
 | `PATCH` | `/api/config` | Update project configuration (partial updates at every level; validates, trims, deduplicates) |
+| `GET` | `/api/dispatcher/settings` | Effective Dispatcher snapshot (shared + concurrency) |
+| `GET` / `PATCH` | `/api/dispatcher/concurrency` | Machine-local concurrency (global; not Project-prefixed) |
+| `GET` | `/api/dispatcher/models` | Cached `agent models` list (global) |
 
 #### Response Format
 
@@ -503,7 +506,7 @@ All mutation hooks use TanStack Query's `useMutation` with `onMutate`/`onError`/
 | `/notes` | Notes | Research, ideas, decisions. Note detail via Sheet slide-over |
 | `/graph` | Dependency Graph | Full project graph (React Flow + ELK layout) |
 | `/archive` | Archive | Archived items with restore action |
-| `/settings/*` | Settings | Project configuration: general, task types, note types, workflow (sidebar nav layout) |
+| `/settings/*` | Settings | Project configuration: general, task types, note types, workflow, dispatcher (sidebar nav layout) |
 
 ### URL Design
 
