@@ -253,8 +253,24 @@ impl Project {
         Project { root }
     }
 
-    /// Find `.markplane/` by walking up from the current working directory.
+    /// Find `.markplane/` for CLI/MCP commands.
+    ///
+    /// When `MARKPLANE_ROOT` is set, use `$MARKPLANE_ROOT/.markplane/` only (no
+    /// upward search from cwd). When unset, walk up from the current working
+    /// directory as before.
     pub fn from_current_dir() -> Result<Self> {
+        if let Some(root) = std::env::var_os("MARKPLANE_ROOT") {
+            let root = PathBuf::from(root);
+            let candidate = root.join(".markplane");
+            if candidate.is_dir() && candidate.join("config.yaml").is_file() {
+                return Ok(Project::new(candidate));
+            }
+            return Err(MarkplaneError::NotInitialized(format!(
+                "MARKPLANE_ROOT ({}) does not contain a .markplane/ directory",
+                root.display()
+            )));
+        }
+
         let mut dir = std::env::current_dir().map_err(MarkplaneError::Io)?;
         loop {
             let candidate = dir.join(".markplane");

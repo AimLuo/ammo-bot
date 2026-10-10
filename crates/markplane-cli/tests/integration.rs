@@ -2478,6 +2478,143 @@ fn test_comment_accumulates_and_works_on_all_kinds() {
         .stdout(predicate::str::contains("Note comment."));
 }
 
+// ── MARKPLANE_ROOT ───────────────────────────────────────────────────
+
+#[test]
+fn test_markplane_root_reads_and_writes_specified_project() {
+    let main = setup_project();
+    let add_out = cmd()
+        .current_dir(main.path())
+        .args(["add", "Root env task"])
+        .output()
+        .unwrap();
+    assert!(add_out.status.success());
+    let task_id = extract_id(&add_out.stdout);
+
+    // Simulate a worktree: cwd has no .markplane/, but MARKPLANE_ROOT points at main.
+    let worktree = TempDir::new().unwrap();
+    let body_path = worktree.path().join("comment.md");
+    std::fs::write(&body_path, "Written from worktree.\n").unwrap();
+
+    cmd()
+        .current_dir(worktree.path())
+        .env("MARKPLANE_ROOT", main.path())
+        .args(["show", &task_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Root env task"));
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    cmd()
+        .current_dir(worktree.path())
+        .env("MARKPLANE_ROOT", main.path())
+        .env("USER", "agent")
+        .args([
+            "comment",
+            &task_id,
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let file = std::fs::read_to_string(
+        main.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    let body = file.splitn(3, "---").nth(2).unwrap_or("");
+    assert!(
+        body.contains(&format!("### {} agent", today)),
+        "comment should land in main workspace; body:\n{}",
+        body
+    );
+    assert!(body.contains("Written from worktree."));
+}
+
+#[test]
+fn test_markplane_root_overrides_cwd_project() {
+    let main = setup_project();
+    let other = setup_project();
+
+    let main_task = extract_id(
+        &cmd()
+            .current_dir(main.path())
+            .args(["add", "Main only"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let other_task = extract_id(
+        &cmd()
+            .current_dir(other.path())
+            .args(["add", "Other only"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    // From other's cwd, MARKPLANE_ROOT=main must use main (no upward/cwd search).
+    cmd()
+        .current_dir(other.path())
+        .env("MARKPLANE_ROOT", main.path())
+        .args(["show", &main_task])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Main only"));
+
+    cmd()
+        .current_dir(other.path())
+        .env("MARKPLANE_ROOT", main.path())
+        .args(["show", &other_task])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(&other_task));
+}
+
+#[test]
+fn test_markplane_root_unset_walks_from_cwd() {
+    let tmp = setup_project();
+    let task_id = extract_id(
+        &cmd()
+            .current_dir(tmp.path())
+            .args(["add", "Nested show"])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+
+    let nested = tmp.path().join("deep/nested/cwd");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    cmd()
+        .current_dir(&nested)
+        .env_remove("MARKPLANE_ROOT")
+        .args(["show", &task_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nested show"));
+}
+
+#[test]
+fn test_markplane_root_missing_markplane_errors_clearly() {
+    let empty = TempDir::new().unwrap();
+    let root = empty.path().to_string_lossy().to_string();
+
+    cmd()
+        .current_dir(empty.path())
+        .env("MARKPLANE_ROOT", empty.path())
+        .args(["show", "TASK-xxxxx"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("MARKPLANE_ROOT"))
+        .stderr(predicate::str::contains(".markplane"))
+        .stderr(predicate::str::contains(root.as_str()));
+}
+
 // ── Body file ────────────────────────────────────────────────────────
 
 #[test]
