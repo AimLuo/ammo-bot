@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
-import type { AppRouterInstance } from "next/dist/shared/lib/app-router-context.shared-runtime";
+import { useProjectRouter } from "@/lib/project-prefix";
 
 type ChordMap = Record<string, string>;
 
@@ -31,8 +30,8 @@ export function isInputFocused(): boolean {
 }
 
 export function useKeyboardNav() {
-  const router = useRouter();
-  const routerRef = useRef<AppRouterInstance>(router);
+  const router = useProjectRouter();
+  const routerRef = useRef(router);
 
   useEffect(() => { routerRef.current = router; }, [router]);
 

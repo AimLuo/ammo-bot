@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
-import { withProject } from "@/lib/project-prefix";
+import { useProjectRouter } from "@/lib/project-prefix";
 import {
   Command,
   CommandEmpty,
@@ -106,7 +105,7 @@ function CommandPaletteContent({ onClose }: { onClose: () => void }) {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const router = useRouter();
+  const router = useProjectRouter();
   const queryClient = useQueryClient();
 
   const { data: tasksData } = useTasks();
@@ -148,7 +147,7 @@ function CommandPaletteContent({ onClose }: { onClose: () => void }) {
   const navigate = useCallback(
     (path: string) => {
       onClose();
-      router.push(withProject(path));
+      router.push(path);
     },
     [router, onClose]
   );

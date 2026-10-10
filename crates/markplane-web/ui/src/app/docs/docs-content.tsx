@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import { Search, Menu, X, ChevronUp, ChevronDown } from "lucide-react";
 import { useDocs, useDoc, useAllDocContents } from "@/lib/hooks/use-docs";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -60,7 +61,7 @@ function TocPanel({ headings, activeId }: { headings: Heading[]; activeId: strin
 
 export function DocsContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useProjectRouter();
   const isMobile = useIsMobile();
   const contentRef = useRef<HTMLDivElement>(null);
 

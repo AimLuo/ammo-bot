@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 import { useTask, useTasks } from "@/lib/hooks/use-tasks";
 import { useEpics } from "@/lib/hooks/use-epics";
 import { usePlans } from "@/lib/hooks/use-plans";
@@ -297,7 +297,7 @@ export function TaskDetailSheet({
 
                 {task.map && (
                   <FieldRow label="Map">
-                    <Link
+                    <ProjectLink
                       href={`/maps?map=${task.map}&node=${task.id}`}
                       className="inline-flex items-center gap-1 font-mono text-xs px-1.5 py-0.5 rounded no-underline hover:opacity-80 transition-opacity"
                       style={{
@@ -308,7 +308,7 @@ export function TaskDetailSheet({
                     >
                       {task.map}
                       <ArrowUpRight className="size-3 opacity-70" />
-                    </Link>
+                    </ProjectLink>
                   </FieldRow>
                 )}
 
