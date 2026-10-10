@@ -35,8 +35,8 @@ pub fn failure_comment_text(stage: Stage, session_id: Option<&str>, reason: &str
 }
 
 /// Mark Run failed and hand the ticket to a human (tags + comment). Keeps
-/// status active and assignee unchanged. No-op on the ticket when ownership
-/// was already taken away (silent stop path should be used instead).
+/// status active and assignee unchanged. If ownership was already taken away,
+/// records silent stop instead (no ticket writes).
 pub async fn handoff_failure(
     project: &Project,
     ws_tx: &broadcast::Sender<String>,
@@ -46,6 +46,10 @@ pub async fn handoff_failure(
     stage: Stage,
     reason: String,
 ) -> Result<(), String> {
+    if !ticket_still_ours(project, task_id)? {
+        return silent_stop(project, ws_tx, task_id, record, run).await;
+    }
+
     let session_id = run
         .attempts
         .iter()
@@ -68,9 +72,9 @@ pub async fn handoff_failure(
     write_run_record(project.root(), task_id, record).map_err(|e| e.to_string())?;
     broadcast_run_changed(ws_tx, task_id, run);
 
+    // Re-check after Run persist: human may have taken the ticket mid-write.
     if !ticket_still_ours(project, task_id)? {
-        // Human already took the ticket — do not rewrite tags or comment.
-        return Ok(());
+        return silent_stop(project, ws_tx, task_id, record, run).await;
     }
 
     let comment = failure_comment_text(stage, session_id.as_deref(), &reason);
@@ -103,6 +107,7 @@ pub async fn silent_stop(
     run.status = RunStatus::Stopped;
     run.ended_at = Some(Utc::now().to_rfc3339());
     run.current_stage = None;
+    run.failure_reason = None;
     if let Some(last) = record.runs.last_mut() {
         *last = run.clone();
     }
