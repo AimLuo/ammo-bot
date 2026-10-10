@@ -1,8 +1,9 @@
 "use client";
 
 import type { ReactNode } from "react";
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 import { usePathname } from "next/navigation";
+import { stripProject } from "@/lib/project-prefix";
 import { Settings, List, FileText, GitBranch } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -14,7 +15,7 @@ const NAV_ITEMS = [
 ];
 
 export default function SettingsLayout({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
+  const pathname = stripProject(usePathname());
   const isActive = (href: string) =>
     pathname === href || pathname === `${href}/`;
 
@@ -24,7 +25,7 @@ export default function SettingsLayout({ children }: { children: ReactNode }) {
         {/* Mobile: horizontal scrollable tabs */}
         <nav className="md:hidden sticky top-0 z-10 -mx-4 bg-background px-4 py-2 flex gap-1 overflow-x-auto border-b">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => (
-            <Link
+            <ProjectLink
               key={href}
               href={href}
               className={cn(
@@ -36,13 +37,13 @@ export default function SettingsLayout({ children }: { children: ReactNode }) {
             >
               <Icon className="size-4" />
               {label}
-            </Link>
+            </ProjectLink>
           ))}
         </nav>
         {/* Desktop: vertical sidebar — sticky so content scrolls independently */}
         <nav className="hidden md:flex md:w-52 md:shrink-0 flex-col gap-1 sticky top-6 self-start">
           {NAV_ITEMS.map(({ href, label, icon: Icon }) => (
-            <Link
+            <ProjectLink
               key={href}
               href={href}
               className={cn(
@@ -54,7 +55,7 @@ export default function SettingsLayout({ children }: { children: ReactNode }) {
             >
               <Icon className="size-4" />
               {label}
-            </Link>
+            </ProjectLink>
           ))}
         </nav>
         <div className="flex-1 min-w-0">{children}</div>

@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 import { X } from "lucide-react";
 
 const PREFIX_CONFIG: Record<string, { route: string; param: string; cssVar: string }> = {
@@ -31,13 +31,13 @@ export function WikiLinkChip({
         className="inline-flex items-center gap-1 font-mono text-xs px-1.5 py-0.5 rounded"
         style={chipStyle}
       >
-        <Link
+        <ProjectLink
           href={href}
           className="no-underline hover:opacity-80 transition-opacity"
           style={{ color: "inherit" }}
         >
           {id}
-        </Link>
+        </ProjectLink>
         <button
           type="button"
           onClick={onRemove}
@@ -50,12 +50,12 @@ export function WikiLinkChip({
   }
 
   return (
-    <Link
+    <ProjectLink
       href={href}
       className="inline-flex items-center font-mono text-xs px-1.5 py-0.5 rounded no-underline hover:opacity-80 transition-opacity"
       style={chipStyle}
     >
       {id}
-    </Link>
+    </ProjectLink>
   );
 }

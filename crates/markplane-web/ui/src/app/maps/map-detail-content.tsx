@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 import { useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { useMap } from "@/lib/hooks/use-maps";
@@ -116,7 +116,7 @@ export function MapDetailContent({ mapId }: { mapId: string }) {
         <p className="text-sm text-destructive">{error.message}</p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" asChild>
-            <Link href="/maps">Back to Maps</Link>
+            <ProjectLink href="/maps">Back to Maps</ProjectLink>
           </Button>
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             Try again
@@ -142,10 +142,10 @@ export function MapDetailContent({ mapId }: { mapId: string }) {
       <div className="space-y-4">
         <div className="flex items-center gap-3 flex-wrap">
           <Button variant="ghost" size="sm" className="gap-1 -ml-2" asChild>
-            <Link href="/maps">
+            <ProjectLink href="/maps">
               <ArrowLeft className="size-4" />
               Maps
-            </Link>
+            </ProjectLink>
           </Button>
           <span
             className="font-mono text-sm"

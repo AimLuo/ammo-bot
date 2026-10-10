@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { ProjectLink } from "@/components/project-link";
 
 type ProjectItem = {
   id: string;
@@ -45,7 +45,7 @@ export default function Home() {
         <ul className="mt-6 space-y-2">
           {projects.map((p) => (
             <li key={p.id}>
-              <Link
+              <ProjectLink
                 href={`/p/${encodeURIComponent(p.id)}/`}
                 className="block rounded-md border px-4 py-3 hover:bg-accent"
               >
@@ -56,7 +56,7 @@ export default function Home() {
                 <span className="mt-1 block text-sm text-muted-foreground font-mono">
                   {p.path}
                 </span>
-              </Link>
+              </ProjectLink>
             </li>
           ))}
         </ul>

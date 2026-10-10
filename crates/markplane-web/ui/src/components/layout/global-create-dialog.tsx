@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import { CreateDialog } from "@/components/domain/create-dialog";
 
 type EntityKind = "task" | "epic" | "note" | "plan";
@@ -16,7 +16,7 @@ const KIND_ROUTES: Record<EntityKind, (id: string) => string> = {
 export function GlobalCreateDialog() {
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<EntityKind>("task");
-  const router = useRouter();
+  const router = useProjectRouter();
 
   useEffect(() => {
     const handler = (e: Event) => {

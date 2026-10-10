@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useMemo, useCallback, type ReactNode } from "react";
-import { useRouter } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSlug from "rehype-slug";
@@ -123,7 +123,7 @@ function parseDocHref(href: string): { slug: string; anchor: string } | null {
 
 export function DocRenderer({ content, searchQuery = "", matchTerms = [], onHeadingsExtracted }: DocRendererProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const router = useRouter();
+  const router = useProjectRouter();
   const { resolvedTheme } = useTheme();
   const syntaxTheme = resolvedTheme === "dark" ? oneDark : oneLight;
 

@@ -5,7 +5,8 @@ import { useArchivedTasks } from "@/lib/hooks/use-tasks";
 import { useArchivedEpics } from "@/lib/hooks/use-epics";
 import { useArchivedPlans } from "@/lib/hooks/use-plans";
 import { useArchivedNotes } from "@/lib/hooks/use-notes";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import { useUnarchiveItem } from "@/lib/hooks/use-mutations";
 import { TaskDetailSheet } from "@/components/domain/task-detail-sheet";
 import { EpicDetailSheet } from "@/components/domain/epic-detail-sheet";
@@ -97,7 +98,7 @@ const PARAM_KEY: Record<string, string> = {
 
 export function ArchiveContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useProjectRouter();
 
   const [tab, setTab] = useState<EntityTab>("all");
   const [searchQuery, setSearchQuery] = useState("");
