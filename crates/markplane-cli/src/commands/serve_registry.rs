@@ -27,10 +27,10 @@ struct RegistryFile {
 
 /// Resolve `~/.config/markplane` (honours `XDG_CONFIG_HOME`).
 pub fn config_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("markplane");
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("markplane");
     }
     let home = std::env::var_os("HOME").expect("HOME must be set");
     PathBuf::from(home).join(".config/markplane")

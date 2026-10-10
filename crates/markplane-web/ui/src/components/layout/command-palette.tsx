@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { withProject } from "@/lib/project-prefix";
 import {
   Command,
   CommandEmpty,
@@ -147,7 +148,7 @@ function CommandPaletteContent({ onClose }: { onClose: () => void }) {
   const navigate = useCallback(
     (path: string) => {
       onClose();
-      router.push(path);
+      router.push(withProject(path));
     },
     [router, onClose]
   );

@@ -2,7 +2,19 @@
 
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { currentProjectId } from "@/lib/project-prefix";
 import type { WsEvent } from "@/lib/types";
+
+function websocketUrl(projectId: string): string {
+  const prefixed = `/api/p/${encodeURIComponent(projectId)}/ws`;
+  const configured = process.env.NEXT_PUBLIC_WS_URL;
+  if (configured) {
+    // Dev: NEXT_PUBLIC_WS_URL is ws://localhost:4200/ws — splice in the Project prefix.
+    return configured.replace(/\/ws$/, prefixed);
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${prefixed}`;
+}
 
 export function useWebSocket() {
   const queryClient = useQueryClient();
@@ -11,9 +23,11 @@ export function useWebSocket() {
 
   useEffect(() => {
     function connect() {
-      const url =
-        process.env.NEXT_PUBLIC_WS_URL ??
-        `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
+      const projectId = currentProjectId();
+      if (!projectId) {
+        return;
+      }
+      const url = websocketUrl(projectId);
       const ws = new WebSocket(url);
       wsRef.current = ws;
 

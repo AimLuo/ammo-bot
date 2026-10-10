@@ -8,6 +8,7 @@ const nextConfig: NextConfig = {
   },
   // In dev mode, the WebSocket must connect directly to the Rust server
   // since Next.js rewrites don't proxy WebSocket upgrades.
+  // Project id is spliced in by useWebSocket (see project-prefix).
   env: {
     NEXT_PUBLIC_WS_URL:
       process.env.NODE_ENV === "development"
@@ -18,6 +19,18 @@ const nextConfig: NextConfig = {
   // Proxies API calls to the Rust server so the UI works in dev mode.
   async rewrites() {
     return [
+      {
+        source: "/p/:id",
+        destination: "/dashboard",
+      },
+      {
+        source: "/p/:id/",
+        destination: "/dashboard/",
+      },
+      {
+        source: "/p/:id/:path*",
+        destination: "/:path*",
+      },
       {
         source: "/api/:path*",
         destination: "http://localhost:4200/api/:path*",
