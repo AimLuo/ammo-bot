@@ -607,6 +607,7 @@ async fn run_pipeline(
     .await?;
 
     if !ticket_still_ours(&proj.project, task_id)? {
+        let _ = abort_our_incomplete_merge(&proj.project_dir, &branch);
         serve_dispatcher_handoff::silent_stop(
             &proj.project,
             &proj.ws_tx,
@@ -620,11 +621,17 @@ async fn run_pipeline(
     }
 
     if let Some(reason) = stage_agent_failure_reason(Stage::Merge, &merge_result) {
+        let reason = with_abort_note(&proj.project_dir, &branch, reason);
         return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Merge, reason)
             .await;
     }
     if !is_merge_done(merge_result.verdict.as_deref()) {
         let line = merge_result.verdict.as_deref().unwrap_or("<none>");
+        let reason = with_abort_note(
+            &proj.project_dir,
+            &branch,
+            format!("merge ended without MERGE: done (got {line})"),
+        );
         return fail_and_finish(
             &engine,
             proj,
@@ -632,12 +639,17 @@ async fn run_pipeline(
             &mut record,
             &mut run,
             Stage::Merge,
-            format!("merge ended without MERGE: done (got {line})"),
+            reason,
         )
         .await;
     }
 
     if !branch_is_ancestor(&proj.project_dir, &branch)? {
+        let reason = with_abort_note(
+            &proj.project_dir,
+            &branch,
+            "merge target does not contain agent branch".into(),
+        );
         return fail_and_finish(
             &engine,
             proj,
@@ -645,7 +657,7 @@ async fn run_pipeline(
             &mut record,
             &mut run,
             Stage::Merge,
-            "merge target does not contain agent branch".into(),
+            reason,
         )
         .await;
     }
@@ -1291,7 +1303,8 @@ struct MergeCriticalGuard {
 
 impl Drop for MergeCriticalGuard {
     fn drop(&mut self) {
-        abort_our_incomplete_merge(&self.project_dir, &self.branch);
+        // Safety net if a path returned without an explicit recover step.
+        let _ = abort_our_incomplete_merge(&self.project_dir, &self.branch);
     }
 }
 
@@ -1351,8 +1364,9 @@ fn write_merge_holder_atomic(path: &Path, holder: &MergeLockHolder) -> std::io::
 }
 
 /// If `MERGE_HEAD` matches this Run's agent branch tip, `git merge --abort`.
-/// Abort failure is logged only — never stash/reset/clean.
-fn abort_our_incomplete_merge(project_dir: &Path, branch: &str) {
+/// Returns `Err` with a loggable message when abort itself fails.
+/// Never stash/reset/clean.
+fn abort_our_incomplete_merge(project_dir: &Path, branch: &str) -> Result<(), String> {
     let merge_head = Command::new("git")
         .arg("-C")
         .arg(project_dir)
@@ -1360,25 +1374,34 @@ fn abort_our_incomplete_merge(project_dir: &Path, branch: &str) {
         .output()
         .ok();
     let Some(out) = merge_head else {
-        return;
+        return Ok(());
     };
     if !out.status.success() {
-        return;
+        return Ok(());
     }
     let merge_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if merge_sha.is_empty() {
-        return;
+        return Ok(());
     }
     let Ok(branch_tip) = git_stdout(project_dir, &["rev-parse", branch]) else {
-        return;
+        return Ok(());
     };
     if merge_sha != branch_tip.trim() {
-        return;
+        return Ok(());
     }
     if let Err(e) = git_run(project_dir, &["merge", "--abort"]) {
-        eprintln!(
-            "dispatcher: git merge --abort failed after merge of {branch}: {e}"
-        );
+        let msg = format!("git merge --abort failed after merge of {branch}: {e}");
+        eprintln!("dispatcher: {msg}");
+        return Err(msg);
+    }
+    Ok(())
+}
+
+/// Recover this Run's incomplete merge before writing the handoff comment.
+fn with_abort_note(project_dir: &Path, branch: &str, reason: String) -> String {
+    match abort_our_incomplete_merge(project_dir, branch) {
+        Ok(()) => reason,
+        Err(abort_err) => format!("{reason}; {abort_err}"),
     }
 }
 
