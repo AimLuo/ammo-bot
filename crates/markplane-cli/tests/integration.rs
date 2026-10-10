@@ -2611,8 +2611,26 @@ fn test_markplane_root_missing_markplane_errors_clearly() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("MARKPLANE_ROOT"))
-        .stderr(predicate::str::contains(".markplane"))
+        .stderr(predicate::str::contains("does not contain a .markplane/ directory"))
         .stderr(predicate::str::contains(root.as_str()));
+}
+
+#[test]
+fn test_markplane_root_incomplete_markplane_errors_clearly() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir(tmp.path().join(".markplane")).unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+
+    cmd()
+        .current_dir(tmp.path())
+        .env("MARKPLANE_ROOT", tmp.path())
+        .args(["show", "TASK-xxxxx"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("MARKPLANE_ROOT"))
+        .stderr(predicate::str::contains("config.yaml"))
+        .stderr(predicate::str::contains(root.as_str()))
+        .stderr(predicate::str::contains("does not contain a .markplane/ directory").not());
 }
 
 // ── Body file ────────────────────────────────────────────────────────

@@ -262,26 +262,43 @@ impl Project {
         if let Some(root) = std::env::var_os("MARKPLANE_ROOT") {
             let root = PathBuf::from(root);
             let candidate = root.join(".markplane");
-            if candidate.is_dir() && candidate.join("config.yaml").is_file() {
-                return Ok(Project::new(candidate));
+            if let Some(project) = Self::from_markplane_dir(&candidate) {
+                return Ok(project);
             }
-            return Err(MarkplaneError::NotInitialized(format!(
-                "MARKPLANE_ROOT ({}) does not contain a .markplane/ directory",
-                root.display()
-            )));
+            let msg = if candidate.is_dir() {
+                format!(
+                    "MARKPLANE_ROOT ({}) has .markplane/ but it is missing config.yaml",
+                    root.display()
+                )
+            } else {
+                format!(
+                    "MARKPLANE_ROOT ({}) does not contain a .markplane/ directory",
+                    root.display()
+                )
+            };
+            return Err(MarkplaneError::NotInitialized(msg));
         }
 
         let mut dir = std::env::current_dir().map_err(MarkplaneError::Io)?;
         loop {
             let candidate = dir.join(".markplane");
-            if candidate.is_dir() && candidate.join("config.yaml").is_file() {
-                return Ok(Project::new(candidate));
+            if let Some(project) = Self::from_markplane_dir(&candidate) {
+                return Ok(project);
             }
             if !dir.pop() {
                 return Err(MarkplaneError::NotInitialized(
                     "No .markplane/ directory found in current or parent directories".into(),
                 ));
             }
+        }
+    }
+
+    /// Open a project if `path` is a `.markplane/` directory with `config.yaml`.
+    fn from_markplane_dir(path: &Path) -> Option<Self> {
+        if path.is_dir() && path.join("config.yaml").is_file() {
+            Some(Project::new(path.to_path_buf()))
+        } else {
+            None
         }
     }
 
