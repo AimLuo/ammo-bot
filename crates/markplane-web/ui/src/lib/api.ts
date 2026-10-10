@@ -1,7 +1,9 @@
+import { apiPath } from "@/lib/project-prefix";
+
 const API_BASE = typeof window !== "undefined" ? "" : "http://localhost:4200";
 
 export async function fetcher<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${apiPath(path)}`);
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: res.statusText } }));
     throw new Error(error.error?.message || `API error: ${res.status}`);
@@ -11,7 +13,7 @@ export async function fetcher<T>(path: string): Promise<T> {
 }
 
 export async function fetchList<T>(path: string): Promise<{ data: T[]; total: number }> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${apiPath(path)}`);
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: res.statusText } }));
     throw new Error(error.error?.message || `API error: ${res.status}`);
@@ -21,7 +23,7 @@ export async function fetchList<T>(path: string): Promise<{ data: T[]; total: nu
 }
 
 export async function postAction<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "POST" });
+  const res = await fetch(`${API_BASE}${apiPath(path)}`, { method: "POST" });
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: res.statusText } }));
     throw new Error(error.error?.message || `API error: ${res.status}`);
@@ -31,7 +33,7 @@ export async function postAction<T>(path: string): Promise<T> {
 }
 
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${API_BASE}${apiPath(path)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -45,7 +47,7 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function patchJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${API_BASE}${apiPath(path)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -59,7 +61,7 @@ export async function patchJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function deleteAction<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}${apiPath(path)}`, { method: "DELETE" });
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: res.statusText } }));
     throw new Error(error.error?.message || `API error: ${res.status}`);

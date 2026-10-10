@@ -83,8 +83,8 @@ fn spawn_serve(
             }
             Ok(_) => {
                 collected.push_str(&line);
-                // Wait for the WebSocket line — last startup banner before bind.
-                if collected.contains("WebSocket available at ") {
+                // Wait for the Open URL line — last startup banner before bind.
+                if collected.contains("Open http://") || collected.contains("Open https://") {
                     std::thread::sleep(Duration::from_millis(300));
                     return ServeChild {
                         child,
@@ -151,8 +151,8 @@ fn serve_https_generates_cert_and_completes_handshake() {
         serve.stdout
     );
     assert!(
-        serve.stdout.contains("wss://localhost:"),
-        "expected wss URL, got:\n{}",
+        serve.stdout.contains("Open https://localhost:"),
+        "expected Open https URL, got:\n{}",
         serve.stdout
     );
     assert!(
@@ -173,12 +173,13 @@ fn serve_https_generates_cert_and_completes_handshake() {
         assert_eq!(mode(&cert), 0o644);
     }
 
-    let url = format!("https://localhost:{port}/api/summary");
+    // Global registry API (no Project prefix) — enough to prove TLS handshake.
+    let url = format!("https://localhost:{port}/api/projects");
     let (status, body) = curl_get(&url, Some(&cert));
     assert_eq!(status, 200, "body={body}");
     assert!(
-        body.contains("HTTPS Test") || body.contains("\"name\""),
-        "unexpected summary body: {body}"
+        body.contains("HTTPS Test") || body.contains("projects") || body.contains('['),
+        "unexpected projects body: {body}"
     );
 }
 
@@ -208,7 +209,7 @@ fn serve_reuses_cert_without_reprinting_trust_on_second_start() {
     let pem_after = std::fs::read(&cert).unwrap();
     assert_eq!(pem_before, pem_after);
 
-    let url = format!("https://localhost:{port2}/api/summary");
+    let url = format!("https://localhost:{port2}/api/projects");
     let (status, _) = curl_get(&url, Some(&cert));
     assert_eq!(status, 200);
 }
@@ -233,7 +234,7 @@ fn serve_dev_and_no_tls_use_http() {
         serve_dev.stdout
     );
     let (status, _) = curl_get(
-        &format!("http://127.0.0.1:{port_dev}/api/summary"),
+        &format!("http://127.0.0.1:{port_dev}/api/projects"),
         None,
     );
     assert_eq!(status, 200);
@@ -261,7 +262,7 @@ fn serve_dev_and_no_tls_use_http() {
         serve_plain.stdout
     );
     let (status, _) = curl_get(
-        &format!("http://127.0.0.1:{port_plain}/api/summary"),
+        &format!("http://127.0.0.1:{port_plain}/api/projects"),
         None,
     );
     assert_eq!(status, 200);

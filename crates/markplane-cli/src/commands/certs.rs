@@ -27,28 +27,16 @@ const NOT_BEFORE_SKEW: Duration = Duration::from_secs(3600);
 #[derive(Debug, Clone)]
 pub struct EnsuredCerts {
     pub cert_path: PathBuf,
+    #[allow(dead_code)] // reserved for callers that load key + cert together
     pub key_path: PathBuf,
     /// True when a new certificate was written (first generate or renewal).
     pub renewed: bool,
 }
 
-/// Resolve the markplane config directory (`$XDG_CONFIG_HOME/markplane` or `~/.config/markplane`).
-pub fn markplane_config_dir() -> Result<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        let trimmed = xdg.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed).join("markplane"));
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .context("neither HOME nor USERPROFILE is set")?;
-    Ok(PathBuf::from(home).join(".config").join("markplane"))
-}
-
-/// Directory that holds `cert.pem` / `key.pem`.
+/// Directory that holds `cert.pem` / `key.pem` under the markplane config dir.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn markplane_certs_dir() -> Result<PathBuf> {
-    Ok(markplane_config_dir()?.join("certs"))
+    Ok(super::serve_registry::config_dir().join("certs"))
 }
 
 /// Ensure `certs_dir` contains a valid localhost leaf certificate and private key.

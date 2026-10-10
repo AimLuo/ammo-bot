@@ -34,6 +34,7 @@ import {
   SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useWithProject, stripProject } from "@/lib/project-prefix";
 import { MarkplaneLogo } from "@/components/ui/markplane-logo";
 
 const ICON_MAP = {
@@ -59,7 +60,8 @@ const mainNav = [
 ];
 
 export function AppSidebar() {
-  const pathname = usePathname();
+  const pathname = stripProject(usePathname());
+  const withProject = useWithProject();
   const { theme, setTheme } = useTheme();
   const { isMobile, toggleSidebar } = useSidebar();
 
@@ -67,7 +69,7 @@ export function AppSidebar() {
     <Sidebar collapsible="icon">
       <SidebarHeader className="p-2 pt-3">
         <Link
-          href="/dashboard"
+          href={withProject("/dashboard")}
           className="flex items-center gap-2 overflow-hidden rounded-md p-1"
         >
           <MarkplaneLogo className="size-6 text-primary shrink-0" />
@@ -102,7 +104,7 @@ export function AppSidebar() {
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={pathname.startsWith(item.href)} tooltip={item.label} className="text-base">
-                      <Link href={item.href}>
+                      <Link href={withProject(item.href)}>
                         <Icon className="size-5" />
                         <span>{item.label}</span>
                       </Link>
@@ -119,7 +121,7 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton asChild isActive={pathname.startsWith("/docs")} tooltip="Docs" className="text-base">
-              <Link href="/docs">
+              <Link href={withProject("/docs")}>
                 <BookOpen className="size-5" />
                 <span>Docs</span>
               </Link>
@@ -127,7 +129,7 @@ export function AppSidebar() {
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton asChild isActive={pathname.startsWith("/settings")} tooltip="Settings" className="text-base">
-              <Link href="/settings">
+              <Link href={withProject("/settings")}>
                 <Settings className="size-5" />
                 <span>Settings</span>
               </Link>

@@ -4073,3 +4073,75 @@ fn test_claude_md_includes_maps_paths() {
     assert!(content.contains(".markplane/maps/INDEX.md"));
     assert!(content.contains(".context/maps.md"));
 }
+
+// ── Serve multi-project registry ─────────────────────────────────────────
+
+#[test]
+fn test_serve_registers_project_and_serves_prefixed_api() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::{Duration, Instant};
+
+    let tmp = setup_project();
+    let xdg = tempfile::TempDir::new().unwrap();
+
+    // Pick a free port.
+    let port = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+
+    let bin = assert_cmd::cargo::cargo_bin!("markplane");
+    let mut child = StdCommand::new(bin)
+        .current_dir(tmp.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .args(["serve", "--dev", "--port", &port.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve");
+
+    let registry = xdg.path().join("markplane/projects.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if registry.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        registry.is_file(),
+        "projects.json was not created under XDG_CONFIG_HOME"
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&registry).unwrap()).unwrap();
+    let projects = json["projects"].as_array().expect("projects array");
+    assert_eq!(projects.len(), 1);
+    let id = projects[0]["id"].as_str().unwrap();
+
+    // Wait until the server accepts connections.
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let req = format!(
+                "GET /api/p/{id}/summary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            );
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut buf = String::new();
+                let _ = stream.read_to_string(&mut buf);
+                if buf.contains("200 OK") && buf.contains("Test Project") {
+                    ready = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(ready, "prefixed /api/p/<id>/summary did not become ready");
+}

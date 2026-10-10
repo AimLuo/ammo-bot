@@ -22,6 +22,7 @@ mod plan;
 mod promote;
 mod resolve;
 mod serve;
+mod serve_registry;
 mod show;
 mod stale;
 mod start;

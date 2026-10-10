@@ -1,27 +1,25 @@
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Json};
-
-#[cfg(test)]
-use std::convert::Infallible;
-#[cfg(test)]
-use axum::extract::Request;
-#[cfg(test)]
-use axum::response::Response;
+use axum::extract::{Extension, Path, Query, Request, State};
+use axum::http::{HeaderValue, StatusCode, Uri};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{get, post};
+use hyper::body::Incoming;
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
+use tower::Layer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 #[cfg(not(feature = "embed-ui"))]
@@ -33,6 +31,8 @@ use markplane_core::{
     ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow, find_blocked_items,
     find_frontier_items, parse_id, split_markdown_sections,
 };
+
+use super::serve_registry::{self, RegistryEntry};
 
 #[cfg(feature = "embed-ui")]
 use rust_embed::Embed;
@@ -47,12 +47,133 @@ struct WebAssets;
 #[folder = "../../docs"]
 struct DocAssets;
 
-struct AppState {
+/// Per-Project runtime: loaded Project, isolated WS fan-out, and file watcher.
+struct ProjectRuntime {
+    project: Project,
     ws_tx: broadcast::Sender<String>,
+    watcher_abort: tokio::task::AbortHandle,
+}
+
+impl ProjectRuntime {
+    fn abort_watcher(&self) {
+        self.watcher_abort.abort();
+    }
+}
+
+/// WebSocket broadcast channel for the Project resolved by the rewrite layer.
+#[derive(Clone)]
+struct ProjectWs(broadcast::Sender<String>);
+
+struct AppState {
+    config_dir: PathBuf,
     port: u16,
     dev: bool,
     /// When true, CORS / WebSocket Origin checks use `https://`.
     use_tls: bool,
+    runtimes: Mutex<HashMap<String, Arc<ProjectRuntime>>>,
+}
+
+enum RuntimeError {
+    NotFound,
+    Unavailable { path: String },
+}
+
+impl AppState {
+    fn new(config_dir: PathBuf, port: u16, dev: bool, use_tls: bool) -> Arc<Self> {
+        Arc::new(Self {
+            config_dir,
+            port,
+            dev,
+            use_tls,
+            runtimes: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn get_or_create_runtime(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<Arc<ProjectRuntime>, RuntimeError> {
+        {
+            let guard = self.runtimes.lock().await;
+            if let Some(rt) = guard.get(id) {
+                return Ok(rt.clone());
+            }
+        }
+
+        let entry = match serve_registry::find(&self.config_dir, id) {
+            Ok(Some(e)) => e,
+            Ok(None) => match serve_registry::find_reread(&self.config_dir, id) {
+                Ok(Some(e)) => e,
+                _ => return Err(RuntimeError::NotFound),
+            },
+            Err(_) => return Err(RuntimeError::NotFound),
+        };
+
+        self.establish_runtime(id, &entry).await
+    }
+
+    async fn establish_runtime(
+        self: &Arc<Self>,
+        id: &str,
+        entry: &RegistryEntry,
+    ) -> Result<Arc<ProjectRuntime>, RuntimeError> {
+        let project_path = PathBuf::from(&entry.path);
+        let markplane = project_path.join(".markplane");
+        if !project_path.is_dir() || !markplane.is_dir() {
+            self.drop_runtime(id).await;
+            return Err(RuntimeError::Unavailable {
+                path: entry.path.clone(),
+            });
+        }
+
+        let project = Project::new(markplane);
+        if let Err(e) = project.sync_all() {
+            eprintln!("sync_all failed for project {id}: {e}");
+            self.drop_runtime(id).await;
+            return Err(RuntimeError::Unavailable {
+                path: entry.path.clone(),
+            });
+        }
+
+        let (ws_tx, _) = broadcast::channel::<String>(256);
+        let watch_root = project.root().to_path_buf();
+        let ws_tx_clone = ws_tx.clone();
+        let watcher = tokio::spawn(async move {
+            if let Err(e) = run_file_watcher(watch_root, ws_tx_clone).await {
+                eprintln!("File watcher error: {e}");
+            }
+        });
+        let watcher_abort = watcher.abort_handle();
+
+        let runtime = Arc::new(ProjectRuntime {
+            project,
+            ws_tx,
+            watcher_abort,
+        });
+
+        {
+            let mut guard = self.runtimes.lock().await;
+            // Another request may have won the race.
+            if let Some(existing) = guard.get(id) {
+                runtime.abort_watcher();
+                return Ok(existing.clone());
+            }
+            guard.insert(id.to_string(), runtime.clone());
+        }
+
+        if let Err(e) = serve_registry::touch_last_opened(&self.config_dir, id) {
+            eprintln!("failed to update lastOpened for {id}: {e}");
+        }
+
+        Ok(runtime)
+    }
+
+    async fn drop_runtime(&self, id: &str) {
+        let mut guard = self.runtimes.lock().await;
+        if let Some(rt) = guard.remove(id) {
+            rt.abort_watcher();
+        }
+    }
 }
 
 // ── Documentation Manifest ───────────────────────────────────────────────
@@ -97,39 +218,41 @@ const DOC_MANIFEST: &[DocEntry] = &[
 ];
 
 pub async fn run(port: u16, open: bool, dev: bool, no_tls: bool) -> anyhow::Result<()> {
-    let project = Project::from_current_dir()?;
+    let config_dir = serve_registry::config_dir();
+    fs_create_config_dir(&config_dir)?;
 
-    // Full sync on startup to ensure derived files are up-to-date
-    project.sync_all()?;
-
-    let (ws_tx, _) = broadcast::channel::<String>(256);
-
-    // Start file watcher for WebSocket events
-    let watch_root = project.root().to_path_buf();
-    let ws_tx_clone = ws_tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_file_watcher(watch_root, ws_tx_clone).await {
-            eprintln!("File watcher error: {}", e);
+    let open_path = match Project::from_current_dir() {
+        Ok(project) => {
+            let project_dir = project
+                .root()
+                .parent()
+                .unwrap_or(project.root())
+                .to_path_buf();
+            let entry = serve_registry::register(&config_dir, &project_dir)?;
+            println!(
+                "Registered project '{}' ({})",
+                entry.name,
+                project_dir.display()
+            );
+            format!("/p/{}/", entry.id)
         }
-    });
+        Err(_) => {
+            println!("No Project in current directory — opening landing page");
+            "/".to_string()
+        }
+    };
 
     let use_tls = !dev && !no_tls;
-    let state = Arc::new(AppState {
-        ws_tx,
-        port,
-        dev,
-        use_tls,
-    });
-    // hyper::Incoming so axum-server / axum::serve can hand off request bodies.
-    let app = layer_project::<hyper::body::Incoming>(project, build_router(state));
+    let state = AppState::new(config_dir.clone(), port, dev, use_tls);
+    let app = build_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let scheme = if use_tls { "https" } else { "http" };
-    let ws_scheme = if use_tls { "wss" } else { "ws" };
-    let url = format!("{scheme}://localhost:{port}");
+    let base = format!("{scheme}://localhost:{port}");
+    let url = format!("{base}{open_path}");
 
     if use_tls {
-        let certs_dir = super::certs::markplane_certs_dir()?;
+        let certs_dir = config_dir.join("certs");
         let ensured = super::certs::ensure_certs(&certs_dir)?;
         if ensured.renewed {
             println!(
@@ -139,109 +262,69 @@ pub async fn run(port: u16, open: bool, dev: bool, no_tls: bool) -> anyhow::Resu
             println!("{}", super::certs::trust_instructions(&ensured.cert_path));
             let _ = std::io::stdout().flush();
         }
+    }
 
-        println!("Markplane web UI starting on {url}");
+    println!("Markplane web UI starting on {base}");
+    if dev {
+        println!("Running in dev mode — API only (use Next.js dev server for UI)");
+    } else {
         #[cfg(feature = "embed-ui")]
         println!("Serving embedded UI from binary");
         #[cfg(not(feature = "embed-ui"))]
         println!("Serving static UI from crates/markplane-web/ui/out/");
-        println!("WebSocket available at {ws_scheme}://localhost:{port}/ws");
-        let _ = std::io::stdout().flush();
-
-        if open {
-            let _ = open::that(&url);
+        if no_tls {
+            println!("TLS disabled (--no-tls); serving plain HTTP");
         }
+    }
+    println!("Open {url}");
+    let _ = std::io::stdout().flush();
 
-        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-            &ensured.cert_path,
-            &ensured.key_path,
-        )
-        .await?;
-        // MapRequestLayer sits outside the Router (before route matching); that
-        // requires into_make_service rather than passing the Router directly.
+    if open {
+        let _ = open::that(&url);
+    }
+
+    // axum-server passes hyper::Incoming; adapt to axum::Body for the boxed stack.
+    let app = tower::util::MapRequestLayer::new(incoming_to_axum_body).layer(app);
+    let make_service = axum::ServiceExt::into_make_service(app);
+
+    if use_tls {
+        let certs_dir = config_dir.join("certs");
+        let cert_path = certs_dir.join("cert.pem");
+        let key_path = certs_dir.join("key.pem");
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
         axum_server::bind_rustls(addr, tls)
-            .serve(axum::ServiceExt::into_make_service(app))
+            .serve(make_service)
             .await?;
     } else {
-        println!("Markplane web UI starting on {url}");
-        if dev {
-            println!("Running in dev mode — API only (use Next.js dev server for UI)");
-        } else {
-            #[cfg(feature = "embed-ui")]
-            println!("Serving embedded UI from binary");
-            #[cfg(not(feature = "embed-ui"))]
-            println!("Serving static UI from crates/markplane-web/ui/out/");
-            if no_tls {
-                println!("TLS disabled (--no-tls); serving plain HTTP");
-            }
-        }
-        println!("WebSocket available at {ws_scheme}://localhost:{port}/ws");
-        let _ = std::io::stdout().flush();
-
-        if open {
-            let _ = open::that(&url);
-        }
-
-        // Use axum-server for HTTP too so the service body type matches TLS
-        // (hyper::Incoming). MapRequestLayer requires into_make_service.
-        axum_server::bind(addr)
-            .serve(axum::ServiceExt::into_make_service(app))
-            .await?;
+        axum_server::bind(addr).serve(make_service).await?;
     }
 
     Ok(())
 }
 
-/// Inject the active [`Project`] into request extensions before route matching.
-fn inject_project<B>(
-    project: Project,
-) -> impl Fn(axum::http::Request<B>) -> axum::http::Request<B> + Clone {
-    move |mut req: axum::http::Request<B>| {
-        req.extensions_mut().insert(project.clone());
-        req
-    }
+fn incoming_to_axum_body(req: axum::http::Request<Incoming>) -> Request {
+    let (parts, body) = req.into_parts();
+    Request::from_parts(parts, Body::new(body))
 }
 
-/// Wrap a router with the project-injection layer (body-type generic).
-fn layer_project<B>(
-    project: Project,
-    router: Router,
-) -> tower::util::MapRequest<
-    Router,
-    impl Fn(axum::http::Request<B>) -> axum::http::Request<B> + Clone,
-> {
-    tower::Layer::layer(
-        &tower::util::MapRequestLayer::new(inject_project::<B>(project)),
-        router,
-    )
+fn fs_create_config_dir(config_dir: &FsPath) -> anyhow::Result<()> {
+    std::fs::create_dir_all(config_dir)?;
+    Ok(())
 }
 
-/// Assemble the serve Router and wrap it with the project-injection layer.
-///
-/// The layer runs before route matching so handlers can read [`Project`] from
-/// request extensions instead of global state. Boxed for in-process oneshot tests.
-#[cfg(test)]
+/// Assemble the serve stack: prefix middleware outside the Router (before matching).
 fn build_app(
-    project: Project,
-    ws_tx: broadcast::Sender<String>,
-    port: u16,
-    dev: bool,
-    use_tls: bool,
+    state: Arc<AppState>,
 ) -> tower::util::BoxCloneService<Request, Response, Infallible> {
-    let state = Arc::new(AppState {
-        ws_tx,
-        port,
-        dev,
-        use_tls,
-    });
-    tower::util::BoxCloneService::new(layer_project::<axum::body::Body>(
-        project,
-        build_router(state),
-    ))
+    let router = build_router(state.clone());
+    let app = middleware::from_fn_with_state(state, project_prefix_middleware).layer(router);
+    tower::util::BoxCloneService::new(app)
 }
 
 fn build_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
+        .route("/", get(landing_page))
+        .route("/api/projects", get(list_projects))
         .route("/api/summary", get(get_summary))
         .route("/api/tasks", get(get_tasks).post(create_task))
         .route(
@@ -313,6 +396,195 @@ fn build_router(state: Arc<AppState>) -> Router {
     }
 }
 
+/// Known unprefixed app pages — stale bookmarks redirect to the landing page.
+fn is_legacy_page_path(path: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/dashboard",
+        "/backlog",
+        "/roadmap",
+        "/maps",
+        "/plans",
+        "/notes",
+        "/graph",
+        "/archive",
+        "/settings",
+        "/docs",
+    ];
+    PREFIXES.iter().any(|p| path == *p || path.starts_with(&format!("{p}/")))
+}
+
+#[derive(Clone, Copy)]
+enum PrefixKind {
+    Api,
+    Page,
+}
+
+fn parse_project_prefix(path: &str) -> Option<(String, String, PrefixKind)> {
+    if let Some(rest) = path.strip_prefix("/api/p/") {
+        let (id, r) = rest.split_once('/')?;
+        if id.is_empty() {
+            return None;
+        }
+        return Some((id.to_string(), r.to_string(), PrefixKind::Api));
+    }
+    if let Some(rest) = path.strip_prefix("/p/") {
+        if rest.is_empty() {
+            return None;
+        }
+        let (id, r) = match rest.split_once('/') {
+            Some((id, r)) => (id, r),
+            None => (rest, ""),
+        };
+        if id.is_empty() {
+            return None;
+        }
+        return Some((id.to_string(), r.to_string(), PrefixKind::Page));
+    }
+    None
+}
+
+fn rewrite_path(kind: PrefixKind, rest: &str) -> String {
+    match kind {
+        PrefixKind::Api => {
+            if rest == "ws" {
+                "/ws".to_string()
+            } else {
+                format!("/api/{rest}")
+            }
+        }
+        PrefixKind::Page => {
+            if rest.is_empty() || rest == "/" {
+                "/dashboard/".to_string()
+            } else if rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                format!("/{rest}")
+            }
+        }
+    }
+}
+
+fn set_uri_path(req: &mut Request, new_path: &str) {
+    let pq = match req.uri().query() {
+        Some(q) => format!("{new_path}?{q}"),
+        None => new_path.to_string(),
+    };
+    let mut parts = req.uri().clone().into_parts();
+    parts.path_and_query = Some(pq.parse().expect("path_and_query"));
+    *req.uri_mut() = Uri::from_parts(parts).expect("uri");
+}
+
+async fn project_prefix_middleware(
+    State(state): State<Arc<AppState>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+
+    if is_legacy_page_path(&path) {
+        return Redirect::temporary("/").into_response();
+    }
+
+    if let Some((id, rest, kind)) = parse_project_prefix(&path) {
+        match state.get_or_create_runtime(&id).await {
+            Ok(rt) => {
+                req.extensions_mut().insert(rt.project.clone());
+                req.extensions_mut().insert(ProjectWs(rt.ws_tx.clone()));
+                set_uri_path(&mut req, &rewrite_path(kind, &rest));
+                next.run(req).await
+            }
+            Err(RuntimeError::NotFound) => error_response(
+                StatusCode::NOT_FOUND,
+                "project_not_found",
+                &format!("Project '{id}' is not in the registry"),
+            )
+            .into_response(),
+            Err(RuntimeError::Unavailable { path }) => {
+                state.drop_runtime(&id).await;
+                error_response_with_path(
+                    StatusCode::CONFLICT,
+                    "project_unavailable",
+                    "Project path is unavailable",
+                    &path,
+                )
+                .into_response()
+            }
+        }
+    } else {
+        next.run(req).await
+    }
+}
+
+#[derive(Serialize)]
+struct ProjectListItem {
+    id: String,
+    name: String,
+    path: String,
+    path_valid: bool,
+    last_opened: String,
+}
+
+async fn list_projects(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiListResponse<ProjectListItem>>, (StatusCode, Json<ApiError>)> {
+    let mut projects = serve_registry::list(&state.config_dir).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+    let data: Vec<ProjectListItem> = projects
+        .into_iter()
+        .map(|e| {
+            let path_valid = FsPath::new(&e.path).join(".markplane").is_dir();
+            ProjectListItem {
+                id: e.id,
+                name: e.name,
+                path: e.path,
+                path_valid,
+                last_opened: e.last_opened.to_rfc3339(),
+            }
+        })
+        .collect();
+    let total = data.len();
+    Ok(Json(ApiListResponse {
+        data,
+        meta: ListMeta { total },
+    }))
+}
+
+async fn landing_page(State(state): State<Arc<AppState>>) -> Html<String> {
+    let projects = serve_registry::list(&state.config_dir).unwrap_or_default();
+    let mut items = String::new();
+    if projects.is_empty() {
+        items.push_str("<li>No projects registered. Run <code>markplane serve</code> inside a Project.</li>");
+    } else {
+        let mut sorted = projects;
+        sorted.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+        for e in sorted {
+            items.push_str(&format!(
+                "<li><a href=\"/p/{id}/\">{name}</a> <span style=\"color:#666\">{path}</span></li>",
+                id = html_escape(&e.id),
+                name = html_escape(&e.name),
+                path = html_escape(&e.path),
+            ));
+        }
+    }
+    Html(format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Markplane</title></head>\
+         <body><h1>Markplane</h1><p>Projects</p><ul>{items}</ul></body></html>"
+    ))
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 // ── Embedded Static File Server ──────────────────────────────────────────
 
 #[cfg(feature = "embed-ui")]
@@ -382,21 +654,7 @@ async fn run_file_watcher(root: PathBuf, tx: broadcast::Sender<String>) -> anyho
         .watcher()
         .watch(&root, notify::RecursiveMode::Recursive)?;
 
-    // Also watch documentation files (repo root is parent of .markplane/)
-    let repo = root.parent().unwrap_or(&root).to_path_buf();
-    let docs_dir = repo.join("docs");
-    if docs_dir.is_dir() {
-        let _ = debouncer
-            .watcher()
-            .watch(&docs_dir, notify::RecursiveMode::NonRecursive);
-    }
-    // Build lookup set of absolute doc paths for fast matching
-    let doc_paths: HashMap<PathBuf, &'static str> = DOC_MANIFEST
-        .iter()
-        .map(|entry| (repo.join(entry.path), entry.slug))
-        .collect();
-
-    // Keep debouncer alive
+    // Keep debouncer alive. Docs are global markplane docs — not watched per Project.
     let _debouncer = debouncer;
 
     while let Some(path) = notify_rx.recv().await {
@@ -404,16 +662,6 @@ async fn run_file_watcher(root: PathBuf, tx: broadcast::Sender<String>) -> anyho
 
         // Skip non-markdown files (except config.yaml)
         if !path_str.ends_with(".md") && !path_str.ends_with("config.yaml") {
-            continue;
-        }
-
-        // Check if this is a documentation file change
-        if let Some(slug) = doc_paths.get(&path) {
-            let event = serde_json::json!({
-                "type": "doc_changed",
-                "slug": slug
-            });
-            let _ = tx.send(event.to_string());
             continue;
         }
 
@@ -466,6 +714,7 @@ async fn ws_handler(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    Extension(project_ws): Extension<ProjectWs>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
     // Validate Origin header in non-dev mode
     if !state.dev {
@@ -484,14 +733,14 @@ async fn ws_handler(
                 }
             }
             None => {
-                // No Origin header — allow (same-origin requests may omit it).
+                // No Origin header — allow (same-origin requests may omit it)
             }
         }
     }
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, state)))
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, project_ws)))
 }
 
-async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_ws(socket: WebSocket, project_ws: ProjectWs) {
     let (mut sender, mut receiver) = socket.split();
 
     // Send connected message
@@ -500,7 +749,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
         .send(Message::Text(connected.to_string().into()))
         .await;
 
-    let mut rx = state.ws_tx.subscribe();
+    let mut rx = project_ws.0.subscribe();
 
     // Forward broadcast events to this WebSocket client
     let mut send_task = tokio::spawn(async move {
@@ -582,6 +831,8 @@ struct ApiError {
 struct ErrorDetail {
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 fn error_response(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
@@ -591,6 +842,25 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> (StatusCode,
             error: ErrorDetail {
                 code: code.to_string(),
                 message: message.to_string(),
+                path: None,
+            },
+        }),
+    )
+}
+
+fn error_response_with_path(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    path: &str,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: ErrorDetail {
+                code: code.to_string(),
+                message: message.to_string(),
+                path: Some(path.to_string()),
             },
         }),
     )
@@ -689,50 +959,48 @@ struct DocContentResponse {
     content: String,
 }
 
-/// Resolve the repo root from the `.markplane/` project root.
-fn repo_root(project: &Project) -> PathBuf {
-    project
-        .root()
-        .parent()
-        .unwrap_or(project.root())
-        .to_path_buf()
-}
-
 /// Map a manifest path (e.g. `"docs/foo.md"`) to the embedded asset key (`"foo.md"`).
 #[cfg(feature = "embed-ui")]
 fn embedded_doc_key(manifest_path: &str) -> &str {
     manifest_path.strip_prefix("docs/").unwrap_or(manifest_path)
 }
 
+/// Global markplane docs root (not tied to any opened Project).
+fn markplane_docs_root() -> PathBuf {
+    FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../../docs")
+}
+
 /// Read documentation content, preferring embedded assets over filesystem.
-fn read_doc_content(path: &str, project: &Project) -> Option<String> {
+fn read_doc_content(path: &str) -> Option<String> {
     #[cfg(feature = "embed-ui")]
     {
         if let Some(file) = DocAssets::get(embedded_doc_key(path)) {
             return String::from_utf8(file.data.into_owned()).ok();
         }
     }
-    let file_path = repo_root(project).join(path);
+    // Manifest paths are like "docs/foo.md"; on disk under markplane_docs_root they're "foo.md".
+    let rel = path.strip_prefix("docs/").unwrap_or(path);
+    let file_path = markplane_docs_root().join(rel);
     std::fs::read_to_string(&file_path).ok()
 }
 
 /// Check whether a doc file is available (embedded or on disk).
-fn doc_content_available(path: &str, project: &Project) -> bool {
+fn doc_content_available(path: &str) -> bool {
     #[cfg(feature = "embed-ui")]
     {
         if DocAssets::get(embedded_doc_key(path)).is_some() {
             return true;
         }
     }
-    repo_root(project).join(path).is_file()
+    let rel = path.strip_prefix("docs/").unwrap_or(path);
+    markplane_docs_root().join(rel).is_file()
 }
 
-async fn get_docs(
-    Extension(project): Extension<Project>,
-) -> Result<Json<ApiListResponse<DocMetaResponse>>, (StatusCode, Json<ApiError>)> {
+async fn get_docs() -> Result<Json<ApiListResponse<DocMetaResponse>>, (StatusCode, Json<ApiError>)>
+{
     let docs: Vec<DocMetaResponse> = DOC_MANIFEST
         .iter()
-        .filter(|entry| doc_content_available(entry.path, &project))
+        .filter(|entry| doc_content_available(entry.path))
         .map(|entry| DocMetaResponse {
             slug: entry.slug.to_string(),
             title: entry.title.to_string(),
@@ -746,7 +1014,6 @@ async fn get_docs(
 }
 
 async fn get_doc(
-    Extension(project): Extension<Project>,
     Path(slug): Path<String>,
 ) -> Result<Json<ApiResponse<DocContentResponse>>, (StatusCode, Json<ApiError>)> {
     let entry = DOC_MANIFEST
@@ -754,7 +1021,7 @@ async fn get_doc(
         .find(|e| e.slug == slug)
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "not_found", "Document not found"))?;
 
-    let content = read_doc_content(entry.path, &project).ok_or_else(|| {
+    let content = read_doc_content(entry.path).ok_or_else(|| {
         error_response(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -2572,13 +2839,13 @@ async fn update_note(
 
 async fn post_sync(
     Extension(project): Extension<Project>,
-    State(state): State<Arc<AppState>>,
+    Extension(project_ws): Extension<ProjectWs>,
 ) -> Result<Json<ApiResponse<SyncResponse>>, (StatusCode, Json<ApiError>)> {
     project.sync_all().map_err(map_core_error)?;
 
-    // Broadcast sync_complete event to all WebSocket clients
+    // Broadcast sync_complete only to this Project's WebSocket clients
     let event = serde_json::json!({"type": "sync_complete"});
-    let _ = state.ws_tx.send(event.to_string());
+    let _ = project_ws.0.send(event.to_string());
 
     Ok(Json(ApiResponse {
         data: SyncResponse {
@@ -3193,14 +3460,38 @@ mod tests {
 
     use axum::body::Body;
     use http_body_util::BodyExt;
+    use std::fs;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    fn setup_temp_project() -> (TempDir, Project) {
+    struct TestEnv {
+        _tmp: TempDir,
+        project_dir: PathBuf,
+        project_id: String,
+        app: tower::util::BoxCloneService<Request, Response, Infallible>,
+    }
+
+    fn setup_env(name: &str) -> TestEnv {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join(".markplane");
-        let project = Project::init(root, "Serve Test", "in-process serve tests").unwrap();
-        (tmp, project)
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let project_dir = tmp.path().join(name);
+        fs::create_dir_all(&project_dir).unwrap();
+        Project::init(
+            project_dir.join(".markplane"),
+            name,
+            "in-process serve tests",
+        )
+        .unwrap();
+        let entry = serve_registry::register(&config_dir, &project_dir).unwrap();
+        let state = AppState::new(config_dir, 4200, true, false);
+        let app = build_app(state);
+        TestEnv {
+            _tmp: tmp,
+            project_dir,
+            project_id: entry.id,
+            app,
+        }
     }
 
     async fn oneshot_json(
@@ -3227,23 +3518,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_returns_project_name_from_temp_dir() {
-        let (_tmp, project) = setup_temp_project();
-        let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true, false);
-
-        let (status, json) = oneshot_json(&app, "GET", "/api/summary").await;
+    async fn summary_via_project_prefix() {
+        let env = setup_env("serve-test");
+        let uri = format!("/api/p/{}/summary", env.project_id);
+        let (status, json) = oneshot_json(&env.app, "GET", &uri).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["data"]["name"], "Serve Test");
-        assert_eq!(json["data"]["description"], "in-process serve tests");
+        assert_eq!(json["data"]["name"], "serve-test");
     }
 
     #[tokio::test]
-    async fn tasks_list_and_get_return_created_task() {
-        let (_tmp, project) = setup_temp_project();
-        let task = project
+    async fn tasks_and_ws_channels_isolated_across_two_projects() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let dir_a = tmp.path().join("proj-a");
+        let dir_b = tmp.path().join("proj-b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        let proj_a = Project::init(dir_a.join(".markplane"), "A", "").unwrap();
+        let proj_b = Project::init(dir_b.join(".markplane"), "B", "").unwrap();
+        proj_a
             .create_task(
-                "In-process task",
+                "Task A only",
                 "feature",
                 Priority::Medium,
                 Effort::Small,
@@ -3254,53 +3551,133 @@ mod tests {
                 None,
             )
             .unwrap();
-        let task_id = task.id.clone();
+        proj_b
+            .create_task(
+                "Task B only",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let id_a = serve_registry::register(&config_dir, &dir_a).unwrap().id;
+        let id_b = serve_registry::register(&config_dir, &dir_b).unwrap().id;
 
-        let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true, false);
+        let state = AppState::new(config_dir, 4200, true, false);
+        let app = build_app(state.clone());
 
-        let (status, list) = oneshot_json(&app, "GET", "/api/tasks").await;
+        let (status, list_a) =
+            oneshot_json(&app, "GET", &format!("/api/p/{id_a}/tasks")).await;
         assert_eq!(status, StatusCode::OK);
-        let ids: Vec<&str> = list["data"]
+        let titles_a: Vec<&str> = list_a["data"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|t| t["id"].as_str().unwrap())
+            .map(|t| t["title"].as_str().unwrap())
             .collect();
-        assert!(ids.contains(&task_id.as_str()));
+        assert!(titles_a.contains(&"Task A only"));
+        assert!(!titles_a.contains(&"Task B only"));
 
-        let (status, one) = oneshot_json(&app, "GET", &format!("/api/tasks/{task_id}")).await;
+        let (status, list_b) =
+            oneshot_json(&app, "GET", &format!("/api/p/{id_b}/tasks")).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(one["data"]["id"], task_id);
-        assert_eq!(one["data"]["title"], "In-process task");
+        let titles_b: Vec<&str> = list_b["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["title"].as_str().unwrap())
+            .collect();
+        assert!(titles_b.contains(&"Task B only"));
+        assert!(!titles_b.contains(&"Task A only"));
+
+        let (tx_a, tx_b) = {
+            let guard = state.runtimes.lock().await;
+            (
+                guard.get(&id_a).unwrap().ws_tx.clone(),
+                guard.get(&id_b).unwrap().ws_tx.clone(),
+            )
+        };
+        let mut rx_a = tx_a.subscribe();
+        let mut rx_b = tx_b.subscribe();
+        tx_a.send(r#"{"type":"sync_complete"}"#.to_string())
+            .unwrap();
+        assert!(rx_a.try_recv().unwrap().contains("sync_complete"));
+        assert!(
+            rx_b.try_recv().is_err(),
+            "project B must not see A's WebSocket events"
+        );
     }
 
     #[tokio::test]
-    async fn config_returns_project_settings() {
-        let (_tmp, project) = setup_temp_project();
-        let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true, false);
-
-        let (status, json) = oneshot_json(&app, "GET", "/api/config").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["data"]["project"]["name"], "Serve Test");
+    async fn unknown_project_id_returns_404_project_not_found() {
+        let env = setup_env("missing-id");
+        let (status, json) =
+            oneshot_json(&env.app, "GET", "/api/p/does-not-exist/summary").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "project_not_found");
     }
 
     #[tokio::test]
-    async fn websocket_handshake_headers_reach_upgrade() {
-        let (_tmp, project) = setup_temp_project();
-        let (ws_tx, _) = broadcast::channel::<String>(16);
-        let app = build_app(project, ws_tx, 4200, true, false);
+    async fn unavailable_project_path_returns_409() {
+        let env = setup_env("gone-path");
+        // Remove the project directory after registration.
+        fs::remove_dir_all(&env.project_dir).unwrap();
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/summary", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"]["code"], "project_unavailable");
+        assert!(json["error"]["path"].as_str().unwrap().contains("gone-path"));
+    }
 
-        // oneshot has no hyper connection-upgrade state, so a valid handshake
-        // cannot return 101. Getting 426 (not 404/400) means the /ws route ran
-        // and accepted the WebSocket handshake headers.
-        let response = app
+    #[tokio::test]
+    async fn docs_available_without_project_prefix() {
+        let env = setup_env("docs-global");
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/docs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["data"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_backlog_path_redirects_to_landing() {
+        let env = setup_env("legacy");
+        let response = env
+            .app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/ws")
+                    .uri("/backlog/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers().get("location").unwrap(),
+            "/"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_handshake_via_project_prefix() {
+        let env = setup_env("ws-proj");
+        let uri = format!("/api/p/{}/ws", env.project_id);
+        let response = env
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&uri)
                     .header("connection", "upgrade")
                     .header("upgrade", "websocket")
                     .header("sec-websocket-version", "13")
@@ -3311,25 +3688,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            String::from_utf8_lossy(&body).contains("couldn't be upgraded"),
-            "expected ConnectionNotUpgradable body, got {}",
-            String::from_utf8_lossy(&body)
-        );
+    }
 
-        // Missing handshake headers must fail validation (not 404).
-        let bad = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/ws")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    #[tokio::test]
+    async fn config_via_project_prefix() {
+        let env = setup_env("cfg-proj");
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/config", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["project"]["name"], "cfg-proj");
     }
 
     #[test]
