@@ -119,7 +119,7 @@ Relationships between entities:
 CLI: markplane add "Fix login bug" --type bug --priority high
   │
   ├─ Parse args via clap
-  ├─ Project::from_current_dir()  → find .markplane/
+  ├─ Project::from_current_dir()  → MARKPLANE_ROOT or walk up for .markplane/
   ├─ validate_title_length(title) → reject if > 500 chars
   ├─ project.next_id(&IdPrefix::Task)
   │    ├─ Generate random 5-char alphanumeric suffix

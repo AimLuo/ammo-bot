@@ -253,11 +253,12 @@ impl Project {
         Project { root }
     }
 
-    /// Find `.markplane/` for CLI/MCP commands.
+    /// Resolve the project used by CLI/MCP commands.
     ///
-    /// When `MARKPLANE_ROOT` is set, use `$MARKPLANE_ROOT/.markplane/` only (no
-    /// upward search from cwd). When unset, walk up from the current working
-    /// directory as before.
+    /// Name is historical: this is not cwd-only. When `MARKPLANE_ROOT` is set,
+    /// opens `$MARKPLANE_ROOT/.markplane/` only (no upward search). When unset,
+    /// walks up from the current working directory looking for a valid layout
+    /// (`.markplane/` + `config.yaml`).
     pub fn from_current_dir() -> Result<Self> {
         if let Some(root) = std::env::var_os("MARKPLANE_ROOT") {
             let root = PathBuf::from(root);
