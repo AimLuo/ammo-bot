@@ -3114,23 +3114,23 @@ async fn get_dispatcher_status(
     })?;
 
     let concurrency = load_concurrency(&state).await;
-    let (slots_snapshot, queue_positions) = {
+    let slots_snapshot: Vec<(String, String)> = {
         let engine = state.engine.lock().await;
-        let slots: Vec<(String, String)> = engine
+        engine
             .active_slots
             .iter()
             .map(|(t, p)| (t.clone(), p.clone()))
-            .collect();
-        let positions: HashMap<String, u32> = slots
-            .iter()
-            .filter_map(|(task_id, _)| {
-                engine
-                    .merge_queue_position(task_id)
-                    .map(|pos| (task_id.clone(), pos))
-            })
-            .collect();
-        (slots, positions)
+            .collect()
     };
+    let mut queue_positions: HashMap<String, u32> = HashMap::new();
+    {
+        let engine = state.engine.lock().await;
+        for (task_id, _) in &slots_snapshot {
+            if let Some(pos) = engine.merge_queue_position(task_id).await {
+                queue_positions.insert(task_id.clone(), pos);
+            }
+        }
+    }
 
     let mut runs_by_project: HashMap<String, Vec<DispatcherActiveRun>> = HashMap::new();
     let mut running = 0u32;
@@ -3152,6 +3152,7 @@ async fn get_dispatcher_status(
                         let status = match run.status {
                             markplane_core::RunStatus::Running => "running",
                             markplane_core::RunStatus::MergeQueued => "merge-queued",
+                            // Terminal / non-slot display states are omitted below.
                             markplane_core::RunStatus::Succeeded => "succeeded",
                             markplane_core::RunStatus::Failed => "failed",
                             markplane_core::RunStatus::Stopped => "stopped",
@@ -3171,6 +3172,11 @@ async fn get_dispatcher_status(
                 },
                 None => ("running".into(), None, None),
             };
+
+        // Overview lists only Slot-holding active Runs (exz6h §4).
+        if status != "running" && status != "merge-queued" {
+            continue;
+        }
 
         match status.as_str() {
             "merge-queued" => merge_queued += 1,
