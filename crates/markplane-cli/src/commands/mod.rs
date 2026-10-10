@@ -642,9 +642,3 @@ pub fn optional_body_file(body_file: &Option<String>) -> anyhow::Result<Option<S
     }
 }
 
-/// Default comment/assignee name from `$USER` / `$USERNAME` / `me`.
-pub fn default_user_name() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "me".to_string())
-}

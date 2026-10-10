@@ -457,7 +457,7 @@ pub fn list_tools(project: &Project) -> Value {
                         },
                         "author": {
                             "type": "string",
-                            "description": "Comment author (defaults to $USER / $USERNAME / me)"
+                            "description": "Comment author (defaults to MARKPLANE_AUTHOR / $USER / $USERNAME / me)"
                         }
                     },
                     "required": ["id", "body"]
@@ -1393,7 +1393,7 @@ fn handle_comment(project: &Project, args: &Value) -> Result<String, String> {
         .get("author")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .unwrap_or_else(crate::commands::default_user_name);
+        .unwrap_or_else(markplane_core::default_comment_author);
 
     project
         .add_comment(id, &author, body)

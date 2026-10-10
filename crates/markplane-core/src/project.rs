@@ -154,8 +154,11 @@ pub fn compose_body_after_title(title: &str, content: &str) -> String {
 }
 
 /// Append a dated, attributed comment under `## Comments` (creating the section if needed).
+///
+/// Comment body headings H1–H3 outside fenced code blocks are demoted to H4 so
+/// they cannot break the `## Comments` section structure.
 pub fn append_comment_to_body(body: &str, date: &str, author: &str, text: &str) -> String {
-    let text = text.trim_end();
+    let text = crate::demote_comment_headings(text.trim_end());
     let entry = if text.is_empty() {
         format!("### {date} {author}\n")
     } else {

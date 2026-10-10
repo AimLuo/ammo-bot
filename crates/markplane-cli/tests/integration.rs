@@ -2268,6 +2268,62 @@ fn test_comment_on_task_appends_under_comments() {
 }
 
 #[test]
+fn test_comment_respects_markplane_author() {
+    let tmp = setup_project();
+    let add_out = cmd()
+        .current_dir(tmp.path())
+        .args(["add", "Author env task"])
+        .output()
+        .unwrap();
+    assert!(add_out.status.success());
+    let task_id = extract_id(&add_out.stdout);
+
+    let body_path = tmp.path().join("comment.md");
+    std::fs::write(&body_path, "From the agent.\n").unwrap();
+
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let comment_out = cmd()
+        .current_dir(tmp.path())
+        .env("MARKPLANE_AUTHOR", "agent-implement")
+        .env("USER", "alice")
+        .args([
+            "comment",
+            &task_id,
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        comment_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&comment_out.stderr)
+    );
+
+    let file = std::fs::read_to_string(
+        tmp.path()
+            .join(format!(".markplane/backlog/items/{}.md", task_id)),
+    )
+    .unwrap();
+    let body = file.splitn(3, "---").nth(2).unwrap_or("");
+    let heading = format!("### {} agent-implement", today);
+    assert!(
+        body.contains(&heading),
+        "expected heading {:?}, got:\n{}",
+        heading,
+        body
+    );
+    assert!(
+        !body.contains(&format!("### {} alice", today)),
+        "MARKPLANE_AUTHOR should win over USER; body:\n{}",
+        body
+    );
+}
+
+#[test]
 fn test_comment_accumulates_and_works_on_all_kinds() {
     let tmp = setup_project();
     let today = chrono::Local::now()

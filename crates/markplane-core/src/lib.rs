@@ -1,3 +1,4 @@
+pub mod comments;
 pub mod context;
 pub mod error;
 pub mod frontmatter;
@@ -12,6 +13,7 @@ pub mod references;
 pub mod sections;
 pub mod templates;
 
+pub use comments::{default_comment_author, demote_comment_headings};
 pub use error::{MarkplaneError, Result};
 pub use frontmatter::{parse_frontmatter, parse_frontmatter_raw, write_frontmatter};
 pub use links::{LinkAction, LinkRelation};
