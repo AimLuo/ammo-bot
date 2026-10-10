@@ -15,6 +15,7 @@ pub mod query;
 pub mod references;
 pub mod runs;
 pub mod sections;
+pub mod stage_verdict;
 pub mod templates;
 pub mod transcripts;
 
@@ -34,8 +35,12 @@ pub use dispatcher::{
     validate_dispatcher_config, validate_model, validate_timeout_minutes,
 };
 pub use pickup::{
-    READY_FOR_AGENT_TAG, PickupSortKey, cmp_pickup_keys, filter_and_sort_pickup_candidates,
-    is_implementation_ticket,
+    READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, PickupSortKey, cmp_pickup_keys,
+    filter_and_sort_pickup_candidates, is_implementation_ticket,
+};
+pub use stage_verdict::{
+    ImplementVerdict, classify_implement_verdict, implement_verdict_failure_reason, is_fix_done,
+    is_merge_done,
 };
 pub use error::{MarkplaneError, Result};
 pub use frontmatter::{parse_frontmatter, parse_frontmatter_raw, write_frontmatter};

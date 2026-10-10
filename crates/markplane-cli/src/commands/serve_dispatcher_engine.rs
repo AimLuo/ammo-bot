@@ -1,7 +1,7 @@
-//! Dispatcher happy-path engine: scan → pickup → implement → merge → done.
+//! Dispatcher engine: scan → pickup → implement → (fix) → merge → done,
+//! plus Stage failure → human handoff and silent stop at Stage boundaries.
 //!
-//! Kept out of `serve.rs` on purpose. Unhappy endings only record Run `failed`
-//! + reason (human handoff is later tickets).
+//! Kept out of `serve.rs` on purpose.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -13,14 +13,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use markplane_core::{
-    Attempt, AttemptResult, EffectiveDispatcherSettings, MarkplaneDocument, Patch, Project,
-    QueryFilter, Run, RunRecord, RunStatus, Stage, StatusCategory, Task, Trigger, UpdateFields,
-    agent_invocation_succeeded, filter_and_sort_pickup_candidates, parse_stream_json_line,
-    read_run_record, usage_from_events, verdict_from_events, write_run_record, StreamEvent,
+    Attempt, AttemptResult, EffectiveDispatcherSettings, ImplementVerdict, MarkplaneDocument,
+    Patch, Project, QueryFilter, Run, RunRecord, RunStatus, Stage, StatusCategory, StreamEvent,
+    Task, Trigger, UpdateFields, agent_invocation_succeeded, classify_implement_verdict,
+    filter_and_sort_pickup_candidates, implement_verdict_failure_reason, is_fix_done,
+    is_merge_done, parse_stream_json_line, read_run_record, usage_from_events,
+    verdict_from_events, write_run_record,
 };
 use serde_json::json;
 use tokio::sync::{Mutex, broadcast};
 
+use super::serve_dispatcher_handoff::{self, ticket_still_ours};
 use super::serve_dispatcher_prompts::{self, PromptContext};
 
 /// Scan interval when Scan switch is on.
@@ -120,6 +123,8 @@ pub struct ProjectTickInput {
     pub concurrency: u32,
     pub settings: EffectiveDispatcherSettings,
     pub scan_on: bool,
+    /// When set (tests), overrides every Stage timeout in seconds.
+    pub test_timeout_secs: Option<u64>,
 }
 
 /// Explicit scan tick (tests call this; production uses a 15s interval).
@@ -187,15 +192,9 @@ async fn try_pickup_one(engine: Arc<Mutex<EngineState>>, proj: ProjectTickInput)
     tokio::spawn(async move {
         if let Err(e) = run_pipeline(engine_bg.clone(), &proj, &task_id_bg).await {
             eprintln!("dispatcher: run {task_id_bg} error: {e}");
-            let _ = fail_run(
-                &proj.project,
-                &proj.ws_tx,
-                &task_id_bg,
-                &format!("internal error: {e}"),
-                Some(Stage::Implement),
-            )
-            .await;
+            let _ = fail_run_internal(&proj, &task_id_bg, &format!("internal error: {e}")).await;
         }
+        // Slot freed as soon as the Run ends (failed / stopped / succeeded).
         let mut g = engine_bg.lock().await;
         g.active_slots.remove(&task_id_bg);
         g.in_flight.remove(&task_id_bg);
@@ -302,7 +301,23 @@ async fn run_pipeline(
         author: String::new(),
     };
 
-    // ── implement ──
+    // ── implement (silent-stop check at Stage boundary) ──
+    if !ticket_still_ours(&proj.project, task_id)? {
+        return serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            &mut record,
+            &mut run,
+        )
+        .await;
+    }
+
+    run.status = RunStatus::Running;
+    run.current_stage = Some(Stage::Implement);
+    update_latest_run(&mut record, &run);
+    persist_run(proj, task_id, &record, &run).await?;
+
     let impl_settings = proj.settings.stages.implement.clone();
     let impl_prompt = serve_dispatcher_prompts::render_implement_prompt(&ctx);
     let impl_result = run_agent(
@@ -319,32 +334,29 @@ async fn run_pipeline(
     )
     .await?;
 
-    if !impl_result.succeeded {
-        return fail_and_finish(
-            proj,
+    // After a Stage ends: if human took over mid-Stage, stop without ticket writes.
+    if !ticket_still_ours(&proj.project, task_id)? {
+        return serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
             task_id,
             &mut record,
             &mut run,
-            Stage::Implement,
-            impl_result
-                .failure_reason
-                .unwrap_or_else(|| "implement stage failed".into()),
         )
         .await;
     }
-    let verdict = impl_result.verdict.unwrap_or_default();
-    if verdict != "REVIEW: clean" {
-        return fail_and_finish(
-            proj,
-            task_id,
-            &mut record,
-            &mut run,
-            Stage::Implement,
-            format!("unexpected implement verdict: {verdict}"),
-        )
-        .await;
+
+    if let Some(reason) = stage_agent_failure_reason(Stage::Implement, &impl_result) {
+        return fail_and_finish(proj, task_id, &mut record, &mut run, Stage::Implement, reason)
+            .await;
     }
-    // Require new commits on the branch.
+
+    let impl_verdict = classify_implement_verdict(impl_result.verdict.as_deref());
+    if let Some(reason) = implement_verdict_failure_reason(&impl_verdict) {
+        return fail_and_finish(proj, task_id, &mut record, &mut run, Stage::Implement, reason)
+            .await;
+    }
+
     if !branch_has_new_commits(&proj.project_dir, &base_sha, &branch)? {
         return fail_and_finish(
             proj,
@@ -355,6 +367,67 @@ async fn run_pipeline(
             "implement produced no new commits".into(),
         )
         .await;
+    }
+
+    // ── optional fix (judgment wired; full prompt polish is a later ticket) ──
+    if impl_verdict == ImplementVerdict::Issues {
+        if !ticket_still_ours(&proj.project, task_id)? {
+            return serve_dispatcher_handoff::silent_stop(
+                &proj.project,
+                &proj.ws_tx,
+                task_id,
+                &mut record,
+                &mut run,
+            )
+            .await;
+        }
+        run.status = RunStatus::Running;
+        run.current_stage = Some(Stage::Fix);
+        update_latest_run(&mut record, &run);
+        persist_run(proj, task_id, &record, &run).await?;
+
+        let fix_settings = proj.settings.stages.fix.clone();
+        let fix_prompt = serve_dispatcher_prompts::render_fix_prompt(&ctx);
+        let fix_result = run_agent(
+            proj,
+            task_id,
+            &mut record,
+            &mut run,
+            Stage::Fix,
+            &fix_settings.model,
+            fix_settings.timeout_minutes,
+            &worktree,
+            &fix_prompt,
+            "agent-fix",
+        )
+        .await?;
+
+        if !ticket_still_ours(&proj.project, task_id)? {
+            return serve_dispatcher_handoff::silent_stop(
+                &proj.project,
+                &proj.ws_tx,
+                task_id,
+                &mut record,
+                &mut run,
+            )
+            .await;
+        }
+
+        if let Some(reason) = stage_agent_failure_reason(Stage::Fix, &fix_result) {
+            return fail_and_finish(proj, task_id, &mut record, &mut run, Stage::Fix, reason).await;
+        }
+        if !is_fix_done(fix_result.verdict.as_deref()) {
+            let line = fix_result.verdict.as_deref().unwrap_or("<none>");
+            return fail_and_finish(
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                Stage::Fix,
+                format!("fix ended without FIX: done (got {line})"),
+            )
+            .await;
+        }
     }
 
     // ── merge queue ──
@@ -372,21 +445,16 @@ async fn run_pipeline(
     // Cross-serve merge file lock (best-effort; hold while merging).
     let _merge_lock = acquire_merge_file_lock(&git_dir)?;
 
-    // Reread ticket before merge.
-    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
-    let still_ours = config
-        .workflows
-        .task
-        .category_of(&doc.frontmatter.status)
-        == Some(StatusCategory::Active)
-        && doc.frontmatter.assignee.as_deref() == Some("dispatcher");
-    if !still_ours {
-        run.status = RunStatus::Stopped;
-        run.ended_at = Some(Utc::now().to_rfc3339());
-        run.current_stage = None;
-        update_latest_run(&mut record, &run);
-        persist_run(proj, task_id, &record, &run).await?;
-        return Ok(());
+    // Reread ticket after merge queue (silent stop).
+    if !ticket_still_ours(&proj.project, task_id)? {
+        return serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            &mut record,
+            &mut run,
+        )
+        .await;
     }
 
     // Refresh target branch (may have moved).
@@ -415,19 +483,32 @@ async fn run_pipeline(
     )
     .await?;
 
-    if !merge_result.succeeded || merge_result.verdict.as_deref() != Some("MERGE: done") {
-        // Abort leftover merge if any.
+    if !ticket_still_ours(&proj.project, task_id)? {
         let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
+        return serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            &mut record,
+            &mut run,
+        )
+        .await;
+    }
+
+    if let Some(reason) = stage_agent_failure_reason(Stage::Merge, &merge_result) {
+        let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
+        return fail_and_finish(proj, task_id, &mut record, &mut run, Stage::Merge, reason).await;
+    }
+    if !is_merge_done(merge_result.verdict.as_deref()) {
+        let _ = git_run(&proj.project_dir, &["merge", "--abort"]);
+        let line = merge_result.verdict.as_deref().unwrap_or("<none>");
         return fail_and_finish(
             proj,
             task_id,
             &mut record,
             &mut run,
             Stage::Merge,
-            merge_result
-                .failure_reason
-                .or(merge_result.verdict)
-                .unwrap_or_else(|| "merge stage failed".into()),
+            format!("merge ended without MERGE: done (got {line})"),
         )
         .await;
     }
@@ -458,8 +539,28 @@ async fn run_pipeline(
     Ok(())
 }
 
+/// Non-zero exit / timeout reasons from an agent invocation (verdict checked separately).
+fn stage_agent_failure_reason(stage: Stage, outcome: &AgentOutcome) -> Option<String> {
+    if outcome.timed_out {
+        return Some(format!("{} stage timeout", stage.as_str()));
+    }
+    if !outcome.succeeded {
+        return Some(outcome.failure_reason.clone().unwrap_or_else(|| {
+            format!(
+                "{} agent failed (exit {}, verdict={})",
+                stage.as_str(),
+                outcome.exit_code.unwrap_or(-1),
+                outcome.verdict.as_deref().unwrap_or("<none>")
+            )
+        }));
+    }
+    None
+}
+
 struct AgentOutcome {
     succeeded: bool,
+    timed_out: bool,
+    exit_code: Option<i32>,
     verdict: Option<String>,
     failure_reason: Option<String>,
 }
@@ -482,7 +583,9 @@ async fn run_agent(
         .unwrap_or_else(|_| cwd.to_path_buf())
         .display()
         .to_string();
-    let timeout_secs = (timeout_minutes as u64).saturating_mul(60);
+    let timeout_secs = proj
+        .test_timeout_secs
+        .unwrap_or_else(|| (timeout_minutes as u64).saturating_mul(60));
     let started_at = Utc::now().to_rfc3339();
     let mut attempt = Attempt {
         stage,
@@ -584,84 +687,131 @@ async fn run_agent(
         tail_chars(&buf, 4000)
     });
 
-    let wait_handle = tokio::task::spawn_blocking(move || child.wait());
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
-    tokio::pin!(wait_handle);
-
-    enum WaitDone {
-        Finished(Result<std::process::ExitStatus, String>),
-        TimedOut,
-    }
-    let mut sid_open = true;
-    let wait_done = loop {
-        tokio::select! {
-            biased;
-            sid = sid_rx.recv(), if sid_open => {
-                match sid {
-                    Some(sid) => {
-                        if let Some(a) = run.attempts.last_mut()
-                            && a.session_id.is_none()
-                        {
-                            a.session_id = Some(sid);
-                            update_latest_run(record, run);
-                            persist_run(proj, task_id, record, run).await?;
-                        }
+    // Stage timeout watchdog on a plain OS thread (starts immediately).
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_watchdog = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let timed_out = timed_out.clone();
+        let cancel_watchdog = cancel_watchdog.clone();
+        let grace = if proj.test_timeout_secs.is_some() {
+            Duration::from_secs(1)
+        } else {
+            KILL_GRACE
+        };
+        let timeout = Duration::from_secs(timeout_secs.max(1));
+        std::thread::Builder::new()
+            .name("dispatcher-stage-watchdog".into())
+            .spawn(move || {
+                std::thread::sleep(timeout);
+                if cancel_watchdog.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGTERM);
+                        libc::kill(pid as i32, libc::SIGTERM);
                     }
-                    None => sid_open = false,
+                    std::thread::sleep(grace);
+                    if cancel_watchdog.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
                 }
-            }
-            status = &mut wait_handle => {
-                break WaitDone::Finished(
-                    status
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| format!("wait: {e}")),
-                );
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                break WaitDone::TimedOut;
+                #[cfg(not(unix))]
+                {
+                    let _ = (pid, grace);
+                }
+            })
+            .map_err(|e| format!("watchdog spawn: {e}"))?;
+    }
+
+    // Poll try_wait on a blocking thread so timeout can prevail even if signals
+    // are delayed; never sit forever in Child::wait.
+    let timed_out_for_wait = timed_out.clone();
+    let cancel_for_wait = cancel_watchdog.clone();
+    let wait_handle = tokio::task::spawn_blocking(move || {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    cancel_for_wait.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(status);
+                }
+                Ok(None) => {
+                    if timed_out_for_wait.load(std::sync::atomic::Ordering::SeqCst) {
+                        let _ = child.kill();
+                        // Brief reap attempts after kill.
+                        for _ in 0..40 {
+                            match child.try_wait() {
+                                Ok(Some(status)) => {
+                                    cancel_for_wait
+                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                                    return Ok(status);
+                                }
+                                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        cancel_for_wait.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Last resort: blocking wait (process should be dead).
+                        return child.wait();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(e),
             }
         }
+    });
+
+    // Persist session_id as it arrives; poll until the blocking wait finishes.
+    let status = loop {
+        while let Ok(sid) = sid_rx.try_recv() {
+            if let Some(a) = run.attempts.last_mut()
+                && a.session_id.is_none()
+            {
+                a.session_id = Some(sid);
+                update_latest_run(record, run);
+                persist_run(proj, task_id, record, run).await?;
+            }
+        }
+        if wait_handle.is_finished() {
+            break wait_handle
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("wait: {e}"))?;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
-    let (exit_code, events, session_id, stderr_tail) = match wait_done {
-        WaitDone::Finished(Ok(status)) => {
-            let (events, session_id) = reader_handle.await.map_err(|e| e.to_string())?;
-            let stderr_tail = stderr_handle.await.unwrap_or_default();
-            (status.code().unwrap_or(-1), events, session_id, stderr_tail)
+    cancel_watchdog.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = reader_handle.await;
+        let stderr_tail = stderr_handle.await.unwrap_or_default();
+        if let Some(a) = run.attempts.last_mut() {
+            a.ended_at = Some(Utc::now().to_rfc3339());
+            a.result = Some(AttemptResult::Timeout);
+            a.stderr_tail = Some(stderr_tail);
+            a.exit_code = Some(-1);
         }
-        WaitDone::Finished(Err(e)) => return Err(e),
-        WaitDone::TimedOut => {
-            #[cfg(unix)]
-            {
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGTERM);
-                }
-                tokio::time::sleep(KILL_GRACE).await;
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGKILL);
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = pid;
-            }
-            let _ = reader_handle.await;
-            let stderr_tail = stderr_handle.await.unwrap_or_default();
-            if let Some(a) = run.attempts.last_mut() {
-                a.ended_at = Some(Utc::now().to_rfc3339());
-                a.result = Some(AttemptResult::Timeout);
-                a.stderr_tail = Some(stderr_tail);
-                a.exit_code = Some(-1);
-            }
-            update_latest_run(record, run);
-            persist_run(proj, task_id, record, run).await?;
-            return Ok(AgentOutcome {
-                succeeded: false,
-                verdict: None,
-                failure_reason: Some(format!("{stage:?} timed out").to_lowercase()),
-            });
-        }
-    };
+        update_latest_run(record, run);
+        persist_run(proj, task_id, record, run).await?;
+        return Ok(AgentOutcome {
+            succeeded: false,
+            timed_out: true,
+            exit_code: Some(-1),
+            verdict: None,
+            failure_reason: Some(format!("{} stage timeout", stage.as_str())),
+        });
+    }
+
+    let (events, session_id) = reader_handle.await.map_err(|e| e.to_string())?;
+    let stderr_tail = stderr_handle.await.unwrap_or_default();
+    let exit_code = status.code().unwrap_or(-1);
 
     let verdict = verdict_from_events(&events);
     let (usage, duration_api_ms) = usage_from_events(&events);
@@ -689,7 +839,8 @@ async fn run_agent(
 
     let failure_reason = if !succeeded {
         Some(format!(
-            "{stage:?} agent failed (exit {exit_code}, verdict={})",
+            "{} agent failed (exit {exit_code}, verdict={})",
+            stage.as_str(),
             verdict.as_deref().unwrap_or("<none>")
         ))
     } else {
@@ -698,6 +849,8 @@ async fn run_agent(
 
     Ok(AgentOutcome {
         succeeded,
+        timed_out: false,
+        exit_code: Some(exit_code),
         verdict,
         failure_reason,
     })
@@ -804,37 +957,42 @@ async fn fail_and_finish(
     stage: Stage,
     reason: String,
 ) -> Result<(), String> {
-    run.status = RunStatus::Failed;
-    run.current_stage = Some(stage);
-    run.failure_reason = Some(reason);
-    run.ended_at = Some(Utc::now().to_rfc3339());
-    update_latest_run(record, run);
-    persist_run(proj, task_id, record, run).await?;
-    Ok(())
+    if !ticket_still_ours(&proj.project, task_id)? {
+        return serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            record,
+            run,
+        )
+        .await;
+    }
+    serve_dispatcher_handoff::handoff_failure(
+        &proj.project,
+        &proj.ws_tx,
+        task_id,
+        record,
+        run,
+        stage,
+        reason,
+    )
+    .await
 }
 
-async fn fail_run(
-    project: &Project,
-    ws_tx: &broadcast::Sender<String>,
+async fn fail_run_internal(
+    proj: &ProjectTickInput,
     task_id: &str,
     reason: &str,
-    stage: Option<Stage>,
 ) -> Result<(), String> {
-    let mut record = read_run_record(project.root(), task_id)
+    let mut record = read_run_record(proj.project.root(), task_id)
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    if let Some(run) = record.runs.last_mut() {
-        run.status = RunStatus::Failed;
-        run.failure_reason = Some(reason.to_string());
-        run.ended_at = Some(Utc::now().to_rfc3339());
-        if stage.is_some() {
-            run.current_stage = stage;
-        }
-        let snap = run.clone();
-        write_run_record(project.root(), task_id, &record).map_err(|e| e.to_string())?;
-        broadcast_run_changed(ws_tx, task_id, &snap);
-    }
-    Ok(())
+    let mut run = match record.runs.last().cloned() {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+    let stage = run.current_stage.unwrap_or(Stage::Implement);
+    fail_and_finish(proj, task_id, &mut record, &mut run, stage, reason.to_string()).await
 }
 
 fn update_latest_run(record: &mut RunRecord, run: &Run) {

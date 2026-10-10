@@ -83,6 +83,19 @@ BLOCKED: <one-line reason>
 - `REVIEW: issues`: the review comment lists 1 or more must-fix items. A separate fix session will fix them.
 - `BLOCKED: <reason>`: you couldn't do the work (see "If you can't proceed") and posted a `**Blocked**` comment. The Dispatcher hands the ticket to a human."#;
 
+const CONTRACT_FIX: &str = r#"## Finishing (required)
+
+1. Leave the worktree clean: commit or discard every change so that `git status --porcelain` prints nothing.
+2. Make the very last line of your final message exactly one of these, on its own line, with no formatting and nothing after it:
+
+```text
+FIX: done
+FIX: blocked
+```
+
+- `FIX: done`: must-fix items are addressed (or confirmed false positives in a `**Fix report**` comment).
+- `FIX: blocked`: you could not finish; the Dispatcher hands the ticket to a human."#;
+
 const CONTRACT_MERGE: &str = r#"## Finishing (required)
 
 1. Leave no trace of this merge except the merge commit. There must be no `MERGE_HEAD`, no staged or unstaged edits made by you, and no untracked files you created. Every change that was in the main working tree before you started (see step 1) must still be there, untouched.
@@ -133,6 +146,30 @@ pub fn render_implement_prompt(ctx: &PromptContext) -> String {
         "```text\n**Review** base `{{base_short}}` · <n> must-fix · <m> optional\n\n**Must-fix**\n1. …\n\n**Optional**\n1. …\n```\n\n",
         "Use `none` for an empty group.\n\n",
         CONTRACT_IMPLEMENT,
+        "\n",
+    ]);
+    ctx.fill(&body)
+}
+
+/// Render a minimal fix Stage prompt (full Review-inline template is a later ticket).
+///
+/// Present so the engine can run fix judgment (`FIX: done`) when implement ends
+/// with `REVIEW: issues`.
+pub fn render_fix_prompt(ctx: &PromptContext) -> String {
+    let mut ctx = ctx.clone();
+    ctx.author = "agent-fix".into();
+    let body = stitch(&[
+        "You are the **fix** stage for ticket {{task_id}} \"{{title}}\". Fix the must-fix review findings in this worktree and finish with the final line under \"Finishing\".\n\n",
+        "## This run\n\n",
+        "- Ticket: `{{task_id}}`. Read it with `markplane show {{task_id}}` and find the latest `**Review**` comment.\n",
+        "- Worktree: `{{worktree}}` on branch `{{branch}}`.\n\n",
+        HEADLESS,
+        "\n\n",
+        BOUNDARIES_WORKTREE,
+        "\n\n",
+        TICKET,
+        "\n\n",
+        CONTRACT_FIX,
         "\n",
     ]);
     ctx.fill(&body)

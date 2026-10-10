@@ -10,6 +10,7 @@ use crate::query::priority_rank;
 
 /// Tag that marks a ticket as released for the Dispatcher.
 pub const READY_FOR_AGENT_TAG: &str = "ready-for-agent";
+pub const READY_FOR_HUMAN_TAG: &str = "ready-for-human";
 
 /// Minimal fields used when sorting pickup candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -108,6 +108,8 @@ struct AppState {
     dispatcher: Mutex<DispatcherServeState>,
     /// Pickup / Slot / merge-queue state for the Dispatcher engine.
     engine: Arc<Mutex<EngineState>>,
+    /// Test-only Stage timeout override in seconds (`0` = use config).
+    test_stage_timeout_secs: std::sync::atomic::AtomicU64,
 }
 
 enum RuntimeError {
@@ -151,6 +153,7 @@ impl AppState {
             models_cache: Mutex::new(super::serve_dispatcher::ModelsCache::default()),
             dispatcher: Mutex::new(DispatcherServeState::default()),
             engine: Arc::new(Mutex::new(EngineState::default())),
+            test_stage_timeout_secs: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -190,6 +193,12 @@ impl AppState {
                 let cfg = load_dispatcher_config(self, &project).await;
                 effective_dispatcher_settings(&cfg)
             };
+            let test_timeout_secs = {
+                let secs = self
+                    .test_stage_timeout_secs
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if secs == 0 { None } else { Some(secs) }
+            };
             inputs.push(serve_dispatcher_engine::ProjectTickInput {
                 project_id: id,
                 project,
@@ -199,6 +208,7 @@ impl AppState {
                 concurrency,
                 settings,
                 scan_on: true,
+                test_timeout_secs,
             });
         }
         serve_dispatcher_engine::dispatcher_tick(self.engine.clone(), inputs).await;
@@ -7431,5 +7441,556 @@ mod tests {
                 let _ = body;
             }
         }
+    }
+
+    // ── Dispatcher failure handoff + silent stop (TASK-in6ej) ───────────────
+
+    /// Scenario-driven fake agent for failure / silent-stop coverage.
+    fn write_scenario_fake_agent(path: &std::path::Path, scenario: &str) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = format!(
+                r##"#!/usr/bin/env bash
+set -euo pipefail
+AUTHOR="${{MARKPLANE_AUTHOR:-}}"
+SCENARIO="{scenario}"
+PROMPT="${{@: -1}}"
+TASK="$(printf '%s' "$PROMPT" | sed -n 's/.*\(TASK-[a-z0-9]*\).*/\1/p' | head -1)"
+emit() {{
+  local session="$1" text="$2"
+  printf '%s\n' "{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session\",\"model\":\"fake\"}}"
+  python3 -c 'import json,sys; print(json.dumps({{"type":"assistant","message":{{"content":[{{"type":"text","text":sys.argv[1]}}]}}}}))' "$text"
+  printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"usage":{{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}},"duration_api_ms":5}}'
+}}
+case "$SCENARIO" in
+  nonzero)
+    emit "sess-fail-$TASK" "$(printf 'boom\n')"
+    exit 7
+    ;;
+  blocked)
+    emit "sess-blocked-$TASK" "$(printf 'cannot\n\nBLOCKED: missing credentials\n')"
+    exit 0
+    ;;
+  bad_review)
+    emit "sess-badrev-$TASK" "$(printf 'done\n\nNOT_A_VERDICT\n')"
+    exit 0
+    ;;
+  no_commits)
+    emit "sess-nocommit-$TASK" "$(printf 'done\n\nREVIEW: clean\n')"
+    exit 0
+    ;;
+  fix_not_done)
+    if [ "$AUTHOR" = "agent-implement" ]; then
+      echo "partial" > "feat-$TASK.txt"
+      git add "feat-$TASK.txt"
+      git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+      emit "sess-impl-$TASK" "$(printf 'reviewed\n\nREVIEW: issues\n')"
+    elif [ "$AUTHOR" = "agent-fix" ]; then
+      emit "sess-fix-$TASK" "$(printf 'stuck\n\nFIX: blocked\n')"
+    else
+      emit "sess-other-$TASK" "noop"
+    fi
+    exit 0
+    ;;
+  merge_bad_verdict)
+    if [ "$AUTHOR" = "agent-implement" ]; then
+      echo "x" > "feat-$TASK.txt"
+      git add "feat-$TASK.txt"
+      git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+      emit "sess-impl-$TASK" "$(printf 'done\n\nREVIEW: clean\n')"
+    elif [ "$AUTHOR" = "agent-merge" ]; then
+      emit "sess-merge-$TASK" "$(printf 'nope\n\nMERGE: failed\n')"
+    else
+      emit "sess-other-$TASK" "noop"
+    fi
+    exit 0
+    ;;
+  merge_missing_branch)
+    if [ "$AUTHOR" = "agent-implement" ]; then
+      echo "x" > "feat-$TASK.txt"
+      git add "feat-$TASK.txt"
+      git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+      emit "sess-impl-$TASK" "$(printf 'done\n\nREVIEW: clean\n')"
+    elif [ "$AUTHOR" = "agent-merge" ]; then
+      # Claim success without merging — target will not contain the branch.
+      emit "sess-merge-$TASK" "$(printf 'lied\n\nMERGE: done\n')"
+    else
+      emit "sess-other-$TASK" "noop"
+    fi
+    exit 0
+    ;;
+  timeout)
+    # Record pids first, then hang. Dispatcher must SIGTERM/SIGKILL the group.
+    sleep 600 &
+    CHILD=$!
+    echo "$$ $CHILD" > "${{MARKPLANE_ROOT:-.}}/.timeout-pids"
+    emit "sess-timeout-$TASK" "hanging" || true
+    # Keep the process group alive until killed.
+    while kill -0 "$CHILD" 2>/dev/null; do sleep 1; done
+    wait "$CHILD" || true
+    exit 0
+    ;;
+  slow_then_clean)
+    if [ "$AUTHOR" = "agent-implement" ]; then
+      sleep 2
+      echo "x" > "feat-$TASK.txt"
+      git add "feat-$TASK.txt"
+      git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+      emit "sess-impl-$TASK" "$(printf 'done\n\nREVIEW: clean\n')"
+    elif [ "$AUTHOR" = "agent-merge" ]; then
+      BRANCH="agent/$TASK"
+      if git merge-base --is-ancestor "$BRANCH" HEAD; then
+        emit "sess-merge-$TASK" "$(printf 'already\n\nMERGE: done\n')"
+        exit 0
+      fi
+      git merge --no-ff --no-commit "$BRANCH"
+      git -c user.email=a@b -c user.name=agent commit -m "Merge $BRANCH" -m "Refs: $TASK"
+      emit "sess-merge-$TASK" "$(printf 'merged\n\nMERGE: done\n')"
+    else
+      emit "sess-other-$TASK" "noop"
+    fi
+    exit 0
+    ;;
+  *)
+    echo "unknown scenario $SCENARIO" >&2
+    exit 99
+    ;;
+esac
+"##
+            );
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn setup_failure_env(name: &str, scenario: &str) -> EngineEnv {
+        let mut env = setup_engine_env(name, Some(false));
+        let agent = env._tmp.path().join("fake-agent");
+        write_scenario_fake_agent(&agent, scenario);
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        let app = build_app(state.clone());
+        env.state = state;
+        env.app = app;
+        env
+    }
+
+    async fn assert_human_handoff(env: &EngineEnv, task_id: &str, stage_word: &str) {
+        wait_run_status(env, task_id, "failed", 40).await;
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(task_id).unwrap();
+        assert_eq!(
+            doc.frontmatter.status, "in-progress",
+            "status stays active-category"
+        );
+        assert_eq!(doc.frontmatter.assignee.as_deref(), Some("dispatcher"));
+        assert!(
+            doc.frontmatter.tags.iter().any(|t| t == "ready-for-human"),
+            "tags={:?}",
+            doc.frontmatter.tags
+        );
+        assert!(
+            !doc.frontmatter.tags.iter().any(|t| t == "ready-for-agent"),
+            "ready-for-agent must be removed"
+        );
+        assert!(
+            env.project_dir.join(".worktrees").join(task_id).exists(),
+            "worktree kept"
+        );
+        let record = markplane_core::read_run_record(project.root(), task_id)
+            .unwrap()
+            .unwrap();
+        let run = record.runs.last().unwrap();
+        assert_eq!(run.status, markplane_core::RunStatus::Failed);
+        assert!(run.failure_reason.is_some(), "failure reason recorded");
+        let reason = run.failure_reason.as_deref().unwrap();
+        // Dispatcher comment: first line is one sentence with Stage + session id.
+        let comments = doc.body.split("### ").collect::<Vec<_>>();
+        let dispatcher = comments
+            .iter()
+            .find(|c| c.contains("dispatcher"))
+            .expect("dispatcher comment");
+        let body_start = dispatcher.find('\n').unwrap();
+        let first_line = dispatcher[body_start..]
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap();
+        assert!(
+            first_line.contains(stage_word),
+            "first line should mention stage '{stage_word}': {first_line}"
+        );
+        assert!(
+            first_line.contains("session"),
+            "first line should mention session: {first_line}"
+        );
+        assert!(
+            reason.contains(stage_word)
+                || first_line.contains(stage_word)
+                || reason.contains("timeout")
+                || reason.contains("blocked")
+                || reason.contains("commits")
+                || reason.contains("FIX:")
+                || reason.contains("MERGE:")
+                || reason.contains("verdict")
+                || reason.contains("exit"),
+            "reason={reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_nonzero_exit_hands_off() {
+        let env = setup_failure_env("fail-nz", "nonzero");
+        let task_id = add_ready_task(&env, "Nonzero", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+        let run = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let reason = run.runs.last().unwrap().failure_reason.as_deref().unwrap();
+        assert!(reason.contains("exit") || reason.contains("failed"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_blocked_hands_off_without_fix() {
+        let env = setup_failure_env("fail-blocked", "blocked");
+        let task_id = add_ready_task(&env, "Blocked", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+        let run = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = run.runs.last().unwrap();
+        assert!(
+            run.attempts.iter().all(|a| a.stage != markplane_core::Stage::Fix),
+            "BLOCKED must not enter fix"
+        );
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("blocked"),
+            "{:?}",
+            run.failure_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_illegal_review_verdict() {
+        let env = setup_failure_env("fail-badrev", "bad_review");
+        let task_id = add_ready_task(&env, "Bad review", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_no_new_commits() {
+        let env = setup_failure_env("fail-nocommit", "no_commits");
+        let task_id = add_ready_task(&env, "No commits", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+        let run = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            run.runs
+                .last()
+                .unwrap()
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("commit"),
+            "{:?}",
+            run.runs.last().unwrap().failure_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_fix_not_done() {
+        let env = setup_failure_env("fail-fix", "fix_not_done");
+        let task_id = add_ready_task(&env, "Fix blocked", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "fix").await;
+        let run = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = run.runs.last().unwrap();
+        assert!(
+            run.attempts
+                .iter()
+                .any(|a| a.stage == markplane_core::Stage::Fix),
+            "fix stage must have run"
+        );
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("FIX: done"),
+            "{:?}",
+            run.failure_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_merge_bad_verdict() {
+        let env = setup_failure_env("fail-merge-v", "merge_bad_verdict");
+        let task_id = add_ready_task(&env, "Merge failed line", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "merge").await;
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fail_merge_missing_branch() {
+        let env = setup_failure_env("fail-merge-b", "merge_missing_branch");
+        let task_id = add_ready_task(&env, "Merge lie", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "merge").await;
+        let run = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            run.runs
+                .last()
+                .unwrap()
+                .failure_reason
+                .as_deref()
+                .unwrap()
+                .contains("contain"),
+            "{:?}",
+            run.runs.last().unwrap().failure_reason
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatcher_fail_timeout_kills_process_group() {
+        #[cfg(unix)]
+        {
+            let env = setup_failure_env("fail-timeout", "timeout");
+            env.state
+                .test_stage_timeout_secs
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+            let task_id = add_ready_task(&env, "Timeout", "high").await;
+            let _ = oneshot_json(
+                &env.app,
+                "GET",
+                &format!("/api/p/{}/tasks", env.project_id),
+            )
+            .await;
+            enable_scan(&env).await;
+            env.state.dispatcher_tick().await;
+            assert_human_handoff(&env, &task_id, "implement").await;
+            let run = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                &task_id,
+            )
+            .unwrap()
+            .unwrap();
+            let run = run.runs.last().unwrap();
+            assert!(
+                run.failure_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("timeout"),
+                "{:?}",
+                run.failure_reason
+            );
+            assert!(
+                run.attempts
+                    .iter()
+                    .any(|a| a.result == Some(markplane_core::AttemptResult::Timeout))
+            );
+            // Process group members recorded by the fake agent must be gone.
+            let pid_file = env.project_dir.join(".timeout-pids");
+            let text = fs::read_to_string(&pid_file).expect("timeout pid file");
+            let parts: Vec<&str> = text.split_whitespace().collect();
+            assert!(
+                parts.len() >= 2,
+                "expected agent pid and child pid, got {text:?}"
+            );
+            for p in parts {
+                let pid: i32 = p.parse().unwrap();
+                let alive = unsafe { libc::kill(pid, 0) == 0 };
+                assert!(!alive, "pid {pid} should be dead after timeout");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_failure_frees_slot_for_next_pickup() {
+        let env = setup_failure_env("fail-slot", "nonzero");
+        super::super::serve_dispatcher::write_concurrency(&env.config_dir, 1).unwrap();
+        let a = add_ready_task(&env, "Fail first", "critical").await;
+        let b = add_ready_task(&env, "Pickup second", "high").await;
+        // Second task needs a happy agent once the slot frees — swap agent after A fails.
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &a, "failed", 30).await;
+        assert_eq!(env.state.engine.lock().await.slots_used(), 0);
+
+        let agent = env._tmp.path().join("fake-agent");
+        let mp = markplane_debug_bin();
+        write_happy_fake_agent(&agent, &mp);
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &b, "succeeded", 30).await;
+    }
+
+    #[tokio::test]
+    async fn dispatcher_silent_stop_after_mid_stage_reassign() {
+        let env = setup_failure_env("silent-stop", "slow_then_clean");
+        let task_id = add_ready_task(&env, "Take over", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+
+        // Wait until implement is running, then reassign away from dispatcher.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let record = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                &task_id,
+            )
+            .unwrap();
+            if record
+                .as_ref()
+                .and_then(|r| r.runs.last())
+                .map(|r| !r.attempts.is_empty())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("implement never started");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let before = fs::read_to_string(
+            env.project_dir
+                .join(".markplane/backlog/items")
+                .join(format!("{task_id}.md")),
+        )
+        .unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{task_id}", env.project_id),
+            Some(serde_json::json!({ "assignee": "human" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+
+        wait_run_status(&env, &task_id, "stopped", 30).await;
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.assignee.as_deref(), Some("human"));
+        assert_eq!(doc.frontmatter.status, "in-progress");
+        assert!(
+            !doc.frontmatter.tags.iter().any(|t| t == "ready-for-human"),
+            "silent stop must not swap tags"
+        );
+        assert!(
+            !doc.body.contains("stage failed in session"),
+            "silent stop must not write dispatcher failure comment"
+        );
+        assert!(
+            env.project_dir.join(".worktrees").join(&task_id).exists(),
+            "worktree kept"
+        );
+        // Ticket body should not have gained dispatcher-authored failure text.
+        let after = fs::read_to_string(
+            env.project_dir
+                .join(".markplane/backlog/items")
+                .join(format!("{task_id}.md")),
+        )
+        .unwrap();
+        assert!(
+            !after.contains("stage failed in session"),
+            "no dispatcher failure write after reassign"
+        );
+        let _ = before;
     }
 }

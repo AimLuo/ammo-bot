@@ -25,6 +25,7 @@ mod serve;
 mod serve_daemon;
 mod serve_dispatcher;
 mod serve_dispatcher_engine;
+mod serve_dispatcher_handoff;
 mod serve_dispatcher_lock;
 mod serve_dispatcher_prompts;
 mod serve_git;
