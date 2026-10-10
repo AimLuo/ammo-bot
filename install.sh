@@ -27,8 +27,7 @@ detect_platform() {
         Linux) ;;
         *)
             echo "Error: Unsupported operating system: $OS" >&2
-            echo "Markplane supports macOS and Linux. For Windows, download the zip from:" >&2
-            echo "  ${BASE_URL}/latest" >&2
+            echo "Markplane supports macOS and Linux." >&2
             exit 1
             ;;
     esac

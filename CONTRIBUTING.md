@@ -77,10 +77,10 @@ All code must be clippy-clean with no warnings.
 ## Continuous Integration
 
 Every push and pull request runs CI on **both `ubuntu-latest` and
-`windows-latest`**. Both platform checks must pass before a PR can merge.
+`macos-latest`**. Both platform checks must pass before a PR can merge.
 
-| Step | Linux | Windows |
-|------|-------|---------|
+| Step | Linux | macOS |
+|------|-------|-------|
 | `cargo fmt --check` | ✅ | — |
 | `cargo clippy --locked --workspace --all-targets -- -D warnings` | ✅ | ✅ |
 | `cargo test --locked --workspace` | ✅ | ✅ |
@@ -92,15 +92,12 @@ platform differences surface.
 
 Two failure modes this catches that testing on a single machine will not:
 
-- **Platform-specific behavior.** File locking, path separators, and line
-  endings differ on Windows. A change can pass locally on macOS or Linux and
-  still fail CI — this is not hypothetical, it is why the matrix exists.
+- **Platform-specific behavior.** Path handling and filesystem behavior differ
+  between Linux and macOS. A change can pass locally on one and still fail CI
+  on the other.
 - **Stale lockfiles.** CI passes `--locked` to cargo and uses `npm ci`, so a
   `Cargo.lock` or `package-lock.json` out of sync with its manifest fails the
   build. Commit lockfile updates alongside dependency changes.
-
-macOS is not in the CI matrix; the release workflow builds and smoke-tests
-macOS binaries.
 
 ## Error Handling Conventions
 

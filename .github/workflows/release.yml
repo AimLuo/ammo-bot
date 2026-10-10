@@ -75,8 +75,6 @@ jobs:
             os: macos-latest
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -103,26 +101,12 @@ jobs:
 
       - name: Smoke test
         run: ./target/${{ matrix.target }}/release/markplane --version
-        if: runner.os != 'Windows'
 
-      - name: Smoke test (Windows)
-        run: .\target\${{ matrix.target }}\release\markplane.exe --version
-        if: runner.os == 'Windows'
-
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           ARCHIVE="markplane-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz"
           tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release markplane
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $archive = "markplane-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/markplane.exe" -DestinationPath $archive
-          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:

@@ -45,7 +45,6 @@ Markplane uses a tag-triggered release workflow. Pushing a `v*` tag to GitHub bu
    - `aarch64-apple-darwin` (macOS Apple Silicon)
    - `x86_64-apple-darwin` (macOS Intel)
    - `x86_64-unknown-linux-musl` (Linux x86_64, statically linked)
-   - `x86_64-pc-windows-msvc` (Windows x86_64)
 4. **Smoke tests** each binary (`markplane --version`)
 5. **Creates a GitHub Release** with:
    - Binary archives (e.g., `markplane-v0.2.0-aarch64-apple-darwin.tar.gz`)
@@ -59,7 +58,6 @@ Binary archives use Rust target triples:
 
 ```
 markplane-v{VERSION}-{TARGET}.tar.gz    (macOS, Linux)
-markplane-v{VERSION}-{TARGET}.zip       (Windows)
 ```
 
 ## Notes

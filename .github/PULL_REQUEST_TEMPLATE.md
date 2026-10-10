@@ -8,7 +8,7 @@ Describe the changes and the motivation behind them.
 - [ ] `cargo clippy --locked --workspace --all-targets -- -D warnings` passes
 - [ ] Manual testing (describe what you tested):
 
-CI runs these on both Linux and Windows; both must pass to merge.
+CI runs these on both Linux and macOS; both must pass to merge.
 
 ## Breaking Changes
 
