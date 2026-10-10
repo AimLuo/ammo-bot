@@ -12,7 +12,7 @@
 
 ---
 
-> **This repository is a fork of [zerowand01/markplane](https://github.com/zerowand01/markplane)** (`0.1.4+skills.1`). It keeps upstream's markdown-first tracker and adds first-class support for [mattpocock/skills](https://github.com/mattpocock/skills) (wayfinder, to-spec, to-tickets, implement-spec, code-review): **Maps** and **Decision tickets**, frontier queries, `comment` / `resolve`, standalone PLANs with tags, richer MCP tools and context, a `/maps` Web UI, plus two repo skills (`my-to-spec`, `my-setup-matt-pocock-skills`). See [Skills workflow](docs/skills-workflow.md).
+> **This repository is a fork of [zerowand01/markplane](https://github.com/zerowand01/markplane)** (`0.1.4+skills.1`). It keeps upstream's markdown-first tracker and adds first-class support for [mattpocock/skills](https://github.com/mattpocock/skills) (wayfinder, to-spec, to-tickets, implement-spec, code-review): **Maps** and **Decision tickets**, frontier queries, `comment` / `resolve`, standalone PLANs with tags, richer MCP tools and context, a `/maps` Web UI. The companion skills `my-to-spec` and `my-setup-matt-pocock-skills` live in [AimLuo/my-skills](https://github.com/AimLuo/my-skills). See [Skills workflow](docs/skills-workflow.md).
 
 <a href="https://github.com/user-attachments/assets/9d303e13-d14a-458f-bb58-20cd069082bc">
   <video src="https://github.com/user-attachments/assets/9d303e13-d14a-458f-bb58-20cd069082bc" autoplay loop muted playsinline></video>
@@ -89,13 +89,7 @@ Verify the fork build: `markplane --version` should report a `+skills.N` suffix 
 
 ### Install `my-*` skills
 
-This repo includes two skills at the root (`my-to-spec`, `my-setup-matt-pocock-skills`). Symlink them into your agent skill directories:
-
-```bash
-./scripts/link-skills.sh
-```
-
-That links into `~/.claude/skills`, `~/.agents/skills`, and `~/.cursor/skills`. Other mattpocock skills (wayfinder, to-tickets, implement-spec, code-review, …) come from upstream and are not redistributed here — install those separately, then run `/my-setup-matt-pocock-skills` in a repo so it writes a Markplane tracker doc.
+`my-to-spec` and `my-setup-matt-pocock-skills` live in [AimLuo/my-skills](https://github.com/AimLuo/my-skills) under `repos/`; install them into your agent skill directories from there. Other mattpocock skills (wayfinder, to-tickets, implement-spec, code-review, …) come from upstream and are not redistributed here — install those separately, then run `/my-setup-matt-pocock-skills` in a repo so it writes a Markplane tracker doc.
 
 ## Initialization
 

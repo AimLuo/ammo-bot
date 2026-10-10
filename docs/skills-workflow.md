@@ -4,13 +4,13 @@ This fork is the tracker backend for [mattpocock/skills](https://github.com/matt
 
 **wayfinder → my-to-spec → to-tickets → implement-spec → code-review**
 
-All tracker operations use the `markplane` CLI (see the [Markplane tracker template](../my-setup-matt-pocock-skills/issue-tracker-markplane.md) written into a repo as `docs/agents/issue-tracker.md` by `my-setup-matt-pocock-skills`).
+All tracker operations use the `markplane` CLI (see the [Markplane tracker template](https://github.com/AimLuo/my-skills/blob/main/repos/my-setup-matt-pocock-skills/issue-tracker-markplane.md) written into a repo as `docs/agents/issue-tracker.md` by `my-setup-matt-pocock-skills`).
 
 Terminology (Map, Destination, Decision ticket, Frontier, Spec, Implementation ticket) lives in root [`GLOSSARY.md`](../GLOSSARY.md).
 
 ## One-time setup
 
-1. Install this fork from source and the repo `my-*` skills (`./scripts/link-skills.sh`). See [README Installation](../README.md#installation).
+1. Install this fork from source, and `my-to-spec` / `my-setup-matt-pocock-skills` from [AimLuo/my-skills](https://github.com/AimLuo/my-skills). See [README Installation](../README.md#installation).
 2. Install the upstream mattpocock skills you need (`wayfinder`, `to-tickets`, `implement-spec`, `code-review`, …).
 3. In each project repo, run `/my-setup-matt-pocock-skills`. When `.markplane/` exists it recommends Markplane and writes `docs/agents/issue-tracker.md` from the Markplane template (CLI-only conventions).
 

@@ -1,5 +1,0 @@
-interface:
-  display_name: "My To Spec"
-  short_description: "Turn a conversation into an EPIC or PLAN spec"
-policy:
-  allow_implicit_invocation: false

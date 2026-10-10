@@ -1,5 +1,0 @@
-interface:
-  display_name: "My Setup Matt Pocock Skills"
-  short_description: "Configure a repo for the skills (Markplane)"
-policy:
-  allow_implicit_invocation: false
