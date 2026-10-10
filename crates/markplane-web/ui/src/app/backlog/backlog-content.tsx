@@ -39,11 +39,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { PageTransition } from "@/components/domain/page-transition";
+import { EmptyState } from "@/components/domain/empty-state";
 import { isInputFocused } from "@/lib/hooks/use-keyboard-nav";
 import { ArrowUpRight, ArrowDownLeft, Archive, Plus } from "lucide-react";
 import { CreateDialog } from "@/components/domain/create-dialog";
 import { useConfig } from "@/lib/hooks/use-config";
 import { buildStatusConfig, categoryOf } from "@/lib/constants";
+import {
+  filterNeedsYouBase,
+  latestCommentPreview,
+  sortNeedsYouTasks,
+} from "@/lib/needs-you";
 import { generateKeyBetween } from "fractional-indexing";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -56,7 +62,14 @@ import type { Task, TaskStatus, Priority, Effort, StatusCategory } from "@/lib/t
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-type ViewMode = "board" | "backlog";
+type ViewMode = "board" | "backlog" | "needs-you";
+
+const VIEW_CYCLE: ViewMode[] = ["board", "backlog", "needs-you"];
+
+function parseViewParam(viewParam: string | null): ViewMode {
+  if (viewParam === "backlog" || viewParam === "needs-you") return viewParam;
+  return "board";
+}
 
 /** Categories that appear as kanban board columns. */
 const BOARD_CATEGORIES: StatusCategory[] = ["planned", "active", "completed"];
@@ -112,9 +125,9 @@ export function BacklogContent() {
   const router = useProjectRouter();
 
   // Normalize old URL params for backward compat
-  const viewParam = searchParams.get("view");
-  const normalizedView: ViewMode = viewParam === "backlog" ? "backlog" : "board";
-  const [view, setView] = useState<ViewMode>(normalizedView);
+  const [view, setView] = useState<ViewMode>(() =>
+    parseViewParam(searchParams.get("view"))
+  );
   const [filterPriority, setFilterPriority] = useState<string>("all");
   const [filterStatus, setFilterStatus] = useState<StatusFilter>("all");
   const [filterEpic, setFilterEpic] = useState<string>("all");
@@ -130,9 +143,10 @@ export function BacklogContent() {
     searchParams.get("task")
   );
 
-  // Sync selectedTaskId when URL changes (e.g. WikiLinkChip navigation)
+  // Sync selectedTaskId / view when URL changes (e.g. WikiLinkChip navigation)
   useEffect(() => {
     setSelectedTaskId(searchParams.get("task"));
+    setView(parseViewParam(searchParams.get("view")));
   }, [searchParams]);
 
   const { data: tasks, isLoading, error, refetch } = useTasks();
@@ -172,8 +186,28 @@ export function BacklogContent() {
     return { kanbanColumns: cols, boardStatuses: boardSet, backlogStatuses: backlogSet, statusConfig: sc };
   }, [workflow]);
 
+  const needsYouBase = useMemo(() => {
+    if (!tasks || !workflow) return [];
+    return filterNeedsYouBase(tasks, workflow);
+  }, [tasks, workflow]);
+
+  const needsYouCount = needsYouBase.length;
+
   const filteredTasks = useMemo(() => {
     if (!tasks) return [];
+
+    if (view === "needs-you") {
+      return needsYouBase.filter((t) => {
+        if (filterPriority !== "all" && t.priority !== filterPriority)
+          return false;
+        if (filterEpic !== "all" && t.epic !== filterEpic) return false;
+        if (filterAssignee !== "all" && t.assignee !== filterAssignee)
+          return false;
+        if (filterTag !== "all" && !t.tags.includes(filterTag)) return false;
+        return true;
+      });
+    }
+
     const viewStatuses = view === "board" ? boardStatuses : backlogStatuses;
     return tasks.filter((t) => {
       if (!viewStatuses.has(t.status)) return false;
@@ -189,7 +223,7 @@ export function BacklogContent() {
       if (filterTag !== "all" && !t.tags.includes(filterTag)) return false;
       return true;
     });
-  }, [tasks, view, filterPriority, filterStatus, filterEpic, filterAssignee, filterTag, showDecisionTickets, boardStatuses, backlogStatuses]);
+  }, [tasks, view, filterPriority, filterStatus, filterEpic, filterAssignee, filterTag, showDecisionTickets, boardStatuses, backlogStatuses, needsYouBase]);
 
   const openTask = useCallback(
     (id: string) => {
@@ -224,12 +258,13 @@ export function BacklogContent() {
     [router, searchParams]
   );
 
-  // "v" keyboard shortcut to toggle between Board and Backlog views
+  // "v" keyboard shortcut cycles Board → Backlog → Needs You
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key !== "v" || e.metaKey || e.ctrlKey || e.altKey || isInputFocused()) return;
       e.preventDefault();
-      changeView(view === "board" ? "backlog" : "board");
+      const idx = VIEW_CYCLE.indexOf(view);
+      changeView(VIEW_CYCLE[(idx + 1) % VIEW_CYCLE.length]);
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -268,17 +303,34 @@ export function BacklogContent() {
       <div className="flex items-center gap-3 flex-wrap">
         {/* Tabs */}
         <div className="flex gap-4 border-b">
-          {(["board", "backlog"] as const).map((v) => (
+          {(
+            [
+              { id: "board" as const, label: "board" },
+              { id: "backlog" as const, label: "backlog" },
+              {
+                id: "needs-you" as const,
+                label: "Needs You",
+                count: needsYouCount,
+              },
+            ] as const
+          ).map((tab) => (
             <button
-              key={v}
-              className={`capitalize text-base pb-2 -mb-px transition-colors focus-visible:outline-none ${
-                view === v
+              key={tab.id}
+              className={`text-base pb-2 -mb-px transition-colors focus-visible:outline-none ${
+                tab.id === "board" || tab.id === "backlog" ? "capitalize" : ""
+              } ${
+                view === tab.id
                   ? "text-primary border-b-2 border-primary font-semibold"
                   : "text-muted-foreground hover:text-foreground"
               }`}
-              onClick={() => changeView(v)}
+              onClick={() => changeView(tab.id)}
             >
-              {v}
+              {tab.label}
+              {"count" in tab ? (
+                <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+                  ({tab.count})
+                </span>
+              ) : null}
             </button>
           ))}
         </div>
@@ -326,20 +378,22 @@ export function BacklogContent() {
               ) : null;
             })()}
           </div>
-          <div className="flex items-center gap-2">
-            <Switch
-              id="show-decision-tickets"
-              size="sm"
-              checked={showDecisionTickets}
-              onCheckedChange={setShowDecisionTickets}
-            />
-            <Label
-              htmlFor="show-decision-tickets"
-              className="text-xs text-muted-foreground cursor-pointer font-normal"
-            >
-              Decision tickets
-            </Label>
-          </div>
+          {view !== "needs-you" && (
+            <div className="flex items-center gap-2">
+              <Switch
+                id="show-decision-tickets"
+                size="sm"
+                checked={showDecisionTickets}
+                onCheckedChange={setShowDecisionTickets}
+              />
+              <Label
+                htmlFor="show-decision-tickets"
+                className="text-xs text-muted-foreground cursor-pointer font-normal"
+              >
+                Decision tickets
+              </Label>
+            </div>
+          )}
         </div>
 
         <Button
@@ -437,7 +491,7 @@ export function BacklogContent() {
           )}
         </div>
 
-        {/* Sort (backlog tab only) */}
+        {/* Sort (backlog tab only; Needs You uses a fixed sort) */}
         {view === "backlog" && (
           <div className="flex items-center gap-1.5">
             <span className="text-sm text-muted-foreground font-medium shrink-0">Sort</span>
@@ -485,6 +539,9 @@ export function BacklogContent() {
       )}
       {view === "backlog" && (
         <BacklogListView tasks={filteredTasks} onTaskClick={openTask} sortKey={sortKey} />
+      )}
+      {view === "needs-you" && (
+        <NeedsYouListView tasks={filteredTasks} onTaskClick={openTask} />
       )}
 
       {/* Task detail sheet */}
@@ -1213,6 +1270,144 @@ function PromoteDropZone() {
         <ArrowUpRight className="size-4" />
         Drop here to move to Board
       </p>
+    </div>
+  );
+}
+
+// ── Needs You List View ────────────────────────────────────────────────────
+
+function NeedsYouListView({
+  tasks,
+  onTaskClick,
+}: {
+  tasks: Task[];
+  onTaskClick: (id: string) => void;
+}) {
+  const sorted = useMemo(() => sortNeedsYouTasks(tasks), [tasks]);
+
+  if (sorted.length === 0) {
+    return <EmptyState title="Nothing needs you" />;
+  }
+
+  return (
+    <div className="space-y-1">
+      {sorted.map((task) => (
+        <NeedsYouRow
+          key={task.id}
+          task={task}
+          onClick={() => onTaskClick(task.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function NeedsYouRow({
+  task,
+  onClick,
+}: {
+  task: Task;
+  onClick: () => void;
+}) {
+  const preview = latestCommentPreview(task.comments);
+
+  return (
+    <div
+      className="group/row rounded-md border bg-card px-3 py-2 cursor-pointer transition-colors hover:border-muted-foreground/30"
+      onClick={onClick}
+    >
+      {/* Desktop */}
+      <div className="hidden md:flex items-center gap-3 min-w-0">
+        <PriorityIndicator priority={task.priority} />
+        <span className="font-mono text-sm text-muted-foreground w-24 shrink-0">
+          {task.id}
+        </span>
+        <span className="text-base font-medium truncate shrink min-w-0">
+          {task.title}
+        </span>
+        <StatusBadge status={task.status} />
+        {task.map && (
+          <span
+            className="text-sm font-mono px-2 py-0.5 rounded shrink-0"
+            style={{
+              backgroundColor:
+                "color-mix(in oklch, var(--entity-map) 15%, transparent)",
+              color: "var(--entity-map)",
+            }}
+          >
+            {task.map}
+          </span>
+        )}
+        {task.epic && (
+          <span
+            className="text-sm font-mono px-2 py-0.5 rounded shrink-0"
+            style={{
+              backgroundColor:
+                "color-mix(in oklch, var(--entity-epic) 15%, transparent)",
+              color: "var(--entity-epic)",
+            }}
+          >
+            {task.epic}
+          </span>
+        )}
+        {task.assignee && (
+          <span className="text-sm text-muted-foreground shrink-0">
+            @{task.assignee}
+          </span>
+        )}
+        {preview && (
+          <span
+            className="text-sm text-muted-foreground truncate min-w-0 max-w-[18rem] shrink"
+            title={preview}
+          >
+            {preview}
+          </span>
+        )}
+      </div>
+
+      {/* Mobile */}
+      <div className="md:hidden space-y-1.5 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <PriorityIndicator priority={task.priority} />
+          <span className="font-mono text-sm text-muted-foreground">
+            {task.id}
+          </span>
+          <StatusBadge status={task.status} />
+        </div>
+        <p className="text-base font-medium">{task.title}</p>
+        <div className="flex items-center gap-2 flex-wrap text-sm text-muted-foreground">
+          {task.map && (
+            <span
+              className="text-sm font-mono px-2 py-0.5 rounded"
+              style={{
+                backgroundColor:
+                  "color-mix(in oklch, var(--entity-map) 15%, transparent)",
+                color: "var(--entity-map)",
+              }}
+            >
+              {task.map}
+            </span>
+          )}
+          {task.epic && (
+            <span
+              className="text-sm font-mono px-2 py-0.5 rounded"
+              style={{
+                backgroundColor:
+                  "color-mix(in oklch, var(--entity-epic) 15%, transparent)",
+                color: "var(--entity-epic)",
+              }}
+            >
+              {task.epic}
+            </span>
+          )}
+          {task.assignee && <span>@{task.assignee}</span>}
+        </div>
+        {preview && (
+          <p className="text-sm text-muted-foreground truncate" title={preview}>
+            {preview}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
