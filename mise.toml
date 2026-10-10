@@ -3,3 +3,70 @@
 rust = { version = "1.93.0", components = "clippy,rustfmt" }
 # Keep in sync with crates/markplane-web/ui/.nvmrc (CI node-version-file).
 node = "24"
+
+[tasks.build]
+description = "Build all crates"
+run = "cargo build --workspace"
+
+[tasks.test]
+description = "Run all tests (CI: --locked)"
+run = "cargo test --locked --workspace"
+
+[tasks.clippy]
+description = "Lint Rust (CI: deny warnings)"
+run = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks."fmt:fix"]
+description = "Format Rust code"
+run = "cargo fmt"
+
+[tasks.check]
+description = "Run CI checks: fmt, clippy, test, UI lint and build"
+run = "mise run fmt && mise run clippy && mise run test && mise run ui:lint && mise run ui:build"
+
+[tasks.install]
+description = "Install the local markplane binary"
+run = "cargo install --path crates/markplane-cli --locked"
+
+[tasks."install:embed"]
+description = "Install markplane with the embedded web UI"
+depends = ["ui:build"]
+run = "cargo install --path crates/markplane-cli --locked --features embed-ui"
+
+[tasks."ui:install"]
+description = "Install web UI dependencies"
+dir = "crates/markplane-web/ui"
+run = "npm install"
+sources = ["package.json", "package-lock.json"]
+outputs = ["node_modules/.package-lock.json"]
+
+[tasks.serve]
+description = "API server for frontend dev (HTTP :4200)"
+run = "cargo run -p markplane-cli -- serve --dev"
+
+[tasks.ui]
+description = "Next.js dev server (http://localhost:4201)"
+alias = "ui:dev"
+dir = "crates/markplane-web/ui"
+depends = ["ui:install"]
+run = "npm run dev"
+
+[tasks."ui:lint"]
+description = "Lint the web UI"
+dir = "crates/markplane-web/ui"
+depends = ["ui:install"]
+run = "npm run lint"
+
+[tasks."ui:build"]
+description = "Build the web UI"
+dir = "crates/markplane-web/ui"
+depends = ["ui:install"]
+run = "npm run build"
+
+[tasks.dev]
+description = "Start the API (--dev, :4200) and Next.js (:4201)"
+run = "mise run serve ::: ui"
