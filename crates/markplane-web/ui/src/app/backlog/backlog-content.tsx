@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useMemo, useEffect } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import {
   DndContext,
   DragOverlay,
@@ -103,7 +104,7 @@ function makeKanbanCollisionDetection(columnIds: Set<string>): CollisionDetectio
 
 export function BacklogContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useProjectRouter();
 
   // Normalize old URL params for backward compat
   const viewParam = searchParams.get("view");

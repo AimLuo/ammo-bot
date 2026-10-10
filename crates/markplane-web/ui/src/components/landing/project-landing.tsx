@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { ProjectLink } from "@/components/project-link";
 import {
   useProjects,
   useRemoveProject,
@@ -89,20 +90,20 @@ function ProjectCard({
               className="h-8"
             />
           ) : (
-            <a
+            <ProjectLink
               href={projectHref(project.id)}
               className="font-medium truncate hover:underline"
             >
               {project.name}
-            </a>
+            </ProjectLink>
           )}
         </div>
-        <a
+        <ProjectLink
           href={projectHref(project.id)}
           className="mt-1 block text-sm text-muted-foreground font-mono truncate hover:text-foreground"
         >
           {project.path}
-        </a>
+        </ProjectLink>
       </div>
       <div className="absolute right-2 top-2">
         <DropdownMenu>

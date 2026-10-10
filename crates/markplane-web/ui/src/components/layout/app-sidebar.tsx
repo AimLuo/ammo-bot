@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
@@ -34,7 +33,8 @@ import {
   SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { useWithProject, stripProject } from "@/lib/project-prefix";
+import { ProjectLink } from "@/components/project-link";
+import { stripProject } from "@/lib/project-prefix";
 import { MarkplaneLogo } from "@/components/ui/markplane-logo";
 import { ProjectSwitcher } from "@/components/layout/project-switcher";
 
@@ -62,20 +62,19 @@ const mainNav = [
 
 export function AppSidebar() {
   const pathname = stripProject(usePathname());
-  const withProject = useWithProject();
   const { theme, setTheme } = useTheme();
   const { isMobile, toggleSidebar } = useSidebar();
 
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="p-2 pt-3 gap-2">
-        <Link
-          href={withProject("/dashboard")}
+        <ProjectLink
+          href="/dashboard"
           className="flex items-center gap-2 overflow-hidden rounded-md p-1"
         >
           <MarkplaneLogo className="size-6 text-primary shrink-0" />
           <span className="text-lg font-semibold tracking-tight font-mono whitespace-nowrap">Markplane</span>
-        </Link>
+        </ProjectLink>
         <ProjectSwitcher />
       </SidebarHeader>
 
@@ -106,10 +105,10 @@ export function AppSidebar() {
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={pathname.startsWith(item.href)} tooltip={item.label} className="text-base">
-                      <Link href={withProject(item.href)}>
+                      <ProjectLink href={item.href}>
                         <Icon className="size-5" />
                         <span>{item.label}</span>
-                      </Link>
+                      </ProjectLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 );
@@ -123,18 +122,18 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton asChild isActive={pathname.startsWith("/docs")} tooltip="Docs" className="text-base">
-              <Link href={withProject("/docs")}>
+              <ProjectLink href="/docs">
                 <BookOpen className="size-5" />
                 <span>Docs</span>
-              </Link>
+              </ProjectLink>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton asChild isActive={pathname.startsWith("/settings")} tooltip="Settings" className="text-base">
-              <Link href={withProject("/settings")}>
+              <ProjectLink href="/settings">
                 <Settings className="size-5" />
                 <span>Settings</span>
-              </Link>
+              </ProjectLink>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>

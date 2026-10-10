@@ -1,17 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Redirect, Response};
 use axum::routing::{get, patch, post};
+use hyper::body::Incoming;
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -65,6 +68,8 @@ struct AppState {
     config_dir: PathBuf,
     port: u16,
     dev: bool,
+    /// When true, CORS / WebSocket Origin checks use `https://`.
+    use_tls: bool,
     runtimes: Mutex<HashMap<String, Arc<ProjectRuntime>>>,
 }
 
@@ -74,11 +79,12 @@ enum RuntimeError {
 }
 
 impl AppState {
-    fn new(config_dir: PathBuf, port: u16, dev: bool) -> Arc<Self> {
+    fn new(config_dir: PathBuf, port: u16, dev: bool, use_tls: bool) -> Arc<Self> {
         Arc::new(Self {
             config_dir,
             port,
             dev,
+            use_tls,
             runtimes: Mutex::new(HashMap::new()),
         })
     }
@@ -211,7 +217,7 @@ const DOC_MANIFEST: &[DocEntry] = &[
     },
 ];
 
-pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
+pub async fn run(port: u16, open: bool, dev: bool, no_tls: bool) -> anyhow::Result<()> {
     let config_dir = serve_registry::config_dir();
     fs_create_config_dir(&config_dir)?;
 
@@ -236,12 +242,27 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
         }
     };
 
-    let state = AppState::new(config_dir, port, dev);
+    let use_tls = !dev && !no_tls;
+    let state = AppState::new(config_dir.clone(), port, dev, use_tls);
     let app = build_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let base = format!("http://localhost:{port}");
+    let scheme = if use_tls { "https" } else { "http" };
+    let base = format!("{scheme}://localhost:{port}");
     let url = format!("{base}{open_path}");
+
+    if use_tls {
+        let certs_dir = config_dir.join("certs");
+        let ensured = super::certs::ensure_certs(&certs_dir)?;
+        if ensured.renewed {
+            println!(
+                "Generated localhost TLS certificate at {}",
+                ensured.cert_path.display()
+            );
+            println!("{}", super::certs::trust_instructions(&ensured.cert_path));
+            let _ = std::io::stdout().flush();
+        }
+    }
 
     println!("Markplane web UI starting on {base}");
     if dev {
@@ -251,22 +272,39 @@ pub async fn run(port: u16, open: bool, dev: bool) -> anyhow::Result<()> {
         println!("Serving embedded UI from binary");
         #[cfg(not(feature = "embed-ui"))]
         println!("Serving static UI from crates/markplane-web/ui/out/");
+        if no_tls {
+            println!("TLS disabled (--no-tls); serving plain HTTP");
+        }
     }
     println!("Open {url}");
+    let _ = std::io::stdout().flush();
 
     if open {
         let _ = open::that(&url);
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    // Middleware sits outside the Router so URI rewrite runs before matching.
-    axum::serve(
-        listener,
-        axum::ServiceExt::<Request>::into_make_service(app),
-    )
-    .await?;
+    // axum-server passes hyper::Incoming; adapt to axum::Body for the boxed stack.
+    let app = tower::util::MapRequestLayer::new(incoming_to_axum_body).layer(app);
+    let make_service = axum::ServiceExt::into_make_service(app);
+
+    if use_tls {
+        let certs_dir = config_dir.join("certs");
+        let cert_path = certs_dir.join("cert.pem");
+        let key_path = certs_dir.join("key.pem");
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+        axum_server::bind_rustls(addr, tls)
+            .serve(make_service)
+            .await?;
+    } else {
+        axum_server::bind(addr).serve(make_service).await?;
+    }
 
     Ok(())
+}
+
+fn incoming_to_axum_body(req: axum::http::Request<Incoming>) -> Request {
+    let (parts, body) = req.into_parts();
+    Request::from_parts(parts, Body::new(body))
 }
 
 fn fs_create_config_dir(config_dir: &FsPath) -> anyhow::Result<()> {
@@ -320,10 +358,11 @@ fn build_router(state: Arc<AppState>) -> Router {
     let cors = if state.dev {
         CorsLayer::permissive()
     } else {
-        let localhost = format!("http://localhost:{}", state.port)
+        let scheme = if state.use_tls { "https" } else { "http" };
+        let localhost = format!("{scheme}://localhost:{}", state.port)
             .parse::<HeaderValue>()
             .unwrap();
-        let loopback = format!("http://127.0.0.1:{}", state.port)
+        let loopback = format!("{scheme}://127.0.0.1:{}", state.port)
             .parse::<HeaderValue>()
             .unwrap();
         CorsLayer::new()
@@ -721,8 +760,9 @@ async fn ws_handler(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
     // Validate Origin header in non-dev mode
     if !state.dev {
-        let allowed_localhost = format!("http://localhost:{}", state.port);
-        let allowed_loopback = format!("http://127.0.0.1:{}", state.port);
+        let scheme = if state.use_tls { "https" } else { "http" };
+        let allowed_localhost = format!("{scheme}://localhost:{}", state.port);
+        let allowed_loopback = format!("{scheme}://127.0.0.1:{}", state.port);
         match headers.get(axum::http::header::ORIGIN) {
             Some(origin) => {
                 let origin_str = origin.to_str().unwrap_or("");
@@ -3488,7 +3528,7 @@ mod tests {
         )
         .unwrap();
         let entry = serve_registry::register(&config_dir, &project_dir).unwrap();
-        let state = AppState::new(config_dir.clone(), 4200, true);
+        let state = AppState::new(config_dir.clone(), 4200, true, false);
         let app = build_app(state.clone());
         TestEnv {
             _tmp: tmp,
@@ -3554,7 +3594,7 @@ mod tests {
         // Invalidate newer project's path after registration.
         fs::remove_dir_all(newer.join(".markplane")).unwrap();
 
-        let state = AppState::new(config_dir, 4200, true);
+        let state = AppState::new(config_dir, 4200, true, false);
         let app = build_app(state);
         let (status, json) = oneshot_json(&app, "GET", "/api/projects").await;
         assert_eq!(status, StatusCode::OK);
@@ -3688,7 +3728,7 @@ mod tests {
         let id_a = serve_registry::register(&config_dir, &dir_a).unwrap().id;
         let id_b = serve_registry::register(&config_dir, &dir_b).unwrap().id;
 
-        let state = AppState::new(config_dir, 4200, true);
+        let state = AppState::new(config_dir, 4200, true, false);
         let app = build_app(state.clone());
 
         let (status, list_a) =

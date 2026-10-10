@@ -1,22 +1,12 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { usePathname } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "@/lib/api-error";
 import { fetcher } from "@/lib/api";
 import { projectIdFromPathname } from "@/lib/project-prefix";
 import { ProjectErrorPage } from "@/components/layout/project-error";
-
-type GateState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "ok" }
-  | {
-      status: "error";
-      code: "project_not_found" | "project_unavailable";
-      message: string;
-      path?: string | null;
-    };
 
 /**
  * When a Project id is in the URL, probe the API once so 404/409 become a
@@ -25,55 +15,20 @@ type GateState =
 export function ProjectGate({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const projectId = projectIdFromPathname(pathname);
-  const [state, setState] = useState<GateState>({ status: "idle" });
 
-  useEffect(() => {
-    if (!projectId) {
-      setState({ status: "idle" });
-      return;
-    }
-
-    let cancelled = false;
-    setState({ status: "loading" });
-
-    fetcher<{ name: string }>("/api/summary")
-      .then(() => {
-        if (!cancelled) setState({ status: "ok" });
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.isProjectNotFound) {
-          setState({
-            status: "error",
-            code: "project_not_found",
-            message: err.message,
-            path: err.path,
-          });
-          return;
-        }
-        if (err instanceof ApiError && err.isProjectUnavailable) {
-          setState({
-            status: "error",
-            code: "project_unavailable",
-            message: err.message,
-            path: err.path,
-          });
-          return;
-        }
-        // Other errors: let the normal page/error boundary handle them.
-        setState({ status: "ok" });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId]);
+  const probe = useQuery({
+    queryKey: ["project-gate", projectId],
+    queryFn: () => fetcher<{ name: string }>("/api/summary"),
+    enabled: !!projectId,
+    retry: false,
+    staleTime: 30_000,
+  });
 
   if (!projectId) {
     return <>{children}</>;
   }
 
-  if (state.status === "loading" || state.status === "idle") {
+  if (probe.isPending) {
     return (
       <div className="flex min-h-[40vh] items-center justify-center p-8 text-muted-foreground">
         Loading project…
@@ -81,12 +36,22 @@ export function ProjectGate({ children }: { children: ReactNode }) {
     );
   }
 
-  if (state.status === "error") {
+  if (probe.error instanceof ApiError && probe.error.isProjectNotFound) {
     return (
       <ProjectErrorPage
-        code={state.code}
-        message={state.message}
-        path={state.path}
+        code="project_not_found"
+        message={probe.error.message}
+        path={probe.error.path}
+      />
+    );
+  }
+
+  if (probe.error instanceof ApiError && probe.error.isProjectUnavailable) {
+    return (
+      <ProjectErrorPage
+        code="project_unavailable"
+        message={probe.error.message}
+        path={probe.error.path}
       />
     );
   }

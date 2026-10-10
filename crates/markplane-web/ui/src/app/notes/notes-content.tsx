@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { useProjectRouter } from "@/lib/project-prefix";
 import { useNotes } from "@/lib/hooks/use-notes";
 import { NoteDetailSheet } from "@/components/domain/note-detail-sheet";
 import { CreateDialog } from "@/components/domain/create-dialog";
@@ -21,7 +22,7 @@ function capitalize(s: string): string {
 
 export function NotesContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useProjectRouter();
   const { data, isLoading, error, refetch } = useNotes();
   const { data: config } = useConfig();
   const [createOpen, setCreateOpen] = useState(false);

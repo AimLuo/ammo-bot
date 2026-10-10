@@ -2,6 +2,7 @@
 
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ProjectLink } from "@/components/project-link";
 
 export function ProjectErrorPage({
   code,
@@ -26,7 +27,7 @@ export function ProjectErrorPage({
         )}
       </div>
       <Button asChild>
-        <a href="/">返回 Project 列表</a>
+        <ProjectLink href="/">返回 Project 列表</ProjectLink>
       </Button>
     </div>
   );

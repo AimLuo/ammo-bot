@@ -15,6 +15,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { ProjectLink } from "@/components/project-link";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { projectHref, projectIdFromPathname } from "@/lib/project-prefix";
 import { usePathname } from "next/navigation";
@@ -61,15 +62,15 @@ export function ProjectSwitcher() {
               Projects
             </DropdownMenuLabel>
             <DropdownMenuItem asChild>
-              <a href="/">
+              <ProjectLink href="/">
                 <LayoutGrid className="size-4" />
                 所有 Project
-              </a>
+              </ProjectLink>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             {projects.map((p) => (
               <DropdownMenuItem key={p.id} asChild>
-                <a href={projectHref(p.id)}>
+                <ProjectLink href={projectHref(p.id)}>
                   <span className="flex items-center gap-2 min-w-0">
                     {!p.path_valid && (
                       <span
@@ -79,7 +80,7 @@ export function ProjectSwitcher() {
                     )}
                     <span className="truncate">{p.name}</span>
                   </span>
-                </a>
+                </ProjectLink>
               </DropdownMenuItem>
             ))}
             {projects.length === 0 && (

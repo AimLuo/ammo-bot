@@ -1,4 +1,5 @@
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
 
 const noopSubscribe = () => () => {};
 
@@ -15,10 +16,36 @@ export function useWithProject(): (path: string) => string {
   const id = useProjectId();
   return useCallback(
     (path: string) =>
-      !id || !path.startsWith("/") || path.startsWith("/p/")
+      !id ||
+      path === "/" ||
+      !path.startsWith("/") ||
+      path.startsWith("/p/")
         ? path
         : `/p/${encodeURIComponent(id)}${path}`,
     [id],
+  );
+}
+
+/** App Router with Project-prefixed push/replace/prefetch. */
+export function useProjectRouter() {
+  const router = useRouter();
+  const withProject = useWithProject();
+
+  return useMemo(
+    () => ({
+      back: () => router.back(),
+      forward: () => router.forward(),
+      refresh: () => router.refresh(),
+      prefetch: (
+        href: string,
+        options?: Parameters<typeof router.prefetch>[1],
+      ) => router.prefetch(withProject(href), options),
+      push: (href: string, options?: Parameters<typeof router.push>[1]) =>
+        router.push(withProject(href), options),
+      replace: (href: string, options?: Parameters<typeof router.replace>[1]) =>
+        router.replace(withProject(href), options),
+    }),
+    [router, withProject],
   );
 }
 
@@ -30,7 +57,9 @@ export function currentProjectId(): string | null {
 
 export function withProject(path: string): string {
   const id = currentProjectId();
-  if (!id || !path.startsWith("/") || path.startsWith("/p/")) return path;
+  if (!id || path === "/" || !path.startsWith("/") || path.startsWith("/p/")) {
+    return path;
+  }
   return `/p/${encodeURIComponent(id)}${path}`;
 }
 
