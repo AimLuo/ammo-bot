@@ -63,7 +63,7 @@ export function withProject(path: string): string {
   return `/p/${encodeURIComponent(id)}${path}`;
 }
 
-const GLOBAL_API_PREFIXES = ["/api/docs", "/api/projects", "/api/fs"];
+const GLOBAL_API_PREFIXES = ["/api/docs", "/api/projects", "/api/fs", "/api/init"];
 
 export function apiPath(path: string): string {
   if (GLOBAL_API_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))) {

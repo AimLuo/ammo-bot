@@ -71,6 +71,8 @@ struct AppState {
     dev: bool,
     /// When true, CORS / WebSocket Origin checks use `https://`.
     use_tls: bool,
+    /// Optional HOME override (tests); production leaves this `None`.
+    home_override: Option<PathBuf>,
     runtimes: Mutex<HashMap<String, Arc<ProjectRuntime>>>,
 }
 
@@ -81,11 +83,22 @@ enum RuntimeError {
 
 impl AppState {
     fn new(config_dir: PathBuf, port: u16, dev: bool, use_tls: bool) -> Arc<Self> {
+        Self::with_home(config_dir, port, dev, use_tls, None)
+    }
+
+    fn with_home(
+        config_dir: PathBuf,
+        port: u16,
+        dev: bool,
+        use_tls: bool,
+        home_override: Option<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             config_dir,
             port,
             dev,
             use_tls,
+            home_override,
             runtimes: Mutex::new(HashMap::new()),
         })
     }
@@ -413,11 +426,13 @@ fn build_app(
 
 fn build_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
-        .route("/api/projects", get(list_projects))
+        .route("/api/projects", get(list_projects).post(add_project))
         .route(
             "/api/projects/{id}",
             patch(rename_project).delete(remove_project),
         )
+        .route("/api/fs", get(list_fs))
+        .route("/api/init", post(init_and_register_project))
         .route("/api/summary", get(get_summary))
         .route("/api/tasks", get(get_tasks).post(create_task))
         .route(
@@ -639,6 +654,268 @@ fn registry_entry_to_list_item(e: serve_registry::RegistryEntry) -> ProjectListI
         path_valid,
         last_opened: e.last_opened.to_rfc3339(),
     }
+}
+
+#[derive(Deserialize)]
+struct FsQuery {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    has_markplane: bool,
+}
+
+#[derive(Serialize)]
+struct FsListing {
+    path: String,
+    parent: Option<String>,
+    home: String,
+    has_markplane: bool,
+    entries: Vec<FsEntry>,
+}
+
+fn home_dir(state: &AppState) -> Result<PathBuf, (StatusCode, Json<ApiError>)> {
+    if let Some(home) = &state.home_override {
+        return Ok(home.clone());
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "HOME is not set",
+        )
+    })?;
+    Ok(PathBuf::from(home))
+}
+
+fn expand_fs_path(
+    state: &AppState,
+    raw: Option<&str>,
+) -> Result<PathBuf, (StatusCode, Json<ApiError>)> {
+    let home = home_dir(state)?;
+    let path = match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => home.clone(),
+        Some("~") => home.clone(),
+        Some(p) if p.starts_with("~/") => home.join(&p[2..]),
+        Some(p) => PathBuf::from(p),
+    };
+    Ok(path)
+}
+
+fn resolve_existing_dir(path: &FsPath) -> Result<PathBuf, (StatusCode, Json<ApiError>)> {
+    let canonical = fs_canonicalize(path).map_err(|e| {
+        error_response_with_path(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            &format!("cannot resolve path: {e}"),
+            &path.display().to_string(),
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(error_response_with_path(
+            StatusCode::BAD_REQUEST,
+            "not_a_directory",
+            "path is not a directory",
+            &canonical.display().to_string(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn fs_canonicalize(path: &FsPath) -> std::io::Result<PathBuf> {
+    // canonicalize requires the path to exist.
+    std::fs::canonicalize(path)
+}
+
+async fn list_fs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FsQuery>,
+) -> Result<Json<ApiResponse<FsListing>>, (StatusCode, Json<ApiError>)> {
+    let home = home_dir(&state)?;
+    let home = resolve_existing_dir(&home)?;
+    let requested = expand_fs_path(&state, query.path.as_deref())?;
+    let path = resolve_existing_dir(&requested)?;
+
+    let mut entries = Vec::new();
+    let read = std::fs::read_dir(&path).map_err(|e| {
+        error_response_with_path(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            &format!("cannot read directory: {e}"),
+            &path.display().to_string(),
+        )
+    })?;
+    for entry in read {
+        let entry = entry.map_err(|e| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                &e.to_string(),
+            )
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let meta = entry.metadata().map_err(|e| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                &e.to_string(),
+            )
+        })?;
+        if !meta.is_dir() {
+            continue;
+        }
+        let child = entry.path();
+        let has_markplane = child.join(".markplane").is_dir();
+        entries.push(FsEntry {
+            name: name.into_owned(),
+            path: child.to_string_lossy().into_owned(),
+            has_markplane,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let parent = path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned());
+    let has_markplane = path.join(".markplane").is_dir();
+
+    Ok(Json(ApiResponse {
+        data: FsListing {
+            path: path.to_string_lossy().into_owned(),
+            parent,
+            home: home.to_string_lossy().into_owned(),
+            has_markplane,
+            entries,
+        },
+    }))
+}
+
+#[derive(Deserialize)]
+struct PathBody {
+    path: String,
+}
+
+async fn add_project(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PathBody>,
+) -> Result<Json<ApiResponse<ProjectListItem>>, (StatusCode, Json<ApiError>)> {
+    let requested = expand_fs_path(&state, Some(&body.path))?;
+    let path = resolve_existing_dir(&requested)?;
+    if !path.join(".markplane").is_dir() {
+        return Err(error_response_with_path(
+            StatusCode::CONFLICT,
+            "project_not_initialized",
+            "Directory is not a Markplane project (missing .markplane/)",
+            &path.display().to_string(),
+        ));
+    }
+
+    let before = serve_registry::find_by_path(&state.config_dir, &path).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    let entry = serve_registry::register(&state.config_dir, &path).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    let entry = if before.is_some() {
+        serve_registry::touch_last_opened(&state.config_dir, &entry.id).map_err(|e| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                &e.to_string(),
+            )
+        })?;
+        serve_registry::find(&state.config_dir, &entry.id)
+            .map_err(|e| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    &e.to_string(),
+                )
+            })?
+            .unwrap_or(entry)
+    } else {
+        entry
+    };
+
+    Ok(Json(ApiResponse {
+        data: registry_entry_to_list_item(entry),
+    }))
+}
+
+async fn init_and_register_project(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PathBody>,
+) -> Result<Json<ApiResponse<ProjectListItem>>, (StatusCode, Json<ApiError>)> {
+    let requested = expand_fs_path(&state, Some(&body.path))?;
+    let path = resolve_existing_dir(&requested)?;
+    if path.join(".markplane").is_dir() {
+        return Err(error_response_with_path(
+            StatusCode::CONFLICT,
+            "already_initialized",
+            "Directory already contains .markplane/",
+            &path.display().to_string(),
+        ));
+    }
+
+    let project_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "my-project".to_string());
+    let project = Project::init(path.join(".markplane"), &project_name, "").map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    project.sync_all().map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    // Match default `markplane init` (seed starter content).
+    project.seed_starter_content().map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    project.sync_all().map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+
+    let entry = serve_registry::register(&state.config_dir, &path).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
+    Ok(Json(ApiResponse {
+        data: registry_entry_to_list_item(entry),
+    }))
 }
 
 async fn list_projects(
@@ -3661,6 +3938,174 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
         (status, json)
+    }
+
+    #[tokio::test]
+    async fn fs_lists_home_subdirs_hides_dotdirs_marks_markplane() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(home.join("visible")).unwrap();
+        fs::create_dir_all(home.join(".hidden")).unwrap();
+        fs::create_dir_all(home.join("a-project/.markplane")).unwrap();
+        fs::write(home.join("file.txt"), "not a dir").unwrap();
+
+        let state = AppState::with_home(config_dir, 4200, true, false, Some(home.clone()));
+        let app = build_app(state);
+        let (status, json) = oneshot_json(&app, "GET", "/api/fs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = &json["data"];
+        assert_eq!(
+            data["path"].as_str().unwrap(),
+            home.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            data["home"].as_str().unwrap(),
+            home.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert_eq!(data["has_markplane"], false);
+
+        let entries = data["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"visible"));
+        assert!(names.contains(&"a-project"));
+        assert!(!names.contains(&".hidden"));
+        assert!(!names.contains(&"file.txt"));
+
+        let project = entries
+            .iter()
+            .find(|e| e["name"] == "a-project")
+            .unwrap();
+        assert_eq!(project["has_markplane"], true);
+        let visible = entries.iter().find(|e| e["name"] == "visible").unwrap();
+        assert_eq!(visible["has_markplane"], false);
+    }
+
+    #[tokio::test]
+    async fn fs_tilde_path_resolves_under_home() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let nested = home.join("docs/work");
+        fs::create_dir_all(&nested).unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let state = AppState::with_home(config_dir, 4200, true, false, Some(home.clone()));
+        let app = build_app(state);
+        let (status, json) = oneshot_json(&app, "GET", "/api/fs?path=~/docs").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["data"]["path"].as_str().unwrap(),
+            home.join("docs").canonicalize().unwrap().to_str().unwrap()
+        );
+        let entries = json["data"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "work");
+        assert!(json["data"]["parent"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn add_project_registers_and_symlink_dedupes_updating_last_opened() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let project_dir = tmp.path().join("real-proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        Project::init(project_dir.join(".markplane"), "Real", "").unwrap();
+
+        let state = AppState::new(config_dir.clone(), 4200, true, false);
+        let app = build_app(state);
+
+        let (status, json) = oneshot_json_body(
+            &app,
+            "POST",
+            "/api/projects",
+            Some(serde_json::json!({ "path": project_dir.to_string_lossy() })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = json["data"]["id"].as_str().unwrap().to_string();
+        let first_opened = json["data"]["last_opened"].as_str().unwrap().to_string();
+
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let link = tmp.path().join("alias-proj");
+        std::os::unix::fs::symlink(&project_dir, &link).unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &app,
+            "POST",
+            "/api/projects",
+            Some(serde_json::json!({ "path": link.to_string_lossy() })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["id"], id);
+        assert!(json["data"]["last_opened"].as_str().unwrap() > first_opened.as_str());
+        assert_eq!(serve_registry::list(&config_dir).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_project_uninitialized_returns_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let bare = tmp.path().join("bare");
+        fs::create_dir_all(&bare).unwrap();
+
+        let state = AppState::new(config_dir, 4200, true, false);
+        let app = build_app(state);
+        let (status, json) = oneshot_json_body(
+            &app,
+            "POST",
+            "/api/projects",
+            Some(serde_json::json!({ "path": bare.to_string_lossy() })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"]["code"], "project_not_initialized");
+        assert!(
+            json["error"]["path"]
+                .as_str()
+                .unwrap()
+                .contains("bare")
+        );
+    }
+
+    #[tokio::test]
+    async fn init_api_creates_markplane_and_registers() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let bare = tmp.path().join("fresh-app");
+        fs::create_dir_all(&bare).unwrap();
+
+        let state = AppState::new(config_dir.clone(), 4200, true, false);
+        let app = build_app(state);
+        let (status, json) = oneshot_json_body(
+            &app,
+            "POST",
+            "/api/init",
+            Some(serde_json::json!({ "path": bare.to_string_lossy() })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["id"], "fresh-app");
+        assert!(bare.join(".markplane/config.yaml").is_file());
+        assert!(bare.join(".markplane/backlog").is_dir());
+        // Default CLI init seeds starter content.
+        let backlog = bare.join(".markplane/backlog/items");
+        assert!(
+            backlog.is_dir()
+                && fs::read_dir(&backlog).unwrap().next().is_some(),
+            "expected seeded starter tasks"
+        );
+        assert_eq!(serve_registry::list(&config_dir).unwrap().len(), 1);
     }
 
     #[tokio::test]

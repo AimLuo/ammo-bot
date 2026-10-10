@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { FolderPlus, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { AddProjectDialog } from "@/components/landing/add-project-dialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -138,7 +139,7 @@ function ProjectCard({
   );
 }
 
-function AddFirstPlaceholder() {
+function AddFirstPlaceholder({ onAdd }: { onAdd: () => void }) {
   return (
     <div
       className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed px-6 py-12 text-center"
@@ -148,11 +149,12 @@ function AddFirstPlaceholder() {
       <div className="space-y-1">
         <p className="text-sm font-medium">添加第一个 Project</p>
         <p className="text-xs text-muted-foreground max-w-sm">
-          添加目录浏览将在后续提供。也可在 Project 目录里运行{" "}
-          <code className="font-mono">markplane serve</code> 自动注册。
+          浏览本机目录添加已有 Project，或选择未初始化目录一键 init。也可在
+          Project 目录里运行 <code className="font-mono">markplane serve</code>{" "}
+          自动注册。
         </p>
       </div>
-      <Button type="button" variant="outline" size="sm" disabled>
+      <Button type="button" variant="outline" size="sm" onClick={onAdd}>
         添加 Project
       </Button>
     </div>
@@ -162,6 +164,7 @@ function AddFirstPlaceholder() {
 export function ProjectLanding() {
   const { data, error, isLoading, refetch } = useProjects();
   const projects = data?.data ?? [];
+  const [addOpen, setAddOpen] = useState(false);
 
   return (
     <div className="mx-auto max-w-2xl p-8">
@@ -177,7 +180,7 @@ export function ProjectLanding() {
       )}
       {!isLoading && !error && projects.length === 0 && (
         <div className="mt-6">
-          <AddFirstPlaceholder />
+          <AddFirstPlaceholder onAdd={() => setAddOpen(true)} />
         </div>
       )}
       {!isLoading && projects.length > 0 && (
@@ -188,12 +191,18 @@ export function ProjectLanding() {
             </li>
           ))}
           <li>
-            <div className="rounded-xl border border-dashed px-4 py-3 text-sm text-muted-foreground">
-              添加 Project（即将提供）
-            </div>
+            <button
+              type="button"
+              onClick={() => setAddOpen(true)}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed px-4 py-3 text-sm text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            >
+              <FolderPlus className="size-4" />
+              添加 Project…
+            </button>
           </li>
         </ul>
       )}
+      <AddProjectDialog open={addOpen} onOpenChange={setAddOpen} />
     </div>
   );
 }

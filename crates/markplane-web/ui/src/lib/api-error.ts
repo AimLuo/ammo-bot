@@ -22,6 +22,10 @@ export class ApiError extends Error {
   get isProjectUnavailable(): boolean {
     return this.status === 409 && this.code === "project_unavailable";
   }
+
+  get isProjectNotInitialized(): boolean {
+    return this.status === 409 && this.code === "project_not_initialized";
+  }
 }
 
 export async function throwIfNotOk(res: Response): Promise<void> {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { deleteAction, fetchList, patchJson } from "@/lib/api";
+import { deleteAction, fetcher, fetchList, patchJson, postJson } from "@/lib/api";
 
 export type RegistryProject = {
   id: string;
@@ -11,10 +11,60 @@ export type RegistryProject = {
   last_opened: string;
 };
 
+export type FsEntry = {
+  name: string;
+  path: string;
+  has_markplane: boolean;
+};
+
+export type FsListing = {
+  path: string;
+  parent: string | null;
+  home: string;
+  has_markplane: boolean;
+  entries: FsEntry[];
+};
+
 export function useProjects() {
   return useQuery({
     queryKey: ["projects"],
     queryFn: () => fetchList<RegistryProject>("/api/projects"),
+  });
+}
+
+export function useFsListing(path: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["fs", path ?? ""],
+    queryFn: () => {
+      const q =
+        path != null && path !== ""
+          ? `?path=${encodeURIComponent(path)}`
+          : "";
+      return fetcher<FsListing>(`/api/fs${q}`);
+    },
+    enabled,
+  });
+}
+
+export function useAddProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) =>
+      postJson<RegistryProject>("/api/projects", { path }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+export function useInitProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) =>
+      postJson<RegistryProject>("/api/init", { path }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
   });
 }
 

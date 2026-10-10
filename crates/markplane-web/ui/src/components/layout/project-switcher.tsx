@@ -1,6 +1,8 @@
 "use client";
 
-import { ChevronsUpDown, FolderKanban, LayoutGrid } from "lucide-react";
+import { useState } from "react";
+import { ChevronsUpDown, FolderKanban, FolderPlus, LayoutGrid } from "lucide-react";
+import { AddProjectDialog } from "@/components/landing/add-project-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,69 +28,83 @@ export function ProjectSwitcher() {
   const { data } = useProjects();
   const projects = data?.data ?? [];
   const { isMobile } = useSidebar();
+  const [addOpen, setAddOpen] = useState(false);
 
   const current = projects.find((p) => p.id === currentId);
   const label = current?.name ?? (currentId ? currentId : "所有 Project");
 
   return (
-    <SidebarMenu>
-      <SidebarMenuItem>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <SidebarMenuButton
-              size="lg"
-              className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-              tooltip={label}
-            >
-              <div className="flex aspect-square size-8 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
-                <FolderKanban className="size-4" />
-              </div>
-              <div className="grid flex-1 text-left text-sm leading-tight">
-                <span className="truncate font-medium">{label}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {current?.path ?? "Project list"}
-                </span>
-              </div>
-              <ChevronsUpDown className="ml-auto size-4" />
-            </SidebarMenuButton>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
-            align="start"
-            side={isMobile ? "bottom" : "right"}
-            sideOffset={4}
-          >
-            <DropdownMenuLabel className="text-xs text-muted-foreground">
-              Projects
-            </DropdownMenuLabel>
-            <DropdownMenuItem asChild>
-              <ProjectLink href="/">
-                <LayoutGrid className="size-4" />
-                所有 Project
-              </ProjectLink>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            {projects.map((p) => (
-              <DropdownMenuItem key={p.id} asChild>
-                <ProjectLink href={projectHref(p.id)}>
-                  <span className="flex items-center gap-2 min-w-0">
-                    {!p.path_valid && (
-                      <span
-                        className="inline-block size-2 shrink-0 rounded-full bg-destructive"
-                        aria-hidden
-                      />
-                    )}
-                    <span className="truncate">{p.name}</span>
+    <>
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <SidebarMenuButton
+                size="lg"
+                className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+                tooltip={label}
+              >
+                <div className="flex aspect-square size-8 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
+                  <FolderKanban className="size-4" />
+                </div>
+                <div className="grid flex-1 text-left text-sm leading-tight">
+                  <span className="truncate font-medium">{label}</span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {current?.path ?? "Project list"}
                   </span>
+                </div>
+                <ChevronsUpDown className="ml-auto size-4" />
+              </SidebarMenuButton>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
+              align="start"
+              side={isMobile ? "bottom" : "right"}
+              sideOffset={4}
+            >
+              <DropdownMenuLabel className="text-xs text-muted-foreground">
+                Projects
+              </DropdownMenuLabel>
+              <DropdownMenuItem asChild>
+                <ProjectLink href="/">
+                  <LayoutGrid className="size-4" />
+                  所有 Project
                 </ProjectLink>
               </DropdownMenuItem>
-            ))}
-            {projects.length === 0 && (
-              <DropdownMenuItem disabled>No projects registered</DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SidebarMenuItem>
-    </SidebarMenu>
+              <DropdownMenuSeparator />
+              {projects.map((p) => (
+                <DropdownMenuItem key={p.id} asChild>
+                  <ProjectLink href={projectHref(p.id)}>
+                    <span className="flex items-center gap-2 min-w-0">
+                      {!p.path_valid && (
+                        <span
+                          className="inline-block size-2 shrink-0 rounded-full bg-destructive"
+                          aria-hidden
+                        />
+                      )}
+                      <span className="truncate">{p.name}</span>
+                    </span>
+                  </ProjectLink>
+                </DropdownMenuItem>
+              ))}
+              {projects.length === 0 && (
+                <DropdownMenuItem disabled>No projects registered</DropdownMenuItem>
+              )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={(e) => {
+                  e.preventDefault();
+                  setAddOpen(true);
+                }}
+              >
+                <FolderPlus className="size-4" />
+                添加 Project…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </SidebarMenuItem>
+      </SidebarMenu>
+      <AddProjectDialog open={addOpen} onOpenChange={setAddOpen} />
+    </>
   );
 }

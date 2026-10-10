@@ -105,6 +105,21 @@ pub fn find(config_dir: &Path, id: &str) -> anyhow::Result<Option<RegistryEntry>
     })
 }
 
+/// Find an entry by realpath'd project directory (locked read).
+pub fn find_by_path(config_dir: &Path, project_path: &Path) -> anyhow::Result<Option<RegistryEntry>> {
+    let canonical = match fs::canonicalize(project_path) {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    let path_str = canonical.to_string_lossy().to_string();
+    with_lock(config_dir, || {
+        Ok(read_unlocked(config_dir)?
+            .projects
+            .into_iter()
+            .find(|p| p.path == path_str))
+    })
+}
+
 /// Re-read the registry without holding a long-lived cache (locked).
 pub fn find_reread(config_dir: &Path, id: &str) -> anyhow::Result<Option<RegistryEntry>> {
     find(config_dir, id)
