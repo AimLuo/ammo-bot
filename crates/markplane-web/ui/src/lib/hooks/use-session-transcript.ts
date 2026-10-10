@@ -45,7 +45,7 @@ export function useSessionTranscript(
 export function useRefreshSessionLog(taskId: string) {
   const queryClient = useQueryClient();
   return async (sessionId?: string | null) => {
-    await queryClient.refetchQueries({ queryKey: ["runs", "detail", taskId] });
+    await queryClient.refetchQueries({ queryKey: ["runs", taskId] });
     if (sessionId) {
       await queryClient.refetchQueries({
         queryKey: sessionTranscriptQueryKey(taskId, sessionId),

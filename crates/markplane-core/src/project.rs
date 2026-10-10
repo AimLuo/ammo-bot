@@ -822,6 +822,11 @@ impl Project {
         crate::runs::write_run_record(&self.root, task_id, record)
     }
 
+    /// List all local Run records as `(task_id, record)` pairs.
+    pub fn list_run_records(&self) -> Result<Vec<(String, crate::runs::RunRecord)>> {
+        crate::runs::list_run_records(&self.root)
+    }
+
     /// Acquire an advisory exclusive lock for an item.
     ///
     /// This locks a sidecar file under `.markplane/.locks/` rather than the

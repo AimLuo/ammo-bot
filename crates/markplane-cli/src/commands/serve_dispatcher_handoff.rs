@@ -121,13 +121,8 @@ fn broadcast_run_changed(ws_tx: &broadcast::Sender<String>, task_id: &str, run: 
         .current_stage
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
-    let display = match run.status {
-        RunStatus::Running => "running",
-        RunStatus::MergeQueued => "merge-queued",
-        RunStatus::Succeeded => "succeeded",
-        RunStatus::Failed => "failed",
-        RunStatus::Stopped => "stopped",
-    };
+    let display =
+        markplane_core::run_display_status(run, markplane_core::RunMemoryPresence::InMemory);
     let msg = json!({
         "type": "run_changed",
         "task_id": task_id,

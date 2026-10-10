@@ -63,8 +63,9 @@ pub use references::{
     validate_task_statuses,
 };
 pub use runs::{
-    Attempt, AttemptResult, Run, RunRecord, RunStatus, STAGE_ORDER, Stage, Trigger, Usage,
-    ensure_runs_dir, read_run_record, run_record_path, write_run_record,
+    Attempt, AttemptResult, Run, RunMemoryPresence, RunRecord, RunStatus, RunSummary, STAGE_ORDER,
+    Stage, Trigger, Usage, ensure_runs_dir, list_run_records, read_run_record, run_display_status,
+    run_record_path, run_summary, stage_started_at, write_run_record,
 };
 pub use transcripts::{
     SessionTranscript, TranscriptBlock, TranscriptMessage, cursor_data_dir,

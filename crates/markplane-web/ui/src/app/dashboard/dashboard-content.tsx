@@ -4,8 +4,11 @@ import { useState, useCallback, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import { useProjectRouter } from "@/lib/project-prefix";
 import { useSummary } from "@/lib/hooks/use-summary";
+import { useRunSummaryMap } from "@/lib/hooks/use-runs";
+import { useConfig } from "@/lib/hooks/use-config";
 import { StatusBadge } from "@/components/domain/status-badge";
 import { PriorityIndicator } from "@/components/domain/priority-indicator";
+import { RunBadge } from "@/components/domain/run-badge";
 import { EpicProgress } from "@/components/domain/epic-progress";
 import { MarkdownRenderer } from "@/components/domain/markdown-renderer";
 import { TaskDetailSheet } from "@/components/domain/task-detail-sheet";
@@ -31,6 +34,9 @@ function relativeTime(dateStr: string): string {
 
 export function DashboardContent() {
   const { data, isLoading, error, refetch } = useSummary();
+  const { map: runMap } = useRunSummaryMap();
+  const { data: config } = useConfig();
+  const workflow = config?.workflows.task;
   const queryClient = useQueryClient();
   const router = useProjectRouter();
   const searchParams = useSearchParams();
@@ -133,7 +139,9 @@ export function DashboardContent() {
             <h2 className="text-sm font-semibold mb-3">Active Work</h2>
             {data.in_progress_tasks.length > 0 ? (
               <div className="space-y-1">
-                {data.in_progress_tasks.map((task) => (
+                {data.in_progress_tasks.map((task) => {
+                  const runSummary = runMap.get(task.id);
+                  return (
                   <button
                     key={task.id}
                     onClick={() => openTask(task.id)}
@@ -150,8 +158,16 @@ export function DashboardContent() {
                         @{task.assignee}
                       </span>
                     )}
+                    {runSummary && (
+                      <RunBadge
+                        summary={runSummary}
+                        task={task}
+                        workflow={workflow}
+                      />
+                    )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <p className="text-sm text-muted-foreground px-3 py-2">No tasks in progress</p>

@@ -237,6 +237,33 @@ export interface RunRecord {
   runs: Run[];
 }
 
+/** Server display status from `GET /api/runs` (client may additionally derive `stopping`). */
+export type RunDisplayStatus =
+  | "running"
+  | "merge-queued"
+  | "interrupted"
+  | "running elsewhere"
+  | "failed"
+  | "stopped"
+  | "succeeded"
+  | "stopping";
+
+/** Latest-Run summary from `GET /api/runs`. */
+export interface RunSummary {
+  task_id: string;
+  seq: number;
+  status: string;
+  stage?: string | null;
+  stage_started_at?: string | null;
+  started_at: string;
+  queue_position?: number | null;
+  failure_reason?: string | null;
+  ended_at?: string | null;
+  model?: string | null;
+  timeout_secs?: number | null;
+  stage_attempt_count?: number | null;
+}
+
 export type TranscriptBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; name: string; input: Record<string, unknown> };
@@ -492,4 +519,11 @@ export type WsEvent =
   | { type: "sync_complete" }
   | { type: "doc_changed"; slug: string }
   | { type: "connected"; version: string }
-  | { type: "dispatcher_changed" };
+  | { type: "dispatcher_changed" }
+  | {
+      type: "run_changed";
+      task_id: string;
+      seq: number;
+      status: string;
+      stage: string;
+    };

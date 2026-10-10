@@ -1324,7 +1324,8 @@ fn broadcast_run_changed(ws_tx: &broadcast::Sender<String>, task_id: &str, run: 
         .current_stage
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "".into());
-    let display = display_status(run);
+    // Broadcasts fire while this serve still owns the Run, so presence is InMemory.
+    let display = markplane_core::run_display_status(run, markplane_core::RunMemoryPresence::InMemory);
     let msg = json!({
         "type": "run_changed",
         "task_id": task_id,
@@ -1334,16 +1335,6 @@ fn broadcast_run_changed(ws_tx: &broadcast::Sender<String>, task_id: &str, run: 
     })
     .to_string();
     let _ = ws_tx.send(msg);
-}
-
-fn display_status(run: &Run) -> &'static str {
-    match run.status {
-        RunStatus::Running => "running",
-        RunStatus::MergeQueued => "merge-queued",
-        RunStatus::Succeeded => "succeeded",
-        RunStatus::Failed => "failed",
-        RunStatus::Stopped => "stopped",
-    }
 }
 
 fn git_run(cwd: &Path, args: &[&str]) -> Result<(), String> {

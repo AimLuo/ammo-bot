@@ -15,7 +15,9 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useRunRecord } from "@/lib/hooks/use-runs";
+import { RunBadge } from "@/components/domain/run-badge";
+import { useRunRecord, useRunSummaryMap } from "@/lib/hooks/use-runs";
+import { useConfig } from "@/lib/hooks/use-config";
 import { cn } from "@/lib/utils";
 import {
   fmtDuration,
@@ -27,13 +29,20 @@ import {
 import {
   endingStage,
   remnantStatusLine,
-  runStatusStubLabel,
   runsNewestFirst,
   shortSha,
   stageSummaries,
+  summaryFromRun,
   type StageSummary,
 } from "@/lib/run-display";
-import type { Attempt, AttemptResult, Run } from "@/lib/types";
+import type {
+  Attempt,
+  AttemptResult,
+  Run,
+  RunSummary,
+  Task,
+  TaskWorkflow,
+} from "@/lib/types";
 import { SessionLogModal } from "./session-log-modal";
 
 /**
@@ -43,12 +52,17 @@ import { SessionLogModal } from "./session-log-modal";
  */
 export function RunSection({
   taskId,
-  assignee,
+  task,
 }: {
   taskId: string;
-  assignee: string | null;
+  /** Full task (status/assignee) for RunBadge stopping / visibility. */
+  task: Pick<Task, "status" | "assignee">;
 }) {
+  const assignee = task.assignee;
   const { data: record, isLoading } = useRunRecord(taskId);
+  const { map: runMap } = useRunSummaryMap();
+  const { data: config } = useConfig();
+  const workflow = config?.workflows.task;
   const [open, setOpen] = useState(false);
 
   const hasRecord = !!record && record.runs.length > 0;
@@ -60,13 +74,18 @@ export function RunSection({
   const ordered = hasRecord ? runsNewestFirst(record!.runs) : [];
   const latest = ordered[0] ?? null;
   const earlier = ordered.slice(1);
+  const listSummary = runMap.get(taskId);
 
   return (
     <div className="space-y-2">
       {latest ? (
         <LatestRunBlock
+          taskId={taskId}
+          task={task}
           run={latest}
           earlier={earlier}
+          listSummary={listSummary}
+          workflow={workflow}
           onViewSessions={() => setOpen(true)}
         />
       ) : (
@@ -100,28 +119,6 @@ function ViewSessionsButton({ onClick }: { onClick: () => void }) {
       <ScrollText className="size-3.5" />
       View sessions
     </Button>
-  );
-}
-
-/** Placeholder until TASK-gtgfz lands the shared RunBadge. */
-function RunBadgeStub({ run }: { run: Run }) {
-  const label = runStatusStubLabel(run);
-  const tone =
-    run.status === "failed"
-      ? "text-destructive"
-      : run.status === "succeeded"
-        ? "text-emerald-600 dark:text-emerald-400"
-        : run.status === "stopped"
-          ? "text-muted-foreground"
-          : "text-[var(--status-in-progress)]";
-  return (
-    <span
-      data-slot="run-badge-stub"
-      className={cn("text-xs font-medium tabular-nums", tone)}
-      title="RunBadge (stub; TASK-gtgfz)"
-    >
-      {label}
-    </span>
   );
 }
 
@@ -159,17 +156,29 @@ function ResultIcon({
 }
 
 function LatestRunBlock({
+  taskId,
+  task,
   run,
   earlier,
+  listSummary,
+  workflow,
   onViewSessions,
 }: {
+  taskId: string;
+  task: Pick<Task, "status" | "assignee">;
   run: Run;
   earlier: Run[];
+  listSummary?: RunSummary;
+  workflow?: TaskWorkflow;
   onViewSessions: () => void;
 }) {
   const stages = stageSummaries(run);
   const remnant = remnantStatusLine(run);
   const total = sumUsage(run.attempts);
+  const badgeSummary = summaryFromRun(taskId, run, {
+    status: listSummary?.status,
+    queue_position: listSummary?.queue_position,
+  });
 
   return (
     <div className="space-y-2">
@@ -177,7 +186,7 @@ function LatestRunBlock({
       <div className="space-y-2 rounded-md border px-3 py-2.5">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <RunBadgeStub run={run} />
+        <RunBadge summary={badgeSummary} task={task} workflow={workflow} />
         <span className="text-sm font-semibold">Run #{run.seq}</span>
         <span className="text-xs text-muted-foreground tabular-nums">
           {fmtTime(run.started_at)}

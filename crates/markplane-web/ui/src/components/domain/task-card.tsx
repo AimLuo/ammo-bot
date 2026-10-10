@@ -3,18 +3,24 @@
 import { useDraggable } from "@dnd-kit/core";
 import { Archive, MessageSquare } from "lucide-react";
 import { PriorityIndicator } from "./priority-indicator";
-import type { Task } from "@/lib/types";
+import { RunBadge, runCardHighlight } from "./run-badge";
+import { cn } from "@/lib/utils";
+import type { RunSummary, Task, TaskWorkflow } from "@/lib/types";
 
 export function TaskCard({
   task,
   onClick,
   onArchive,
   isOverlay,
+  runSummary,
+  workflow,
 }: {
   task: Task;
   onClick?: () => void;
   onArchive?: (id: string) => void;
   isOverlay?: boolean;
+  runSummary?: RunSummary;
+  workflow?: TaskWorkflow;
 }) {
   const {
     attributes,
@@ -31,6 +37,8 @@ export function TaskCard({
 
   const hasMetadata = task.epic || task.tags.length > 0;
   const commentCount = task.comments?.length ?? 0;
+  const highlight = runCardHighlight(runSummary, task, workflow);
+  const showFooter = !!task.assignee || commentCount > 0 || !!runSummary;
 
   return (
     <div
@@ -39,9 +47,11 @@ export function TaskCard({
       {...(isOverlay ? {} : { ...attributes, ...listeners })}
     >
       <div
-        className={`rounded-lg border bg-card p-3 space-y-1 hover:border-muted-foreground/30 transition-colors cursor-pointer ${
-          isOverlay ? "shadow-lg border-primary/50" : ""
-        }`}
+        className={cn(
+          "rounded-lg border bg-card p-3 space-y-1 hover:border-muted-foreground/30 transition-colors cursor-pointer",
+          isOverlay && "shadow-lg border-primary/50",
+          highlight && "border-[var(--status-in-progress)]",
+        )}
         onClick={onClick}
       >
         <div className="flex items-center gap-2">
@@ -96,15 +106,24 @@ export function TaskCard({
             ))}
           </div>
         )}
-        {(task.assignee || commentCount > 0) && (
+        {showFooter && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             {task.assignee && <span>@{task.assignee}</span>}
-            {commentCount > 0 && (
-              <span className="inline-flex items-center gap-1 ml-auto">
-                <MessageSquare className="size-3" />
-                {commentCount}
-              </span>
-            )}
+            <div className="ml-auto flex items-center gap-2">
+              {commentCount > 0 && (
+                <span className="inline-flex items-center gap-1">
+                  <MessageSquare className="size-3" />
+                  {commentCount}
+                </span>
+              )}
+              {runSummary && (
+                <RunBadge
+                  summary={runSummary}
+                  task={task}
+                  workflow={workflow}
+                />
+              )}
+            </div>
           </div>
         )}
       </div>

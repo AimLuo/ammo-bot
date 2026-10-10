@@ -25,10 +25,17 @@ import { useDroppable } from "@dnd-kit/core";
 import { useTasks } from "@/lib/hooks/use-tasks";
 import { useEpics } from "@/lib/hooks/use-epics";
 import { useUpdateTask, useArchiveItem, useBatchArchive } from "@/lib/hooks/use-mutations";
+import { useRunSummaryMap } from "@/lib/hooks/use-runs";
 import { TaskCard } from "@/components/domain/task-card";
+import { RunBadge } from "@/components/domain/run-badge";
 import { TaskDetailSheet } from "@/components/domain/task-detail-sheet";
 import { StatusBadge } from "@/components/domain/status-badge";
 import { PriorityIndicator } from "@/components/domain/priority-indicator";
+import {
+  activeRunConfirmMessage,
+  hasActiveDispatcherRun,
+} from "@/lib/run-display";
+import type { RunSummary, TaskWorkflow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -547,11 +554,12 @@ export function BacklogContent() {
       {view === "backlog" && (
         <BacklogListView tasks={filteredTasks} onTaskClick={openTask} sortKey={sortKey} />
       )}
-      {view === "needs-you" && (
+      {view === "needs-you" && workflow && (
         <NeedsYouListView
           tasks={filteredTasks}
           unfilteredCount={needsYouCount}
           onTaskClick={openTask}
+          workflow={workflow}
         />
       )}
 
@@ -586,11 +594,12 @@ function KanbanView({
   tasks: Task[];
   onTaskClick: (id: string) => void;
   kanbanColumns: { status: string; label: string; wipLimit?: number }[];
-  workflow: import("@/lib/types").TaskWorkflow;
+  workflow: TaskWorkflow;
 }) {
   const updateTask = useUpdateTask();
   const archiveItem = useArchiveItem();
   const batchArchive = useBatchArchive();
+  const { map: runMap } = useRunSummaryMap();
   const [activeTask, setActiveTask] = useState<Task | null>(null);
 
   // Optimistic local state — updated synchronously on drop so the card
@@ -652,6 +661,18 @@ function KanbanView({
       // Only update if status actually changed
       const currentTask = displayTasks.find((t) => t.id === taskId);
       if (currentTask && currentTask.status !== targetStatus) {
+        const fromActive = categoryOf(workflow, currentTask.status) === "active";
+        const toActive = categoryOf(workflow, targetStatus) === "active";
+        const summary = runMap.get(taskId);
+        if (
+          fromActive &&
+          !toActive &&
+          hasActiveDispatcherRun(summary)
+        ) {
+          if (!window.confirm(activeRunConfirmMessage(taskId, summary!))) {
+            return;
+          }
+        }
         setPendingUpdate({
           data: displayTasks.map((t) =>
             t.id === taskId ? { ...t, status: targetStatus } : t
@@ -661,7 +682,7 @@ function KanbanView({
         updateTask.mutate({ id: taskId, status: targetStatus });
       }
     },
-    [displayTasks, updateTask, kanbanColumnIds, tasks]
+    [displayTasks, updateTask, kanbanColumnIds, tasks, workflow, runMap]
   );
 
   return (
@@ -695,6 +716,8 @@ function KanbanView({
               isOverWip={isOverWip}
               tasks={columnTasks}
               onTaskClick={onTaskClick}
+              runMap={runMap}
+              workflow={workflow}
               onDemote={isPlannedColumn ? (id) => updateTask.mutate({ id, status: firstBacklogStatus }) : undefined}
               cancelledTasks={isCompletedColumn ? cancelledTasks : undefined}
               onArchive={isCompletedColumn ? (id) => archiveItem.mutate(id) : undefined}
@@ -712,7 +735,12 @@ function KanbanView({
 
       <DragOverlay>
         {activeTask ? (
-          <TaskCard task={activeTask} isOverlay />
+          <TaskCard
+            task={activeTask}
+            isOverlay
+            runSummary={runMap.get(activeTask.id)}
+            workflow={workflow}
+          />
         ) : null}
       </DragOverlay>
     </DndContext>
@@ -732,6 +760,8 @@ function KanbanColumn({
   cancelledTasks,
   onArchive,
   onArchiveAll,
+  runMap,
+  workflow,
 }: {
   status: TaskStatus;
   label: string;
@@ -745,6 +775,8 @@ function KanbanColumn({
   cancelledTasks?: Task[];
   onArchive?: (id: string) => void;
   onArchiveAll?: () => void;
+  runMap: Map<string, RunSummary>;
+  workflow: TaskWorkflow;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
   const isTruncated = totalCount > count;
@@ -787,6 +819,8 @@ function KanbanColumn({
               task={task}
               onClick={() => onTaskClick(task.id)}
               onArchive={onArchive}
+              runSummary={runMap.get(task.id)}
+              workflow={workflow}
             />
             {onDemote && (
               <button
@@ -820,6 +854,8 @@ function KanbanColumn({
                   task={task}
                   onClick={() => onTaskClick(task.id)}
                   onArchive={onArchive}
+                  runSummary={runMap.get(task.id)}
+                  workflow={workflow}
                 />
               </div>
             ))}
@@ -1291,13 +1327,16 @@ function NeedsYouListView({
   tasks,
   unfilteredCount,
   onTaskClick,
+  workflow,
 }: {
   tasks: Task[];
   /** Count before priority/epic/tag/assignee filters (drives the empty copy). */
   unfilteredCount: number;
   onTaskClick: (id: string) => void;
+  workflow: TaskWorkflow;
 }) {
   const sorted = useMemo(() => sortNeedsYouTasks(tasks), [tasks]);
+  const { map: runMap } = useRunSummaryMap();
 
   if (unfilteredCount === 0) {
     return <EmptyState title="Nothing needs you" />;
@@ -1310,6 +1349,8 @@ function NeedsYouListView({
           key={task.id}
           task={task}
           onClick={() => onTaskClick(task.id)}
+          runSummary={runMap.get(task.id)}
+          workflow={workflow}
         />
       ))}
     </div>
@@ -1319,9 +1360,13 @@ function NeedsYouListView({
 function NeedsYouRow({
   task,
   onClick,
+  runSummary,
+  workflow,
 }: {
   task: Task;
   onClick: () => void;
+  runSummary?: RunSummary;
+  workflow: TaskWorkflow;
 }) {
   const preview = latestCommentPreview(task.comments);
 
@@ -1369,6 +1414,9 @@ function NeedsYouRow({
             @{task.assignee}
           </span>
         )}
+        {runSummary && (
+          <RunBadge summary={runSummary} task={task} workflow={workflow} />
+        )}
         {preview && (
           <span
             className="text-sm text-muted-foreground truncate min-w-0 max-w-[18rem] shrink"
@@ -1387,6 +1435,9 @@ function NeedsYouRow({
             {task.id}
           </span>
           <StatusBadge status={task.status} />
+          {runSummary && (
+            <RunBadge summary={runSummary} task={task} workflow={workflow} />
+          )}
         </div>
         <p className="text-base font-medium">{task.title}</p>
         <div className="flex items-center gap-2 flex-wrap text-sm text-muted-foreground">

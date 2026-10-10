@@ -685,6 +685,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph_all))
         .route("/api/graph/{id}", get(get_graph_focused))
+        .route("/api/runs", get(list_run_summaries))
         .route("/api/runs/{task_id}", get(get_run_record))
         .route(
             "/api/runs/{task_id}/sessions/{session_id}",
@@ -4687,6 +4688,78 @@ async fn get_graph_focused(
     Ok(Json(ApiResponse { data: graph }))
 }
 
+/// `GET /api/runs` — latest Run summary per ticket that has a local record.
+async fn list_run_summaries(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+) -> Result<Json<ApiResponse<Vec<markplane_core::RunSummary>>>, (StatusCode, Json<ApiError>)> {
+    let records = project.list_run_records().map_err(map_core_error)?;
+
+    let in_memory: HashSet<String> = {
+        let engine = state.engine.lock().await;
+        engine
+            .active_slots
+            .iter()
+            .filter(|(_, pid)| *pid == &project_id)
+            .map(|(tid, _)| tid.clone())
+            .collect()
+    };
+
+    let lock_held_by_other = {
+        let project_dir = project_dir_from_project(&project);
+        match serve_git::resolve_lock_key(&project_dir) {
+            Ok(key) => {
+                let held_by_us = {
+                    let disp = state.dispatcher.lock().await;
+                    disp.key_to_project
+                        .get(&key)
+                        .map(|id| id == &project_id)
+                        .unwrap_or(false)
+                };
+                matches!(
+                    serve_dispatcher_lock::probe(&key, held_by_us),
+                    Ok(LockProbe::HeldByOther(_))
+                )
+            }
+            Err(_) => false,
+        }
+    };
+
+    let mut queue_positions: HashMap<String, u32> = HashMap::new();
+    {
+        let engine = state.engine.lock().await;
+        for tid in &in_memory {
+            if let Some(pos) = engine.merge_queue_position(tid).await {
+                queue_positions.insert(tid.clone(), pos);
+            }
+        }
+    }
+
+    let mut summaries = Vec::with_capacity(records.len());
+    for (task_id, record) in records {
+        let Some(run) = record.runs.last() else {
+            continue;
+        };
+        let presence = if in_memory.contains(&task_id) {
+            markplane_core::RunMemoryPresence::InMemory
+        } else if lock_held_by_other {
+            markplane_core::RunMemoryPresence::HeldElsewhere
+        } else {
+            markplane_core::RunMemoryPresence::Absent
+        };
+        let queue_position = queue_positions.get(&task_id).copied();
+        summaries.push(markplane_core::run_summary(
+            &task_id,
+            run,
+            presence,
+            queue_position,
+        ));
+    }
+
+    Ok(Json(ApiResponse { data: summaries }))
+}
+
 /// `GET /api/runs/{task_id}` — full local Run record, or an empty array when absent.
 async fn get_run_record(
     Extension(project): Extension<Project>,
@@ -5653,6 +5726,213 @@ mod tests {
             1000
         );
         assert_eq!(json["data"]["runs"][0]["attempts"][1]["result"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn list_runs_returns_empty_when_no_records() {
+        let env = setup_env("runs-list-empty");
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_runs_returns_latest_summary_per_ticket() {
+        use markplane_core::{
+            Attempt, Run, RunRecord, RunStatus, Stage, Trigger, write_run_record,
+        };
+
+        let env = setup_env("runs-list-summary");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Summary run",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let attempt = |stage: Stage, started: &str| Attempt {
+            stage,
+            model: "cursor-grok-4.5-high".into(),
+            timeout_secs: Some(3600),
+            session_id: Some("sess".into()),
+            workspace: format!("/tmp/.worktrees/{}", task.id),
+            transcript_path: None,
+            pid: None,
+            process_group_id: None,
+            agent_config_dir: None,
+            trigger: Trigger::Initial,
+            started_at: started.into(),
+            ended_at: None,
+            exit_code: None,
+            verdict: None,
+            result: None,
+            usage: None,
+            duration_api_ms: None,
+            stderr_tail: None,
+        };
+
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![
+                    Run {
+                        seq: 1,
+                        status: RunStatus::Failed,
+                        current_stage: Some(Stage::Implement),
+                        worktree: format!("/tmp/.worktrees/{}", task.id),
+                        branch: format!("agent/{}", task.id),
+                        base_sha: "aaa".into(),
+                        merge_target: "main".into(),
+                        merge_sha: None,
+                        pushed: false,
+                        started_at: "2026-10-10T08:00:00+08:00".into(),
+                        ended_at: Some("2026-10-10T08:30:00+08:00".into()),
+                        failure_reason: Some("old failure".into()),
+                        worktree_removed_at: None,
+                        branch_removed_at: None,
+                        branch_head_at_removal: None,
+                        cleanup_blocked: None,
+                        cleanup_trigger: None,
+                        attempts: vec![],
+                    },
+                    Run {
+                        seq: 2,
+                        status: RunStatus::Running,
+                        current_stage: Some(Stage::Fix),
+                        worktree: format!("/tmp/.worktrees/{}", task.id),
+                        branch: format!("agent/{}", task.id),
+                        base_sha: "bbb".into(),
+                        merge_target: "main".into(),
+                        merge_sha: None,
+                        pushed: false,
+                        started_at: "2026-10-10T09:00:00+08:00".into(),
+                        ended_at: None,
+                        failure_reason: None,
+                        worktree_removed_at: None,
+                        branch_removed_at: None,
+                        branch_head_at_removal: None,
+                        cleanup_blocked: None,
+                        cleanup_trigger: None,
+                        attempts: vec![attempt(Stage::Fix, "2026-10-10T09:10:00+08:00")],
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        // Not in active_slots → non-terminal record is interrupted.
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let rows = json["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["task_id"], task.id);
+        assert_eq!(rows[0]["seq"], 2);
+        assert_eq!(rows[0]["status"], "interrupted");
+        assert_eq!(rows[0]["stage"], "fix");
+        assert_eq!(rows[0]["stage_started_at"], "2026-10-10T09:10:00+08:00");
+        assert_eq!(rows[0]["started_at"], "2026-10-10T09:00:00+08:00");
+        assert_eq!(rows[0]["model"], "cursor-grok-4.5-high");
+        assert_eq!(rows[0]["timeout_secs"], 3600);
+        assert_eq!(rows[0]["stage_attempt_count"], 1);
+
+        // Mark Slot held → display status becomes running.
+        {
+            let mut engine = env.state.engine.lock().await;
+            engine
+                .active_slots
+                .insert(task.id.clone(), env.project_id.clone());
+        }
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"][0]["status"], "running");
+        assert_eq!(json["data"][0]["stage"], "fix");
+    }
+
+    #[tokio::test]
+    async fn list_runs_terminal_failed_shows_failed() {
+        use markplane_core::{Run, RunRecord, RunStatus, Stage, write_run_record};
+
+        let env = setup_env("runs-list-failed");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Failed run",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 3,
+                    status: RunStatus::Failed,
+                    current_stage: Some(Stage::Merge),
+                    worktree: format!("/tmp/.worktrees/{}", task.id),
+                    branch: format!("agent/{}", task.id),
+                    base_sha: "ddd".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: Some("2026-10-10T10:00:00+08:00".into()),
+                    failure_reason: Some("MERGE: failed".into()),
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![],
+                }],
+            },
+        )
+        .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"][0]["status"], "failed");
+        assert_eq!(json["data"][0]["failure_reason"], "MERGE: failed");
+        assert_eq!(json["data"][0]["ended_at"], "2026-10-10T10:00:00+08:00");
+        assert_eq!(json["data"][0]["seq"], 3);
     }
 
     /// Serialize env mutation for CURSOR_DATA_DIR session-transcript tests.

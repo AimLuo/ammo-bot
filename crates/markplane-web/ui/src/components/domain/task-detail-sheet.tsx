@@ -7,6 +7,11 @@ import { useEpics } from "@/lib/hooks/use-epics";
 import { usePlans } from "@/lib/hooks/use-plans";
 import { useNotes } from "@/lib/hooks/use-notes";
 import { useUpdateTask, useAddTaskComment, useArchiveItem, useUnarchiveItem } from "@/lib/hooks/use-mutations";
+import { useRunSummaryMap } from "@/lib/hooks/use-runs";
+import {
+  activeRunConfirmMessage,
+  hasActiveDispatcherRun,
+} from "@/lib/run-display";
 import { CreateDialog } from "./create-dialog";
 import { PriorityIndicator } from "./priority-indicator";
 import { MarkdownRenderer } from "./markdown-renderer";
@@ -72,6 +77,7 @@ export function TaskDetailSheet({
   const addComment = useAddTaskComment();
   const archiveItem = useArchiveItem();
   const unarchiveItem = useUnarchiveItem();
+  const { map: runMap } = useRunSummaryMap();
   const { data: epics } = useEpics();
   const { data: allTasks } = useTasks();
   const { data: plans } = usePlans();
@@ -83,6 +89,12 @@ export function TaskDetailSheet({
 
   const taskCategory = task && workflow ? categoryOf(workflow, task.status) : undefined;
   const isClosedStatus = taskCategory === "completed" || taskCategory === "cancelled";
+  const runSummary = task ? runMap.get(task.id) : undefined;
+
+  const confirmActiveRun = (taskId: string): boolean => {
+    if (!hasActiveDispatcherRun(runSummary)) return true;
+    return window.confirm(activeRunConfirmMessage(taskId, runSummary!));
+  };
 
   const epicOptions =
     epics?.map((e) => ({ id: e.id, title: e.title })) ?? [];
@@ -191,9 +203,11 @@ export function TaskDetailSheet({
                         return (
                           <DropdownMenuItem
                             key={s}
-                            onClick={() =>
-                              updateTask.mutate({ id: task.id, status: s })
-                            }
+                            onClick={() => {
+                              if (s === task.status) return;
+                              if (!confirmActiveRun(task.id)) return;
+                              updateTask.mutate({ id: task.id, status: s });
+                            }}
                           >
                             <Icon
                               className="mr-2 size-4 text-current"
@@ -375,9 +389,13 @@ export function TaskDetailSheet({
                 <FieldRow label="Assignee" editable>
                   <AssigneeEditor
                     value={task.assignee}
-                    onSave={(assignee) =>
-                      updateTask.mutate({ id: task.id, assignee })
-                    }
+                    onSave={(assignee) => {
+                      const next = assignee.trim() || "";
+                      const prev = task.assignee ?? "";
+                      if (next === prev) return;
+                      if (!confirmActiveRun(task.id)) return;
+                      updateTask.mutate({ id: task.id, assignee });
+                    }}
                   />
                 </FieldRow>
 
@@ -399,7 +417,7 @@ export function TaskDetailSheet({
                 </FieldRow>
               </div>
 
-              <RunSection taskId={task.id} assignee={task.assignee} />
+              <RunSection taskId={task.id} task={task} />
 
               <Separator />
 

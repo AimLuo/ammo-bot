@@ -2,7 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { currentProjectId } from "@/lib/project-prefix";
+import { toast } from "sonner";
+import { currentProjectId, withProject } from "@/lib/project-prefix";
 import type { WsEvent } from "@/lib/types";
 
 function websocketUrl(projectId: string): string {
@@ -20,6 +21,7 @@ export function useWebSocket() {
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  const hasConnectedBefore = useRef(false);
 
   useEffect(() => {
     function connect() {
@@ -37,6 +39,11 @@ export function useWebSocket() {
           clearTimeout(reconnectTimer.current);
           reconnectTimer.current = null;
         }
+        // Reconnect (not first open): refresh everything that may have drifted.
+        if (hasConnectedBefore.current) {
+          queryClient.invalidateQueries();
+        }
+        hasConnectedBefore.current = true;
       };
 
       ws.onmessage = (event) => {
@@ -71,6 +78,26 @@ export function useWebSocket() {
                 queryKey: ["dispatcher-concurrency"],
               });
               break;
+            case "run_changed": {
+              queryClient.invalidateQueries({ queryKey: ["runs"] });
+              if (msg.status === "failed") {
+                const stage = msg.stage || "stage";
+                const taskId = msg.task_id;
+                toast.error(`${taskId} run failed at ${stage}`, {
+                  action: {
+                    label: "Open",
+                    onClick: () => {
+                      window.location.assign(
+                        withProject(
+                          `/backlog?task=${encodeURIComponent(taskId)}`,
+                        ),
+                      );
+                    },
+                  },
+                });
+              }
+              break;
+            }
             case "connected":
               break;
           }

@@ -1,4 +1,15 @@
-import type { Attempt, AttemptResult, Run, Stage } from "@/lib/types";
+import type {
+  Attempt,
+  AttemptResult,
+  Run,
+  RunDisplayStatus,
+  RunSummary,
+  Stage,
+  StatusCategory,
+  Task,
+  TaskWorkflow,
+} from "@/lib/types";
+import { categoryOf } from "@/lib/constants";
 import { fmtDuration, sumUsage } from "@/lib/session-log";
 
 /** Runs newest-first (highest seq first). */
@@ -184,25 +195,168 @@ export function endingStage(run: Run): Stage | null {
   return last?.stage ?? run.current_stage ?? null;
 }
 
-/** Compact status label used until TASK-gtgfz ships RunBadge. */
-export function runStatusStubLabel(run: Run): string {
-  const stageElapsed = fmtDuration(currentStageStartedAt(run), run.ended_at);
-  switch (run.status) {
+/** Whether the Dispatcher still considers this Run live (Slot-holding). */
+export function isLiveRunStatus(status: string): boolean {
+  return status === "running" || status === "merge-queued";
+}
+
+/**
+ * Client-only stopping: Run is still live server-side, but the ticket left
+ * active or assignee is no longer `dispatcher`.
+ */
+export function deriveDisplayStatus(
+  summary: RunSummary,
+  task: Pick<Task, "status" | "assignee">,
+  workflow: TaskWorkflow | undefined,
+): RunDisplayStatus {
+  const base = summary.status as RunDisplayStatus;
+  if (!isLiveRunStatus(summary.status)) return base;
+  const cat = workflow ? categoryOf(workflow, task.status) : undefined;
+  const leftActive = cat !== "active";
+  const reassigned = task.assignee !== "dispatcher";
+  if (leftActive || reassigned) return "stopping";
+  return base;
+}
+
+/** Whether RunBadge should render for this ticket + summary. */
+export function shouldShowRunBadge(
+  displayStatus: RunDisplayStatus,
+  ticketCategory: StatusCategory | undefined,
+): boolean {
+  if (displayStatus === "succeeded") return false;
+  if (
+    displayStatus === "failed" ||
+    displayStatus === "interrupted" ||
+    displayStatus === "stopped"
+  ) {
+    return ticketCategory === "active";
+  }
+  return true;
+}
+
+/** Stage elapsed label (`<1m`, `12m`, …) using a wall-clock `now` ms. */
+export function stageElapsedLabel(
+  stageStartedAt: string | null | undefined,
+  endedAt: string | null | undefined,
+  nowMs: number,
+): string {
+  if (!stageStartedAt) return "<1m";
+  const end = endedAt ? new Date(endedAt).getTime() : nowMs;
+  const ms = end - new Date(stageStartedAt).getTime();
+  const m = Math.round(ms / 60000);
+  if (m < 1) return "<1m";
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+}
+
+/** Visible badge text for a derived display status. */
+export function runBadgeLabel(
+  displayStatus: RunDisplayStatus,
+  summary: RunSummary,
+  nowMs: number,
+): string {
+  const stage = summary.stage ?? undefined;
+  const elapsed = stageElapsedLabel(
+    summary.stage_started_at,
+    summary.ended_at,
+    nowMs,
+  );
+  switch (displayStatus) {
     case "running":
-      return run.current_stage
-        ? `${run.current_stage} · ${stageElapsed}`
-        : "running";
-    case "merge-queued":
-      return `merge queue · ${stageElapsed}`;
-    case "succeeded":
-      return "succeeded";
+      return stage ? `${stage} · ${elapsed}` : `running · ${elapsed}`;
+    case "merge-queued": {
+      const n = summary.queue_position;
+      const q = n != null ? `merge queue #${n}` : "merge queue";
+      return `${q} · ${elapsed}`;
+    }
+    case "stopping":
+      return stage ? `Stopping · ${stage}` : "Stopping";
+    case "interrupted":
+      return stage ? `Interrupted · ${stage}` : "Interrupted";
     case "failed":
-      return run.current_stage
-        ? `Run failed · ${run.current_stage}`
-        : "Run failed";
+      return stage ? `Run failed · ${stage}` : "Run failed";
     case "stopped":
       return "Run stopped";
+    case "running elsewhere":
+      return "running elsewhere";
+    case "succeeded":
+      return "succeeded";
     default:
-      return run.status;
+      return displayStatus;
   }
+}
+
+/** Hover tip lines for RunBadge. */
+export function runBadgeTitle(
+  summary: RunSummary,
+  nowMs: number,
+): string {
+  const total = stageElapsedLabel(summary.started_at, summary.ended_at, nowMs);
+  const stageStart = summary.stage_started_at
+    ? new Date(summary.stage_started_at).toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : "—";
+  const model = summary.model ?? "—";
+  const timeout =
+    summary.timeout_secs != null
+      ? `${Math.round(summary.timeout_secs / 60)}m timeout`
+      : "—";
+  const attempts =
+    summary.stage_attempt_count != null
+      ? `${summary.stage_attempt_count} call${summary.stage_attempt_count === 1 ? "" : "s"}`
+      : "—";
+  return [
+    `Run #${summary.seq}`,
+    `Total ${total}`,
+    `Stage started ${stageStart}`,
+    `${model} · ${timeout}`,
+    attempts,
+  ].join("\n");
+}
+
+/** Build a RunSummary-shaped view from a full Run (detail panel). */
+export function summaryFromRun(
+  taskId: string,
+  run: Run,
+  extras?: {
+    status?: string;
+    queue_position?: number | null;
+  },
+): RunSummary {
+  const stage = run.current_stage ?? null;
+  const stageAttempts = stage
+    ? run.attempts.filter((a) => a.stage === stage)
+    : [];
+  const lastAttempt = stageAttempts[stageAttempts.length - 1];
+  return {
+    task_id: taskId,
+    seq: run.seq,
+    status: extras?.status ?? run.status,
+    stage,
+    stage_started_at: currentStageStartedAt(run),
+    started_at: run.started_at,
+    queue_position: extras?.queue_position ?? null,
+    failure_reason: run.failure_reason ?? null,
+    ended_at: run.ended_at ?? null,
+    model: lastAttempt?.model ?? null,
+    timeout_secs: lastAttempt?.timeout_secs ?? null,
+    stage_attempt_count: stageAttempts.length > 0 ? stageAttempts.length : null,
+  };
+}
+
+/** True when changing status/assignee should prompt before silent stop. */
+export function hasActiveDispatcherRun(summary: RunSummary | undefined): boolean {
+  return !!summary && isLiveRunStatus(summary.status);
+}
+
+export function activeRunConfirmMessage(
+  taskId: string,
+  summary: RunSummary,
+): string {
+  const stage = summary.stage ?? "current stage";
+  return `Dispatcher is running ${taskId} (${stage}). It will stop after the current stage ends; the agent process is not killed and the worktree is kept. Continue?`;
 }
