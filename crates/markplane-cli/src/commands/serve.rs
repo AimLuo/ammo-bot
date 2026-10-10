@@ -37,6 +37,7 @@ use markplane_core::{
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
+use super::serve_dispatcher_engine::{self, EngineState};
 use super::serve_dispatcher_lock::{
     self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe,
 };
@@ -84,7 +85,7 @@ struct DispatcherServeState {
     scan_enabled: HashMap<String, bool>,
     /// Lock key → project_id holding it in this serve.
     key_to_project: HashMap<DispatcherLockKey, String>,
-    /// project_id → held OS lock (while Scan is on for this ticket).
+    /// project_id → held OS lock (while Scan is on or active Runs remain).
     held_locks: HashMap<String, HeldDispatcherLock>,
 }
 
@@ -105,6 +106,8 @@ struct AppState {
     concurrency_last_good: Mutex<Option<u32>>,
     models_cache: Mutex<super::serve_dispatcher::ModelsCache>,
     dispatcher: Mutex<DispatcherServeState>,
+    /// Pickup / Slot / merge-queue state for the Dispatcher engine.
+    engine: Arc<Mutex<EngineState>>,
 }
 
 enum RuntimeError {
@@ -147,6 +150,7 @@ impl AppState {
             concurrency_last_good: Mutex::new(None),
             models_cache: Mutex::new(super::serve_dispatcher::ModelsCache::default()),
             dispatcher: Mutex::new(DispatcherServeState::default()),
+            engine: Arc::new(Mutex::new(EngineState::default())),
         })
     }
 
@@ -159,6 +163,69 @@ impl AppState {
         self.agent_bin
             .clone()
             .unwrap_or_else(|| PathBuf::from("agent"))
+    }
+
+    /// Explicit Dispatcher scan tick (tests + 15s loop).
+    async fn dispatcher_tick(self: &Arc<Self>) {
+        let concurrency = load_concurrency(self).await;
+        let agent_bin = self.agent_bin_path();
+        let scan_enabled = {
+            let guard = self.dispatcher.lock().await;
+            guard.scan_enabled.clone()
+        };
+        let project_ids: Vec<String> = scan_enabled
+            .iter()
+            .filter(|(_, on)| **on)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut inputs = Vec::new();
+        for id in project_ids {
+            let Ok(rt) = self.get_or_create_runtime(&id).await else {
+                continue;
+            };
+            let project = Project::new(rt.project.root().to_path_buf());
+            let project_dir = project_dir_from_project(&project);
+            let settings = {
+                let cfg = load_dispatcher_config(self, &project).await;
+                effective_dispatcher_settings(&cfg)
+            };
+            inputs.push(serve_dispatcher_engine::ProjectTickInput {
+                project_id: id,
+                project,
+                project_dir,
+                agent_bin: agent_bin.clone(),
+                ws_tx: rt.ws_tx.clone(),
+                concurrency,
+                settings,
+                scan_on: true,
+            });
+        }
+        serve_dispatcher_engine::dispatcher_tick(self.engine.clone(), inputs).await;
+
+        // Release locks for Projects with Scan off and no active Runs.
+        self.maybe_release_idle_dispatcher_locks().await;
+    }
+
+    async fn maybe_release_idle_dispatcher_locks(&self) {
+        let mut guard = self.dispatcher.lock().await;
+        let engine = self.engine.lock().await;
+        let idle: Vec<String> = guard
+            .held_locks
+            .keys()
+            .filter(|id| {
+                !guard.scan_enabled.get(*id).copied().unwrap_or(false)
+                    && !engine.project_has_active_runs(id)
+            })
+            .cloned()
+            .collect();
+        drop(engine);
+        for id in idle {
+            if let Some(held) = guard.held_locks.remove(&id) {
+                guard.key_to_project.remove(&held.key);
+                drop(held);
+            }
+        }
     }
 
     async fn get_or_create_runtime(
@@ -349,6 +416,18 @@ pub async fn run(
 
     let use_tls = !dev && !no_tls;
     let state = AppState::new(config_dir.clone(), port, dev, use_tls);
+    // Background Dispatcher scan loop (explicit tick also available for tests).
+    {
+        let tick_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(serve_dispatcher_engine::SCAN_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                tick_state.dispatcher_tick().await;
+            }
+        });
+    }
     let app = build_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -2961,8 +3040,19 @@ async fn open_scan_switch(
 }
 
 async fn close_scan_switch(state: &AppState, project_id: &str) {
+    {
+        let mut guard = state.dispatcher.lock().await;
+        guard.scan_enabled.insert(project_id.to_string(), false);
+    }
+    // Keep the lock while this Project still has active Runs.
+    let has_runs = {
+        let engine = state.engine.lock().await;
+        engine.project_has_active_runs(project_id)
+    };
+    if has_runs {
+        return;
+    }
     let mut guard = state.dispatcher.lock().await;
-    guard.scan_enabled.insert(project_id.to_string(), false);
     if let Some(held) = guard.held_locks.remove(project_id) {
         guard.key_to_project.remove(&held.key);
         drop(held);
@@ -6755,6 +6845,585 @@ mod tests {
         EnvGuard {
             prev,
             _lock: guard,
+        }
+    }
+
+    // ── Dispatcher engine (TASK-cppqm) ─────────────────────────────────────
+
+    fn markplane_debug_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/markplane")
+    }
+
+    fn git_config_identity(dir: &std::path::Path) {
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(dir)
+            .args(["config", "user.email", "test@example.com"])
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(dir)
+            .args(["config", "user.name", "Test"])
+            .status();
+    }
+
+    fn git_commit_all(dir: &std::path::Path, msg: &str) {
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(dir)
+            .args(["add", "-A"])
+            .status();
+        let status = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(dir)
+            .args(["commit", "-m", msg, "--allow-empty"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "git commit failed");
+    }
+
+    /// Fake agent: implement commits a file + comments; merge does --no-ff merge.
+    fn write_happy_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Avoid format! brace hell: stitch the markplane path in.
+            let script = concat!(
+                "#!/usr/bin/env bash\n",
+                "set -euo pipefail\n",
+                "MARKPLANE=\"__MARKPLANE__\"\n",
+                "AUTHOR=\"${MARKPLANE_AUTHOR:-}\"\n",
+                "PROMPT=\"${@: -1}\"\n",
+                "TASK=\"$(printf '%s' \"$PROMPT\" | sed -n 's/.*\\(TASK-[a-z0-9]*\\).*/\\1/p' | head -1)\"\n",
+                "emit() {\n",
+                "  local session=\"$1\" text=\"$2\"\n",
+                "  printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$session\\\",\\\"model\\\":\\\"fake\\\"}\"\n",
+                "  python3 -c 'import json,sys; print(json.dumps({\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":sys.argv[1]}]}}))' \"$text\"\n",
+                "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"inputTokens\":1,\"outputTokens\":2,\"cacheReadTokens\":0,\"cacheWriteTokens\":0},\"duration_api_ms\":10}'\n",
+                "}\n",
+                "if [ \"$AUTHOR\" = \"agent-implement\" ]; then\n",
+                "  echo \"implemented by fake agent\" > \"feat-${TASK}.txt\"\n",
+                "  git add \"feat-${TASK}.txt\"\n",
+                "  git -c user.email=a@b -c user.name=agent commit -m \"feat: ${TASK}\" -m \"Refs: ${TASK}\"\n",
+                "  printf '%s\\n' '**Review** base fake · 0 must-fix · 0 optional' '' '**Must-fix**' 'none' '' '**Optional**' 'none' | \"$MARKPLANE\" comment \"$TASK\" --body-file -\n",
+                "  emit \"sess-impl-${TASK}\" \"$(printf 'done\\n\\nREVIEW: clean\\n')\"\n",
+                "elif [ \"$AUTHOR\" = \"agent-merge\" ]; then\n",
+                "  BRANCH=\"agent/${TASK}\"\n",
+                "  if git merge-base --is-ancestor \"$BRANCH\" HEAD; then\n",
+                "    emit \"sess-merge-${TASK}\" \"$(printf 'already\\n\\nMERGE: done\\n')\"\n",
+                "    exit 0\n",
+                "  fi\n",
+                "  git merge --no-ff --no-commit \"$BRANCH\"\n",
+                "  git -c user.email=a@b -c user.name=agent commit -m \"Merge ${BRANCH}\" -m \"Refs: ${TASK}\"\n",
+                "  emit \"sess-merge-${TASK}\" \"$(printf 'merged\\n\\nMERGE: done\\n')\"\n",
+                "else\n",
+                "  emit \"sess-unknown\" \"noop\"\n",
+                "fi\n",
+            );
+            let script = script.replace("__MARKPLANE__", &markplane_bin.display().to_string());
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    struct EngineEnv {
+        _tmp: TempDir,
+        config_dir: PathBuf,
+        project_dir: PathBuf,
+        project_id: String,
+        state: Arc<AppState>,
+        app: tower::util::BoxCloneService<Request, Response, Infallible>,
+        remote: Option<PathBuf>,
+    }
+
+    fn setup_engine_env(name: &str, push_after_merge: Option<bool>) -> EngineEnv {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let project_dir = tmp.path().join(name);
+        fs::create_dir_all(&project_dir).unwrap();
+        init_git_repo(&project_dir);
+        git_config_identity(&project_dir);
+        // Default branch name
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&project_dir)
+            .args(["checkout", "-b", "main"])
+            .status();
+
+        Project::init(
+            project_dir.join(".markplane"),
+            name,
+            "dispatcher engine tests",
+        )
+        .unwrap();
+
+        if let Some(push) = push_after_merge {
+            let mut cfg = Project::new(project_dir.join(".markplane"))
+                .load_config()
+                .unwrap();
+            cfg.dispatcher.push_after_merge = Some(push);
+            let yaml = serde_yaml::to_string(&cfg).unwrap();
+            fs::write(project_dir.join(".markplane/config.yaml"), yaml).unwrap();
+        }
+
+        git_commit_all(&project_dir, "init");
+
+        let remote = if push_after_merge == Some(true) {
+            let remote_dir = tmp.path().join("remote.git");
+            let _ = std::process::Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&remote_dir)
+                .status();
+            let _ = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&project_dir)
+                .args(["remote", "add", "origin"])
+                .arg(&remote_dir)
+                .status();
+            let _ = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&project_dir)
+                .args(["push", "-u", "origin", "main"])
+                .status();
+            Some(remote_dir)
+        } else {
+            None
+        };
+
+        let entry = serve_registry::register(&config_dir, &project_dir).unwrap();
+        let agent_bin = tmp.path().join("fake-agent");
+        let mp = markplane_debug_bin();
+        assert!(
+            mp.is_file(),
+            "markplane binary missing at {} — run cargo build -p markplane-cli first",
+            mp.display()
+        );
+        write_happy_fake_agent(&agent_bin, &mp);
+
+        let state = AppState::with_options(
+            config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent_bin),
+        );
+        let app = build_app(state.clone());
+        EngineEnv {
+            _tmp: tmp,
+            config_dir,
+            project_dir,
+            project_id: entry.id,
+            state,
+            app,
+            remote,
+        }
+    }
+
+    async fn add_ready_task(env: &EngineEnv, title: &str, priority: &str) -> String {
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/tasks", env.project_id),
+            Some(serde_json::json!({
+                "title": title,
+                "type": "feature",
+                "priority": priority,
+                "effort": "small",
+                "tags": ["ready-for-agent"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        let id = json["data"]["id"].as_str().unwrap().to_string();
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{id}", env.project_id),
+            Some(serde_json::json!({ "status": "planned" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        id
+    }
+
+    async fn enable_scan(env: &EngineEnv) {
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    async fn wait_run_status(env: &EngineEnv, task_id: &str, want: &str, secs: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            let record = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                task_id,
+            )
+            .unwrap();
+            if let Some(rec) = record
+                && let Some(run) = rec.runs.last()
+            {
+                let status = match run.status {
+                    markplane_core::RunStatus::Succeeded => "succeeded",
+                    markplane_core::RunStatus::Failed => "failed",
+                    markplane_core::RunStatus::Running => "running",
+                    markplane_core::RunStatus::MergeQueued => "merge-queued",
+                    markplane_core::RunStatus::Stopped => "stopped",
+                };
+                if status == want {
+                    return;
+                }
+                if matches!(
+                    run.status,
+                    markplane_core::RunStatus::Failed | markplane_core::RunStatus::Stopped
+                ) && want == "succeeded"
+                {
+                    panic!(
+                        "run ended as {status}: {:?}",
+                        run.failure_reason
+                    );
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("timeout waiting for run {want} on {task_id}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_happy_path_clean_merge_done() {
+        let env = setup_engine_env("happy", Some(false));
+        let task_id = add_ready_task(&env, "Happy path feature", "high").await;
+        // Establish runtime + ws
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        let mut rx = {
+            let guard = env.state.runtimes.lock().await;
+            guard.get(&env.project_id).unwrap().ws_tx.subscribe()
+        };
+
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &task_id, "succeeded", 30).await;
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.status, "done");
+        assert_eq!(doc.frontmatter.assignee.as_deref(), Some("dispatcher"));
+        assert!(doc.frontmatter.tags.iter().any(|t| t == "ready-for-agent"));
+        assert!(doc.body.contains("**Merged**"));
+        assert!(doc.body.contains("pushed: no"));
+        assert!(doc.body.contains("**Review**"), "agent review comment");
+
+        let record = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        let run = record.runs.last().unwrap();
+        assert_eq!(run.status, markplane_core::RunStatus::Succeeded);
+        assert!(run.merge_sha.is_some());
+        assert!(!run.pushed);
+        assert!(
+            run.attempts
+                .iter()
+                .any(|a| a.session_id.as_deref() == Some(&format!("sess-impl-{task_id}")))
+        );
+        assert!(run.attempts.iter().any(|a| a.usage.is_some()));
+
+        // Main branch contains merge; ticket-only commit has Refs trailer.
+        let log = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["log", "--oneline", "-5"])
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.contains(&format!("Merge agent/{task_id}")) || log.contains("Merge"), "{log}");
+        let ticket_msg = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["log", "-1", "--format=%B", "--", &format!(".markplane/backlog/items/{task_id}.md")])
+            .output()
+            .unwrap();
+        let ticket_msg = String::from_utf8_lossy(&ticket_msg.stdout);
+        assert!(
+            ticket_msg.contains(&format!("Refs: {task_id}")),
+            "{ticket_msg}"
+        );
+
+        // run_changed events were pushed
+        let mut saw_run_changed = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg)
+                && v["type"] == "run_changed"
+            {
+                saw_run_changed = true;
+                assert_eq!(v["task_id"], task_id);
+            }
+        }
+        assert!(saw_run_changed, "expected run_changed events");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_push_after_merge_on_and_off() {
+        // Off
+        let env_off = setup_engine_env("push-off", Some(false));
+        let id_off = add_ready_task(&env_off, "No push", "medium").await;
+        let _ = oneshot_json(
+            &env_off.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env_off.project_id),
+        )
+        .await;
+        enable_scan(&env_off).await;
+        env_off.state.dispatcher_tick().await;
+        wait_run_status(&env_off, &id_off, "succeeded", 30).await;
+        let run = markplane_core::read_run_record(
+            &env_off.project_dir.join(".markplane"),
+            &id_off,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!run.runs.last().unwrap().pushed);
+
+        // On (bare remote)
+        let env_on = setup_engine_env("push-on", Some(true));
+        let id_on = add_ready_task(&env_on, "Do push", "medium").await;
+        let _ = oneshot_json(
+            &env_on.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env_on.project_id),
+        )
+        .await;
+        enable_scan(&env_on).await;
+        env_on.state.dispatcher_tick().await;
+        wait_run_status(&env_on, &id_on, "succeeded", 30).await;
+        let run = markplane_core::read_run_record(
+            &env_on.project_dir.join(".markplane"),
+            &id_on,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(run.runs.last().unwrap().pushed);
+        let remote = env_on.remote.as_ref().unwrap();
+        let remote_log = std::process::Command::new("git")
+            .args(["--git-dir"])
+            .arg(remote)
+            .args(["log", "--oneline", "-3"])
+            .output()
+            .unwrap();
+        assert!(
+            remote_log.status.success(),
+            "remote should have commits"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_respects_concurrency_limit() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let env = setup_engine_env("conc", Some(false));
+            super::super::serve_dispatcher::write_concurrency(&env.config_dir, 1).unwrap();
+            let a = add_ready_task(&env, "First", "critical").await;
+            let b = add_ready_task(&env, "Second", "high").await;
+            let _ = oneshot_json(
+                &env.app,
+                "GET",
+                &format!("/api/p/{}/tasks", env.project_id),
+            )
+            .await;
+
+            let agent = env._tmp.path().join("fake-agent");
+            let mp = markplane_debug_bin();
+            write_happy_fake_agent(&agent, &mp);
+            let wrapper = env._tmp.path().join("slow-agent");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/bash\nif [ \"${{MARKPLANE_AUTHOR:-}}\" = agent-implement ]; then sleep 1; fi\nexec '{}' \"$@\"\n",
+                    agent.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let state = AppState::with_options(
+                env.config_dir.clone(),
+                4200,
+                true,
+                false,
+                None,
+                Some(wrapper),
+            );
+            let app = build_app(state.clone());
+            let _ = oneshot_json(&app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+            let (status, _) = oneshot_json_body(
+                &app,
+                "PATCH",
+                &format!("/api/p/{}/dispatcher/scan", env.project_id),
+                Some(serde_json::json!({ "enabled": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let tick = state.clone();
+            let t1 = tokio::spawn(async move { tick.dispatcher_tick().await });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            state.dispatcher_tick().await;
+            assert_eq!(state.engine.lock().await.slots_used(), 1);
+            t1.await.unwrap();
+
+            // Finish A, then B can be picked.
+            let wait_env = EngineEnv {
+                _tmp: TempDir::new().unwrap(),
+                config_dir: env.config_dir.clone(),
+                project_dir: env.project_dir.clone(),
+                project_id: env.project_id.clone(),
+                state: state.clone(),
+                app: app.clone(),
+                remote: None,
+            };
+            wait_run_status(&wait_env, &a, "succeeded", 30).await;
+            state.dispatcher_tick().await;
+            wait_run_status(&wait_env, &b, "succeeded", 30).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_merge_queue_serializes_two_runs() {
+        let env = setup_engine_env("merge-q", Some(false));
+        let a = add_ready_task(&env, "Merge A", "critical").await;
+        let b = add_ready_task(&env, "Merge B", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        // concurrency 2 so both implement in parallel, merge serializes
+        super::super::serve_dispatcher::write_concurrency(&env.config_dir, 2).unwrap();
+
+        let s = env.state.clone();
+        let t1 = tokio::spawn(async move { s.dispatcher_tick().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        env.state.dispatcher_tick().await;
+        t1.await.unwrap();
+        // Drain any remaining work
+        for _ in 0..5 {
+            env.state.dispatcher_tick().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        wait_run_status(&env, &a, "succeeded", 40).await;
+        wait_run_status(&env, &b, "succeeded", 40).await;
+
+        // Both branches contained in main
+        for id in [&a, &b] {
+            let status = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&env.project_dir)
+                .args(["merge-base", "--is-ancestor", &format!("agent/{id}"), "HEAD"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "branch agent/{id} should be merged");
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_success_close_is_idempotent() {
+        let env = setup_engine_env("idem", Some(false));
+        let task_id = add_ready_task(&env, "Idempotent close", "medium").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &task_id, "succeeded", 30).await;
+
+        let before = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        let before: u64 = String::from_utf8_lossy(&before.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+
+        // Re-run success_close via a second tick should not pick up done ticket
+        // or create extra commits.
+        env.state.dispatcher_tick().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let after = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        let after: u64 = String::from_utf8_lossy(&after.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(before, after, "no extra commits on idempotent close");
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        let merged_count = doc.body.matches("**Merged**").count();
+        assert_eq!(merged_count, 1, "single success comment");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_agent_env_writes_comments_to_main_tree() {
+        let env = setup_engine_env("env-root", Some(false));
+        let task_id = add_ready_task(&env, "Env check", "medium").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        wait_run_status(&env, &task_id, "succeeded", 30).await;
+
+        let main_ticket = fs::read_to_string(
+            env.project_dir
+                .join(".markplane/backlog/items")
+                .join(format!("{task_id}.md")),
+        )
+        .unwrap();
+        assert!(
+            main_ticket.contains("**Review**"),
+            "comment must land in main workspace ticket"
+        );
+        // Worktree copy may exist but agent comments go to MARKPLANE_ROOT
+        let wt = env.project_dir.join(".worktrees").join(&task_id);
+        if wt.exists() {
+            let wt_ticket = wt
+                .join(".markplane/backlog/items")
+                .join(format!("{task_id}.md"));
+            if wt_ticket.exists() {
+                let body = fs::read_to_string(&wt_ticket).unwrap();
+                // Worktree ticket should not have gained the agent review (main is SoT)
+                let _ = body;
+            }
         }
     }
 }

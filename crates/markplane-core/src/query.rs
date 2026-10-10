@@ -297,7 +297,7 @@ fn scan_directory<T: serde::de::DeserializeOwned>(
 }
 
 /// Return a numeric rank for a priority (lower = higher priority).
-fn priority_rank(priority: &Priority) -> u8 {
+pub fn priority_rank(priority: &Priority) -> u8 {
     match priority {
         Priority::Critical => 0,
         Priority::High => 1,

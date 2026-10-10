@@ -1,3 +1,4 @@
+pub mod agent_stream;
 pub mod comments;
 pub mod context;
 pub mod dispatcher;
@@ -7,6 +8,7 @@ pub mod index;
 pub mod links;
 pub mod manifest;
 pub mod models;
+pub mod pickup;
 pub mod position;
 pub mod project;
 pub mod query;
@@ -16,6 +18,10 @@ pub mod sections;
 pub mod templates;
 pub mod transcripts;
 
+pub use agent_stream::{
+    StreamEvent, agent_invocation_succeeded, last_nonempty_line, parse_stream_json_line,
+    session_id_from_events, usage_from_events, verdict_from_events,
+};
 pub use comments::{
     Comment, ParsedBody, default_comment_author, demote_comment_headings, parse_item_body,
     with_description,
@@ -26,6 +32,10 @@ pub use dispatcher::{
     EffectiveDispatcherSettings, EffectiveStageSettings, EffectiveStagesSettings,
     effective_dispatcher_settings, parse_agent_models, strip_ansi, validate_concurrency,
     validate_dispatcher_config, validate_model, validate_timeout_minutes,
+};
+pub use pickup::{
+    READY_FOR_AGENT_TAG, PickupSortKey, cmp_pickup_keys, filter_and_sort_pickup_candidates,
+    is_implementation_ticket,
 };
 pub use error::{MarkplaneError, Result};
 pub use frontmatter::{parse_frontmatter, parse_frontmatter_raw, write_frontmatter};
