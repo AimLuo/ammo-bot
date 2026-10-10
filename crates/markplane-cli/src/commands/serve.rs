@@ -28,19 +28,21 @@ use tower_http::services::ServeDir;
 use markplane_core::{
     AgentModel, Comment, DEFAULT_CONCURRENCY, DispatcherConfig, DispatcherStageConfig, Effort, Epic,
     EpicStatus, EpicUpdate, EffectiveDispatcherSettings, IdPrefix, LinkAction, LinkRelation, Map,
-    MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, Plan, PlanUpdate, Priority,
-    Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow,
-    cursor_data_dir, default_comment_author, effective_dispatcher_settings, find_blocked_items,
-    find_frontier_items, parse_id, parse_item_body, read_session_transcript,
+    MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, PickupSortKey, Plan, PlanUpdate,
+    Priority, Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow,
+    cmp_pickup_keys, cursor_data_dir, default_comment_author, effective_dispatcher_settings,
+    find_blocked_items, find_frontier_items, parse_id, parse_item_body, read_session_transcript,
     split_markdown_sections, validate_concurrency, validate_dispatcher_config, validate_model,
     validate_timeout_minutes,
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
-use super::serve_dispatcher_engine::{self, EngineState, ScanAutoCloseState};
+use super::serve_dispatcher_engine::{self, EngineState, ResumeError, ScanAutoCloseState};
+use super::serve_dispatcher_handoff;
 use super::serve_dispatcher_lock::{
     self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe,
 };
+use super::serve_dispatcher_resume;
 use super::serve_git::{self, DispatcherLockKey};
 use super::serve_registry::{self, RegistryEntry};
 
@@ -282,6 +284,12 @@ impl AppState {
         self.maybe_release_idle_dispatcher_locks().await;
     }
 
+    /// Stop pickups and kill live agent process groups (tests + SIGINT path).
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn shutdown_dispatcher(self: &Arc<Self>) {
+        serve_dispatcher_engine::shutdown_agents(self.engine.clone()).await;
+    }
+
     async fn maybe_release_idle_dispatcher_locks(&self) {
         let mut guard = self.dispatcher.lock().await;
         let engine = self.engine.lock().await;
@@ -503,6 +511,7 @@ pub async fn run(
             }
         });
     }
+    let shutdown_state = state.clone();
     let app = build_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -570,6 +579,8 @@ pub async fn run(
     let shutdown_handle = handle.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
+        // Stop pickups and kill agent process groups (5s grace) before HTTP drain.
+        serve_dispatcher_engine::shutdown_agents(shutdown_state.engine.clone()).await;
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(3)));
     });
 
@@ -686,7 +697,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/graph", get(get_graph_all))
         .route("/api/graph/{id}", get(get_graph_focused))
         .route("/api/runs", get(list_run_summaries))
+        .route("/api/runs/resume", post(resume_all_runs))
         .route("/api/runs/{task_id}", get(get_run_record))
+        .route("/api/runs/{task_id}/resume", post(resume_one_run))
         .route(
             "/api/runs/{task_id}/sessions/{session_id}",
             get(get_session_transcript),
@@ -3054,6 +3067,7 @@ async fn patch_scan_switch(
 ) -> Result<Json<ApiResponse<ScanSwitchResponse>>, (StatusCode, Json<ApiError>)> {
     if body.enabled {
         open_scan_switch(&state, &project, &project_id).await?;
+        reconcile_interrupted_runs(&state, &project, &project_id).await;
         {
             let mut auto = state.scan_auto_close.lock().await;
             auto.clear_on_manual_open(&project_id);
@@ -3070,7 +3084,7 @@ async fn patch_scan_switch(
 }
 
 async fn open_scan_switch(
-    state: &AppState,
+    state: &Arc<AppState>,
     project: &Project,
     project_id: &str,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -4749,15 +4763,428 @@ async fn list_run_summaries(
             markplane_core::RunMemoryPresence::Absent
         };
         let queue_position = queue_positions.get(&task_id).copied();
-        summaries.push(markplane_core::run_summary(
+        let mut summary = markplane_core::run_summary(
             &task_id,
             run,
             presence,
             queue_position,
-        ));
+        );
+        if summary.status == "interrupted" {
+            summary = markplane_core::run_summary_with_orphan(
+                summary,
+                serve_dispatcher_resume::run_orphan_pid(run),
+            );
+        }
+        summaries.push(summary);
     }
 
     Ok(Json(ApiResponse { data: summaries }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResumeRunRequest {
+    #[serde(default)]
+    terminate_orphan: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeOneResponse {
+    task_id: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResumeAllResponse {
+    resumed: Vec<String>,
+    remaining: Vec<String>,
+    stopped_early: bool,
+    reason: Option<String>,
+}
+
+/// `POST /api/runs/{task_id}/resume`
+async fn resume_one_run(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+    Path(task_id): Path<String>,
+    body: Option<Json<ResumeRunRequest>>,
+) -> Result<Json<ApiResponse<ResumeOneResponse>>, (StatusCode, Json<ApiError>)> {
+    let terminate_orphan = body.map(|b| b.0.terminate_orphan).unwrap_or(false);
+    ensure_task_id(&task_id)?;
+    acquire_dispatcher_lock_for_resume(&state, &project, &project_id).await?;
+    reconcile_interrupted_runs(&state, &project, &project_id).await;
+
+    // Re-check ownership after reconcile.
+    if !serve_dispatcher_handoff::ticket_still_ours(&project, &task_id).unwrap_or(false) {
+        // Reconcile may have marked stopped; or human took over.
+        mark_run_stopped_if_needed(&project, &task_id).await;
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "not_resumable",
+            "ticket is not active with assignee dispatcher",
+        ));
+    }
+
+    let proj = project_tick_input(state.clone(), &project, &project_id)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e))?;
+
+    match serve_dispatcher_engine::resume_run(
+        state.engine.clone(),
+        proj,
+        task_id.clone(),
+        terminate_orphan,
+    )
+    .await
+    {
+        Ok(()) => {
+            broadcast_dispatcher_changed(&state).await;
+            Ok(Json(ApiResponse {
+                data: ResumeOneResponse {
+                    task_id,
+                    status: "running".into(),
+                },
+            }))
+        }
+        Err(ResumeError::OrphanRunning { pid }) => Err(error_response(
+            StatusCode::CONFLICT,
+            "orphan_running",
+            &format!("Previous agent process still running (pid {pid})"),
+        )),
+        Err(ResumeError::NoFreeSlot) => Err(error_response(
+            StatusCode::CONFLICT,
+            "no_free_slot",
+            "no free dispatcher slot",
+        )),
+        Err(ResumeError::NotResumable) => Err(error_response(
+            StatusCode::CONFLICT,
+            "not_resumable",
+            "run is not resumable",
+        )),
+        Err(ResumeError::Internal(msg)) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &msg,
+        )),
+    }
+}
+
+/// `POST /api/runs/resume` — resume all interrupted Runs in this Project (pickup order).
+async fn resume_all_runs(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+) -> Result<Json<ApiResponse<ResumeAllResponse>>, (StatusCode, Json<ApiError>)> {
+    acquire_dispatcher_lock_for_resume(&state, &project, &project_id).await?;
+    reconcile_interrupted_runs(&state, &project, &project_id).await;
+
+    let mut interrupted = list_interrupted_task_ids(state.clone(), &project, &project_id).await;
+    // Pickup order: priority → board position → created → id (same as pickup filter).
+    interrupted = sort_resume_order(&project, interrupted);
+
+    let mut resumed = Vec::new();
+    let mut remaining = Vec::new();
+    let mut stopped_early = false;
+    let mut reason = None;
+
+    for task_id in interrupted {
+        if !serve_dispatcher_handoff::ticket_still_ours(&project, &task_id).unwrap_or(false) {
+            continue;
+        }
+        let proj = match project_tick_input(state.clone(), &project, &project_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    &e,
+                ));
+            }
+        };
+        match serve_dispatcher_engine::resume_run(state.engine.clone(), proj, task_id.clone(), false)
+            .await
+        {
+            Ok(()) => resumed.push(task_id),
+            Err(ResumeError::NoFreeSlot) => {
+                remaining.push(task_id);
+                stopped_early = true;
+                reason = Some("no_free_slot".into());
+                // Collect the rest as remaining without trying.
+                // (loop will push subsequent via fallthrough — break after marking)
+                break;
+            }
+            Err(ResumeError::OrphanRunning { .. }) => {
+                remaining.push(task_id);
+            }
+            Err(ResumeError::NotResumable) => {}
+            Err(ResumeError::Internal(msg)) => {
+                return Err(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    &msg,
+                ));
+            }
+        }
+    }
+    if stopped_early {
+        // Anything not yet visited stays remaining — rebuild from current interrupted list.
+        let still = list_interrupted_task_ids(state.clone(), &project, &project_id).await;
+        for id in still {
+            if !resumed.contains(&id) && !remaining.contains(&id) {
+                remaining.push(id);
+            }
+        }
+    }
+
+    broadcast_dispatcher_changed(&state).await;
+    Ok(Json(ApiResponse {
+        data: ResumeAllResponse {
+            resumed,
+            remaining,
+            stopped_early,
+            reason,
+        },
+    }))
+}
+
+fn ensure_task_id(task_id: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let (prefix, _) = parse_id(task_id).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("Invalid ID format: {task_id}"),
+        )
+    })?;
+    if prefix != IdPrefix::Task {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("runs are only available for Task IDs, got {task_id}"),
+        ));
+    }
+    Ok(())
+}
+
+async fn acquire_dispatcher_lock_for_resume(
+    state: &AppState,
+    project: &Project,
+    project_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let project_dir = project_dir_from_project(project);
+    let key = serve_git::resolve_lock_key(&project_dir).map_err(|e| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "scan_precondition_failed",
+            &e.to_string(),
+        )
+    })?;
+    let holder = LockHolder {
+        pid: std::process::id(),
+        hostname: serve_dispatcher_lock::local_hostname(),
+        serve_url: state.serve_url(),
+        config_dir: state.config_dir.display().to_string(),
+        project_path: project_dir.display().to_string(),
+        acquired_at: chrono::Utc::now(),
+    };
+    let local_hostname = holder.hostname.clone();
+
+    let mut guard = state.dispatcher.lock().await;
+    if guard.held_locks.contains_key(project_id) {
+        return Ok(());
+    }
+    if let Some(other_id) = guard.key_to_project.get(&key)
+        && other_id != project_id
+    {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "dispatcher_lock_conflict",
+            &format!(
+                "Dispatcher lock key is already held by Project '{other_id}' in this serve"
+            ),
+        ));
+    }
+    match serve_dispatcher_lock::try_acquire(&key, holder) {
+        Ok(held) => {
+            guard.key_to_project.insert(key, project_id.to_string());
+            guard.held_locks.insert(project_id.to_string(), held);
+            Ok(())
+        }
+        Err(AcquireError::Contended { holder }) => {
+            let message = holder
+                .as_ref()
+                .map(|h| serve_dispatcher_lock::locked_message(h, &local_hostname))
+                .unwrap_or_else(|| {
+                    "This repository's Dispatcher lock is held by another process.".into()
+                });
+            Err(error_response_dispatcher_locked(&message, holder))
+        }
+        Err(AcquireError::Io(msg)) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &msg,
+        )),
+    }
+}
+
+/// On lock acquire: non-terminal Runs whose ticket left active/dispatcher → stopped.
+async fn reconcile_interrupted_runs(state: &Arc<AppState>, project: &Project, project_id: &str) {
+    let Ok(records) = project.list_run_records() else {
+        return;
+    };
+    let in_memory: HashSet<String> = {
+        let engine = state.engine.lock().await;
+        engine
+            .active_slots
+            .iter()
+            .filter(|(_, pid)| *pid == project_id)
+            .map(|(tid, _)| tid.clone())
+            .collect()
+    };
+    let ws_tx = match state.get_or_create_runtime(project_id).await {
+        Ok(rt) => rt.ws_tx.clone(),
+        Err(_) => return,
+    };
+    for (task_id, mut record) in records {
+        if in_memory.contains(&task_id) {
+            continue;
+        }
+        let Some(run) = record.runs.last().cloned() else {
+            continue;
+        };
+        if !matches!(
+            run.status,
+            markplane_core::RunStatus::Running | markplane_core::RunStatus::MergeQueued
+        ) {
+            continue;
+        }
+        let ours = serve_dispatcher_handoff::ticket_still_ours(project, &task_id).unwrap_or(false);
+        if ours {
+            continue;
+        }
+        let mut run = run;
+        let _ = serve_dispatcher_handoff::silent_stop(
+            project, &ws_tx, &task_id, &mut record, &mut run,
+        )
+        .await;
+    }
+}
+
+async fn mark_run_stopped_if_needed(project: &Project, task_id: &str) {
+    let Ok(Some(mut record)) = project.read_run_record(task_id) else {
+        return;
+    };
+    let Some(mut run) = record.runs.last().cloned() else {
+        return;
+    };
+    if !matches!(
+        run.status,
+        markplane_core::RunStatus::Running | markplane_core::RunStatus::MergeQueued
+    ) {
+        return;
+    }
+    if serve_dispatcher_handoff::ticket_still_ours(project, task_id).unwrap_or(false) {
+        return;
+    }
+    let (tx, _) = broadcast::channel(16);
+    let _ = serve_dispatcher_handoff::silent_stop(project, &tx, task_id, &mut record, &mut run).await;
+}
+
+async fn list_interrupted_task_ids(
+    state: Arc<AppState>,
+    project: &Project,
+    project_id: &str,
+) -> Vec<String> {
+    let Ok(records) = project.list_run_records() else {
+        return Vec::new();
+    };
+    let in_memory: HashSet<String> = {
+        let engine = state.engine.lock().await;
+        engine
+            .active_slots
+            .iter()
+            .filter(|(_, pid)| *pid == project_id)
+            .map(|(tid, _)| tid.clone())
+            .collect()
+    };
+    let mut out = Vec::new();
+    for (task_id, record) in records {
+        if in_memory.contains(&task_id) {
+            continue;
+        }
+        let Some(run) = record.runs.last() else {
+            continue;
+        };
+        if matches!(
+            run.status,
+            markplane_core::RunStatus::Running | markplane_core::RunStatus::MergeQueued
+        ) {
+            out.push(task_id);
+        }
+    }
+    out
+}
+
+fn sort_resume_order(project: &Project, ids: Vec<String>) -> Vec<String> {
+    let Ok(tasks) = project.list_tasks(&QueryFilter::default()) else {
+        let mut ids = ids;
+        ids.sort();
+        return ids;
+    };
+    let id_set: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut docs: Vec<_> = tasks
+        .iter()
+        .filter(|d| id_set.contains(d.frontmatter.id.as_str()))
+        .collect();
+    docs.sort_by(|a, b| {
+        cmp_pickup_keys(
+            &PickupSortKey::from_task(&a.frontmatter),
+            &PickupSortKey::from_task(&b.frontmatter),
+        )
+    });
+    let mut ordered: Vec<String> = docs.into_iter().map(|d| d.frontmatter.id.clone()).collect();
+    for id in ids {
+        if !ordered.contains(&id) {
+            ordered.push(id);
+        }
+    }
+    ordered
+}
+
+async fn project_tick_input(
+    state: Arc<AppState>,
+    project: &Project,
+    project_id: &str,
+) -> Result<serve_dispatcher_engine::ProjectTickInput, String> {
+    let rt = state
+        .get_or_create_runtime(project_id)
+        .await
+        .map_err(|_| format!("runtime unavailable for {project_id}"))?;
+    let project_dir = project_dir_from_project(project);
+    let settings = {
+        let cfg = load_dispatcher_config(&state, project).await;
+        effective_dispatcher_settings(&cfg)
+    };
+    let concurrency = load_concurrency(&state).await;
+    let test_timeout_secs = {
+        let secs = state
+            .test_stage_timeout_secs
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if secs == 0 { None } else { Some(secs) }
+    };
+    Ok(serve_dispatcher_engine::ProjectTickInput {
+        project_id: project_id.to_string(),
+        project: Project::new(project.root().to_path_buf()),
+        project_dir,
+        agent_bin: state.agent_bin_path(),
+        ws_tx: rt.ws_tx.clone(),
+        concurrency,
+        settings,
+        scan_on: false,
+        test_timeout_secs,
+        serve_url: state.serve_url(),
+        scan_auto_close: state.scan_auto_close.clone(),
+        auto_close_tx: state.auto_close_tx.clone(),
+    })
 }
 
 /// `GET /api/runs/{task_id}` — full local Run record, or an empty array when absent.
@@ -9674,9 +10101,539 @@ esac
 
         env.state.dispatcher_tick().await;
         let reason = wait_scan_auto_closed(&env, 5).await;
+
         assert!(
             reason.to_lowercase().contains("lock"),
             "reason should mention lock: {reason}"
         );
+    }
+
+    // ── TASK-minmn: shutdown, interrupt recognition, Resume ──────────────
+
+    fn write_hang_fake_agent(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+PROMPT="${@: -1}"
+TASK="$(printf '%s' "$PROMPT" | sed -n 's/.*\(TASK-[a-z0-9]*\).*/\1/p' | head -1)"
+# Emit init then hang so shutdown / orphan tests can observe the live process.
+printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-hang-${TASK}\",\"model\":\"fake\"}"
+# Keep argv containing worktree path via cwd; sleep forever in this process group.
+sleep 600
+"#;
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn write_resume_aware_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path, mode: &str) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = format!(r##"#!/usr/bin/env bash
+set -euo pipefail
+MARKPLANE="{mp}"
+AUTHOR="${{MARKPLANE_AUTHOR:-}}"
+MODE="{mode}"
+RESUME=""
+WORKSPACE=""
+args=("$@")
+for ((i=0; i<${{#args[@]}}; i++)); do
+  case "${{args[$i]}}" in
+    --resume) RESUME="${{args[$((i+1))]}}" ;;
+    --workspace) WORKSPACE="${{args[$((i+1))]}}" ;;
+  esac
+done
+PROMPT="${{@: -1}}"
+TASK="$(printf '%s' "$PROMPT" | sed -n 's/.*\(TASK-[a-z0-9]*\).*/\1/p' | head -1)"
+emit() {{
+  local session="$1" text="$2"
+  printf '%s\n' "{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session\",\"model\":\"fake\"}}"
+  python3 -c 'import json,sys; print(json.dumps({{"type":"assistant","message":{{"content":[{{"type":"text","text":sys.argv[1]}}]}}}}))' "$text"
+  printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"usage":{{"inputTokens":1,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}},"duration_api_ms":10}}'
+}}
+if [ "$MODE" = "mismatch" ] && [ -n "$RESUME" ]; then
+  # Silent empty session with a different id → Dispatcher must kill and restart.
+  emit "sess-mismatch-$TASK" "$(printf 'wrong session\n\nREVIEW: clean\n')"
+  exit 0
+fi
+if [ "$AUTHOR" = "agent-implement" ]; then
+  if [ -n "$RESUME" ]; then
+    case "$PROMPT" in
+      *interrupted*) ;;
+      *) echo "resume prompt missing interrupted wording" >&2; exit 41 ;;
+    esac
+  fi
+  echo "implemented by resume agent" > "feat-$TASK.txt"
+  git add "feat-$TASK.txt"
+  git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK"
+  printf '%s\n' '**Review** base fake · 0 must-fix · 0 optional' '' '**Must-fix**' 'none' '' '**Optional**' 'none' | "$MARKPLANE" comment "$TASK" --body-file -
+  SID="sess-impl-$TASK"
+  [ -n "$RESUME" ] && SID="$RESUME"
+  emit "$SID" "$(printf 'done\n\nREVIEW: clean\n')"
+elif [ "$AUTHOR" = "agent-merge" ]; then
+  BRANCH="agent/$TASK"
+  if git merge-base --is-ancestor "$BRANCH" HEAD; then
+    emit "sess-merge-$TASK" "$(printf 'already\n\nMERGE: done\n')"
+    exit 0
+  fi
+  git merge --no-ff --no-commit "$BRANCH"
+  git -c user.email=a@b -c user.name=agent commit -m "Merge $BRANCH" -m "Refs: $TASK"
+  emit "sess-merge-$TASK" "$(printf 'merged\n\nMERGE: done\n')"
+else
+  emit "sess-other-$TASK" "noop"
+fi
+"##, mp = markplane_bin.display(), mode = mode);
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    async fn seed_interrupted_implement(env: &EngineEnv, task_id: &str, with_result: bool) {
+        use markplane_core::{
+            Attempt, AttemptResult, Run, RunRecord, RunStatus, Stage, Trigger, UpdateFields,
+            write_run_record,
+        };
+        let worktree = env.project_dir.join(".worktrees").join(task_id);
+        let branch = format!("agent/{task_id}");
+        let base = std::process::Command::new("git")
+            .args(["-C"]).arg(&env.project_dir).args(["rev-parse", "HEAD"])
+            .output().unwrap();
+        let base_sha = String::from_utf8_lossy(&base.stdout).trim().to_string();
+        let _ = std::process::Command::new("git")
+            .args(["-C"]).arg(&env.project_dir)
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&worktree)
+            .arg(&base_sha)
+            .status();
+        let workspace = worktree.canonicalize().unwrap_or(worktree.clone()).display().to_string();
+        let mut attempt = Attempt {
+            stage: Stage::Implement,
+            model: "fake".into(),
+            timeout_secs: Some(3600),
+            session_id: Some(format!("sess-impl-{task_id}")),
+            workspace: workspace.clone(),
+            transcript_path: None,
+            pid: None,
+            process_group_id: None,
+            agent_config_dir: Some(markplane_core::agent_config_dir().display().to_string()),
+            trigger: Trigger::Initial,
+            started_at: "2026-10-10T09:00:00+08:00".into(),
+            ended_at: None,
+            exit_code: None,
+            verdict: None,
+            result: None,
+            usage: None,
+            duration_api_ms: None,
+            stderr_tail: None,
+        };
+        if with_result {
+            // Completed implement with REVIEW: clean — Resume should advance to merge.
+            let feat = worktree.join(format!("feat-{task_id}.txt"));
+            fs::write(&feat, "done").unwrap();
+            let _ = std::process::Command::new("git")
+                .args(["-C"]).arg(&worktree)
+                .args(["add", "."]).status();
+            let _ = std::process::Command::new("git")
+                .args(["-C"]).arg(&worktree)
+                .args(["-c", "user.email=a@b", "-c", "user.name=agent", "commit", "-m", "feat", "-m", &format!("Refs: {task_id}")])
+                .status();
+            attempt.ended_at = Some("2026-10-10T09:30:00+08:00".into());
+            attempt.exit_code = Some(0);
+            attempt.verdict = Some("REVIEW: clean".into());
+            attempt.result = Some(AttemptResult::Ok);
+        }
+        let project = Project::new(env.project_dir.join(".markplane"));
+        project
+            .update_item(
+                task_id,
+                UpdateFields {
+                    status: Some("in-progress".into()),
+                    assignee: Patch::Set("dispatcher".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        write_run_record(
+            project.root(),
+            task_id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Running,
+                    current_stage: Some(Stage::Implement),
+                    worktree: worktree.display().to_string(),
+                    branch,
+                    base_sha,
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: None,
+                    failure_reason: None,
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![attempt],
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_agent_leaves_run_non_terminal() {
+        let mut env = setup_engine_env("shutdown-kill", Some(false));
+        let agent = env._tmp.path().join("fake-agent-hang");
+        write_hang_fake_agent(&agent);
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Hang for shutdown", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+
+        // Wait until an attempt has a pid.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut pid = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(rec)) = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                &task_id,
+            ) {
+                if let Some(a) = rec.runs.last().and_then(|r| r.attempts.last()) {
+                    if let Some(p) = a.pid {
+                        pid = Some(p);
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pid = pid.expect("agent pid recorded");
+        assert!(serve_dispatcher_resume::pid_alive(pid), "agent should be alive");
+
+        env.state.shutdown_dispatcher().await;
+        // Process group should be dead soon.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while serve_dispatcher_resume::pid_alive(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!serve_dispatcher_resume::pid_alive(pid), "agent killed on shutdown");
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.status, "in-progress");
+        assert_eq!(doc.frontmatter.assignee.as_deref(), Some("dispatcher"));
+        let rec = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        let run = rec.runs.last().unwrap();
+        assert!(
+            matches!(
+                run.status,
+                markplane_core::RunStatus::Running | markplane_core::RunStatus::MergeQueued
+            ),
+            "run must stay non-terminal, got {:?}",
+            run.status
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_run_shows_and_holds_no_slot() {
+        let env = setup_engine_env("interrupt-display", Some(false));
+        let task_id = add_ready_task(&env, "Interrupted display", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, false).await;
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"][0]["status"], "interrupted");
+        assert_eq!(json["data"][0]["stage"], "implement");
+
+        let (status, disp) = oneshot_json(&env.app, "GET", "/api/dispatcher").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disp["data"]["slots_used"], 0);
+    }
+
+    #[tokio::test]
+    async fn resume_preflight_not_resumable_writes_stopped() {
+        use markplane_core::UpdateFields;
+        let env = setup_engine_env("resume-not-ours", Some(false));
+        let task_id = add_ready_task(&env, "Taken over", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, true).await;
+        // Human takes the ticket.
+        let project = Project::new(env.project_dir.join(".markplane"));
+        project
+            .update_item(
+                &task_id,
+                UpdateFields {
+                    assignee: Patch::Set("chuck".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["error"]["code"], "not_resumable");
+        let rec = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.runs.last().unwrap().status, markplane_core::RunStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn resume_advances_completed_implement_to_merge() {
+        let mut env = setup_engine_env("resume-advance", Some(false));
+        let agent = env._tmp.path().join("fake-agent-resume");
+        write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Advance completed", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, true).await;
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.status, "done");
+        let rec = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        let run = rec.runs.last().unwrap();
+        assert!(
+            run.attempts.iter().any(|a| a.trigger == markplane_core::Trigger::Resume)
+                || run.attempts.iter().any(|a| a.stage == markplane_core::Stage::Merge),
+            "expected merge after resume advance"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_session_and_mismatch_then_fresh() {
+        let mut env = setup_engine_env("resume-mismatch", Some(false));
+        // Point CURSOR_CONFIG_DIR at a temp dir and plant meta.json for the session.
+        let cursor_cfg = env._tmp.path().join("cursor-cfg");
+        fs::create_dir_all(&cursor_cfg).unwrap();
+        unsafe { std::env::set_var("CURSOR_CONFIG_DIR", &cursor_cfg) };
+
+        let task_id = add_ready_task(&env, "Mismatch resume", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, false).await;
+
+        // Plant meta.json so plan chooses --resume.
+        let worktree = env.project_dir.join(".worktrees").join(&task_id);
+        let workspace = worktree.canonicalize().unwrap().display().to_string();
+        let sid = format!("sess-impl-{task_id}");
+        let meta = markplane_core::session_meta_path(&cursor_cfg, &workspace, &sid);
+        fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        fs::write(&meta, r#"{"hasConversation":true}"#).unwrap();
+
+        let agent = env._tmp.path().join("fake-agent-mismatch");
+        write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "mismatch");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+
+        let rec = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = rec.runs.last().unwrap();
+        assert!(
+            run.attempts
+                .iter()
+                .any(|a| a.result == Some(markplane_core::AttemptResult::ResumeMismatch)),
+            "expected resume_mismatch attempt: {:?}",
+            run.attempts
+        );
+        unsafe { std::env::remove_var("CURSOR_CONFIG_DIR") };
+    }
+
+    #[tokio::test]
+    async fn resume_orphan_requires_terminate_flag() {
+        // One AppState for both calls — a second serve cannot take the same lock.
+        let mut env = setup_engine_env("resume-orphan", Some(false));
+        let agent = env._tmp.path().join("fake-agent-resume");
+        write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Orphan resume", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, false).await;
+
+        // Spawn a fake orphan whose cmdline contains agent + worktree.
+        let worktree = env.project_dir.join(".worktrees").join(&task_id);
+        let wt = worktree.canonicalize().unwrap();
+        let orphan_script = env._tmp.path().join("orphan-agent.sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(
+                &orphan_script,
+                format!(
+                    "#!/usr/bin/env bash\n# agent orphan for {}\nsleep 600\n",
+                    wt.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&orphan_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut child = std::process::Command::new(&orphan_script)
+            .arg(format!("agent-worktree-{}", wt.display()))
+            .spawn()
+            .unwrap();
+        let orphan_pid = child.id();
+
+        // Patch the run record with this pid.
+        {
+            use markplane_core::{read_run_record, write_run_record};
+            let mut rec = read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                .unwrap()
+                .unwrap();
+            if let Some(run) = rec.runs.last_mut() {
+                if let Some(a) = run.attempts.last_mut() {
+                    a.pid = Some(orphan_pid);
+                    a.process_group_id = Some(orphan_pid);
+                }
+            }
+            write_run_record(&env.project_dir.join(".markplane"), &task_id, &rec).unwrap();
+        }
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["error"]["code"], "orphan_running");
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({ "terminate_orphan": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+        // terminate_orphan must have signalled the process; reap without blocking forever.
+        let _ = child.kill();
+        drop(child);
+        let _ = orphan_pid;
+    }
+
+    #[tokio::test]
+    async fn resume_all_stops_when_slots_full() {
+        let mut env = setup_engine_env("resume-all-slots", Some(false));
+        // Concurrency 1.
+        crate::commands::serve_dispatcher::write_concurrency(&env.config_dir, 1).unwrap();
+        let agent = env._tmp.path().join("fake-agent-resume");
+        write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        // Hang agent so first resume holds the only slot.
+        write_hang_fake_agent(&agent);
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let t1 = add_ready_task(&env, "Resume A", "high").await;
+        let t2 = add_ready_task(&env, "Resume B", "medium").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &t1, false).await;
+        seed_interrupted_implement(&env, &t2, false).await;
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"]["resumed"].as_array().unwrap().len(), 1);
+        assert!(json["data"]["stopped_early"].as_bool().unwrap());
+        assert_eq!(json["data"]["reason"], "no_free_slot");
+        assert!(!json["data"]["remaining"].as_array().unwrap().is_empty());
+        env.state.shutdown_dispatcher().await;
     }
 }

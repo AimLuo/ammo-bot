@@ -1,5 +1,7 @@
 //! Stage prompt templates (from `prototype/stage-prompts`).
 
+use markplane_core::Stage;
+
 /// Variables for rendering implement / fix / merge prompts.
 #[derive(Debug, Clone)]
 pub struct PromptContext {
@@ -14,6 +16,8 @@ pub struct PromptContext {
     pub author: String,
     /// Latest `**Review**` body by `agent-implement` (fix Stage); empty if none.
     pub review_comment: String,
+    /// When set, prepended as a prior-attempt note (fresh session after interrupt).
+    pub prior_attempt: String,
 }
 
 impl PromptContext {
@@ -35,6 +39,16 @@ impl PromptContext {
             .replace("{{target_branch}}", &self.target_branch)
             .replace("{{author}}", &self.author)
             .replace("{{review_comment}}", &self.review_comment)
+            .replace("{{prior_attempt}}", &self.prior_attempt)
+            .replace("{{inspect_hint}}", &self.inspect_hint())
+    }
+
+    fn inspect_hint(&self) -> String {
+        format!(
+            "run `git status` and `git log --oneline {}..HEAD` in `{}`",
+            self.base_short(),
+            self.worktree
+        )
     }
 }
 
@@ -100,6 +114,12 @@ FIX: blocked
 - `FIX: done`: every must-fix item is either fixed or declined as a false positive with a reason, the full test suite passes, and everything is committed.
 - `FIX: blocked`: at least one must-fix item couldn't be fixed, or the tests don't pass. Commit whatever you did fix and explain the rest in the report. The Dispatcher hands the ticket to a human."#;
 
+const PRIOR_HALFDONE: &str = r#"## Previous attempt (interrupted)
+
+An earlier session for this stage was interrupted (the Markplane server stopped) and couldn't be resumed, so this is a fresh session with no memory of it. Its work may still be here: {{inspect_hint}}. Look before you change anything. Keep what is correct and already committed, finish or discard half-done edits, and don't redo finished steps. It may also have posted comments as `{{author}}`; check `markplane show {{task_id}}` and don't post duplicates.
+
+"#;
+
 const CONTRACT_MERGE: &str = r#"## Finishing (required)
 
 1. Leave no trace of this merge except the merge commit. There must be no `MERGE_HEAD`, no staged or unstaged edits made by you, and no untracked files you created. Every change that was in the main working tree before you started (see step 1) must still be there, untouched.
@@ -122,8 +142,14 @@ fn stitch(parts: &[&str]) -> String {
 pub fn render_implement_prompt(ctx: &PromptContext) -> String {
     let mut ctx = ctx.clone();
     ctx.author = "agent-implement".into();
+    let prior = if ctx.prior_attempt.is_empty() {
+        String::new()
+    } else {
+        ctx.fill(PRIOR_HALFDONE)
+    };
     let body = stitch(&[
         "/implement {{task_id}}\n\n",
+        prior.as_str(),
         "You are the **implement** stage for ticket {{task_id}} \"{{title}}\". Implement it, review your own work, report the review on the ticket, and finish with the final line described under \"Finishing\".\n\n",
         "## This run\n\n",
         "- Ticket: `{{task_id}}`, issue tracker Markplane. Read it with `markplane show {{task_id}}`. Its comments and any linked plan, epic, or map are part of the spec; follow the links with `markplane show <ID>`.\n",
@@ -162,7 +188,13 @@ pub fn render_implement_prompt(ctx: &PromptContext) -> String {
 pub fn render_fix_prompt(ctx: &PromptContext) -> String {
     let mut ctx = ctx.clone();
     ctx.author = "agent-fix".into();
+    let prior = if ctx.prior_attempt.is_empty() {
+        String::new()
+    } else {
+        ctx.fill(PRIOR_HALFDONE)
+    };
     let body = stitch(&[
+        prior.as_str(),
         "You are the **fix** stage for ticket {{task_id}} \"{{title}}\". An earlier session implemented the ticket on branch `{{branch}}`, and its code review found must-fix items. Fix them, report on the ticket, and finish with the final line described under \"Finishing\". This is a new session, so you don't have the earlier conversation.\n\n",
         "## This run\n\n",
         "- Ticket: `{{task_id}}`, issue tracker Markplane. Read it with `markplane show {{task_id}}` (it is the spec), including linked plans or epics.\n",
@@ -194,11 +226,42 @@ pub fn render_fix_prompt(ctx: &PromptContext) -> String {
     ctx.fill(&body)
 }
 
+/// Short prompt when `--resume` continues an interrupted session.
+pub fn render_resume_interrupted_prompt(ctx: &PromptContext, stage: Stage) -> String {
+    let mut ctx = ctx.clone();
+    ctx.author = match stage {
+        Stage::Implement => "agent-implement".into(),
+        Stage::Fix => "agent-fix".into(),
+        Stage::Merge => "agent-merge".into(),
+    };
+    let contract = match stage {
+        Stage::Implement => CONTRACT_IMPLEMENT,
+        Stage::Fix => CONTRACT_FIX,
+        Stage::Merge => CONTRACT_MERGE,
+    };
+    let stage_name = stage.as_str();
+    let template = format!(
+        "Your previous turn in this session was interrupted before it finished. The Markplane server stopped or restarted; this isn't counted as your failure. Continue the same **{stage_name}** task for {{{{task_id}}}} from where you left off.\n\n\
+- The state is whatever you left behind: {{{{inspect_hint}}}}. Check it before doing anything. Don't redo committed work; finish or discard half-done edits.\n\
+- Re-read the ticket with `markplane show {{{{task_id}}}}`. A human may have commented since your last turn.\n\
+- Comments you already posted are still on the ticket, so don't post them again. If one is now out of date (for example, a review you've since redone), post a new comment with the same marker; the latest one counts.\n\
+- Every rule from your original instructions still applies: unattended run, boundaries, writing on the ticket.\n\n\
+{contract}\n"
+    );
+    ctx.fill(&template)
+}
+
 /// Render the merge Stage prompt.
 pub fn render_merge_prompt(ctx: &PromptContext) -> String {
     let mut ctx = ctx.clone();
     ctx.author = "agent-merge".into();
+    let prior = if ctx.prior_attempt.is_empty() {
+        String::new()
+    } else {
+        ctx.fill(PRIOR_HALFDONE)
+    };
     let body = stitch(&[
+        prior.as_str(),
         "You are the **merge** stage for ticket {{task_id}} \"{{title}}\". Merge branch `{{branch}}` into the branch currently checked out in the main working tree, and finish with the final line described under \"Finishing\".\n\n",
         "## This run\n\n",
         "- Your working directory is the main working tree `{{main_tree}}`. Its checked-out branch is the target; it was `{{target_branch}}` when this prompt was written. Merge into whatever is checked out and never switch branches.\n",
@@ -255,7 +318,17 @@ mod tests {
             target_branch: "main".into(),
             author: String::new(),
             review_comment: String::new(),
+            prior_attempt: String::new(),
         }
+    }
+
+    #[test]
+    fn resume_interrupted_prompt_has_stage_and_contract() {
+        let p = render_resume_interrupted_prompt(&ctx(), Stage::Fix);
+        assert!(p.contains("**fix**"));
+        assert!(p.contains("FIX: done"));
+        assert!(p.contains("TASK-abc12"));
+        assert!(p.contains("interrupted"));
     }
 
     #[test]

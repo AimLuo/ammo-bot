@@ -262,6 +262,20 @@ export interface RunSummary {
   model?: string | null;
   timeout_secs?: number | null;
   stage_attempt_count?: number | null;
+  /** Live orphan agent PID when the last attempt's process is still running. */
+  orphan_pid?: number | null;
+}
+
+export interface ResumeOneResponse {
+  task_id: string;
+  status: string;
+}
+
+export interface ResumeAllResponse {
+  resumed: string[];
+  remaining: string[];
+  stopped_early: boolean;
+  reason?: string | null;
 }
 
 export type TranscriptBlock =

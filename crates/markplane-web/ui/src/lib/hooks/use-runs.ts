@@ -1,10 +1,17 @@
 "use client";
 
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiPath } from "@/lib/project-prefix";
 import { throwIfNotOk } from "@/lib/api-error";
-import type { RunRecord, RunSummary } from "@/lib/types";
+import { postJson } from "@/lib/api";
+import { toast } from "sonner";
+import type {
+  ResumeAllResponse,
+  ResumeOneResponse,
+  RunRecord,
+  RunSummary,
+} from "@/lib/types";
 
 const API_BASE = typeof window !== "undefined" ? "" : "http://localhost:4200";
 
@@ -63,4 +70,56 @@ export function useRunSummaryMap() {
     return m;
   }, [query.data]);
   return { ...query, map };
+}
+
+/** Interrupted Runs in the current Project (for "Resume N interrupted"). */
+export function useInterruptedCount() {
+  const { data } = useRunSummaries();
+  return useMemo(
+    () => (data ?? []).filter((r) => r.status === "interrupted").length,
+    [data]
+  );
+}
+
+export function useResumeRun(taskId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (terminateOrphan?: boolean) =>
+      postJson<ResumeOneResponse>(`/api/runs/${taskId}/resume`, {
+        terminate_orphan: !!terminateOrphan,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      void qc.invalidateQueries({ queryKey: ["runs", taskId] });
+      void qc.invalidateQueries({ queryKey: ["dispatcher"] });
+      toast.success(`Resumed ${taskId}`);
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || "Resume failed");
+    },
+  });
+}
+
+export function useResumeAllInterrupted() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      postJson<ResumeAllResponse>("/api/runs/resume", {}),
+    onSuccess: (data) => {
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      void qc.invalidateQueries({ queryKey: ["dispatcher"] });
+      const n = data.resumed.length;
+      const left = data.remaining.length;
+      if (data.stopped_early) {
+        toast.message(
+          `Resumed ${n}; ${left} still interrupted (no free slot)`
+        );
+      } else {
+        toast.success(`Resumed ${n} interrupted run${n === 1 ? "" : "s"}`);
+      }
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || "Resume failed");
+    },
+  });
 }

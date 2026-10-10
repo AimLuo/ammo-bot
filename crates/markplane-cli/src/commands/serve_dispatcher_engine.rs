@@ -26,6 +26,10 @@ use tokio::sync::{Mutex, broadcast};
 
 use super::serve_dispatcher_handoff::{self, ticket_still_ours};
 use super::serve_dispatcher_prompts::{self, PromptContext};
+use super::serve_dispatcher_resume::{
+    ResumePlan, SHUTDOWN_KILL_GRACE, current_agent_config_dir, kill_process_group, plan_resume,
+    run_orphan_pid, terminate_orphan_attempt,
+};
 
 /// Scan interval when Scan switch is on.
 pub const SCAN_INTERVAL: Duration = Duration::from_secs(15);
@@ -33,7 +37,7 @@ pub const SCAN_INTERVAL: Duration = Duration::from_secs(15);
 /// Consecutive Stage ends without `system/init` before Scan auto-closes.
 pub const STARTUP_FAIL_THRESHOLD: u32 = 3;
 
-/// How long to wait after SIGTERM before SIGKILL.
+/// How long to wait after SIGTERM before SIGKILL on Stage timeout.
 const KILL_GRACE: Duration = Duration::from_secs(10);
 
 /// Per-serve bookkeeping for Scan auto-close (startup fail + lock lost).
@@ -149,6 +153,10 @@ pub struct EngineState {
     rr_start: usize,
     /// Fan-out targets for `dispatcher_changed` (refreshed each tick / by serve).
     pub dispatcher_channels: Vec<broadcast::Sender<String>>,
+    /// Set on SIGINT/SIGTERM: stop new pickups; in-flight agents are killed.
+    pub pickup_stopped: bool,
+    /// Live agent process-group ids (task_id → pgid) for serve shutdown.
+    pub live_agents: HashMap<String, u32>,
 }
 
 impl EngineState {
@@ -200,11 +208,27 @@ struct MergeQueueInner {
 
 impl MergeQueue {
     async fn enter(&self, task_id: &str) -> MergePermit<'_> {
+        self.enter_with_front(task_id, false).await
+    }
+
+    async fn enter_front(&self, task_id: &str) -> MergePermit<'_> {
+        self.enter_with_front(task_id, true).await
+    }
+
+    async fn enter_with_front(&self, task_id: &str, front: bool) -> MergePermit<'_> {
         loop {
             {
                 let mut g = self.inner.lock().await;
                 if !g.waiters.iter().any(|t| t == task_id) {
-                    g.waiters.push_back(task_id.to_string());
+                    if front {
+                        g.waiters.push_front(task_id.to_string());
+                    } else {
+                        g.waiters.push_back(task_id.to_string());
+                    }
+                } else if front {
+                    // Move existing waiter to the front.
+                    g.waiters.retain(|t| t != task_id);
+                    g.waiters.push_front(task_id.to_string());
                 }
                 if g.waiters.front().map(|s| s.as_str()) == Some(task_id) && !g.busy {
                     g.busy = true;
@@ -260,8 +284,32 @@ pub struct ProjectTickInput {
     pub auto_close_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
 }
 
+/// Stop pickups and SIGTERM/SIGKILL every live agent process group (5s grace).
+///
+/// Does not write tickets or finalize Run records — callers leave them non-terminal.
+pub async fn shutdown_agents(engine: Arc<Mutex<EngineState>>) {
+    let pgids: Vec<u32> = {
+        let mut g = engine.lock().await;
+        g.pickup_stopped = true;
+        g.live_agents.values().copied().collect()
+    };
+    if pgids.is_empty() {
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        for pgid in pgids {
+            kill_process_group(pgid, SHUTDOWN_KILL_GRACE);
+        }
+    })
+    .await
+    .ok();
+}
+
 /// Explicit scan tick (tests call this; production uses a 15s interval).
 pub async fn dispatcher_tick(engine: Arc<Mutex<EngineState>>, mut projects: Vec<ProjectTickInput>) {
+    if engine.lock().await.pickup_stopped {
+        return;
+    }
     projects.retain(|p| p.scan_on);
     if projects.is_empty() {
         return;
@@ -293,6 +341,19 @@ pub async fn dispatcher_tick(engine: Arc<Mutex<EngineState>>, mut projects: Vec<
             let available: Vec<String> = ids
                 .into_iter()
                 .filter(|id| !g.in_flight.contains(id) && !g.active_slots.contains_key(id))
+                .filter(|id| {
+                    // Skip tickets whose previous agent orphan is still alive.
+                    match read_run_record(proj.project.root(), id) {
+                        Ok(Some(rec)) => {
+                            if let Some(run) = rec.runs.last() {
+                                run_orphan_pid(run).is_none()
+                            } else {
+                                true
+                            }
+                        }
+                        _ => true,
+                    }
+                })
                 .collect();
             queues.push(available);
         }
@@ -477,6 +538,7 @@ async fn run_pipeline(
         target_branch: base_branch.clone(),
         author: String::new(),
         review_comment: String::new(),
+        prior_attempt: String::new(),
     };
 
     // ── implement (silent-stop check at Stage boundary) ──
@@ -514,8 +576,12 @@ async fn run_pipeline(
         &worktree,
         &impl_prompt,
         "agent-implement",
+        AgentRunOpts::default(),
     )
     .await?;
+    if impl_result.interrupted_by_shutdown {
+        return Ok(());
+    }
 
     // After a Stage ends: if human took over mid-Stage, stop without ticket writes.
     if !ticket_still_ours(&proj.project, task_id)? {
@@ -600,8 +666,12 @@ async fn run_pipeline(
             &worktree,
             &fix_prompt,
             "agent-fix",
+            AgentRunOpts::default(),
         )
         .await?;
+        if fix_result.interrupted_by_shutdown {
+            return Ok(());
+        }
 
         if !ticket_still_ours(&proj.project, task_id)? {
             {
@@ -710,8 +780,12 @@ async fn run_pipeline(
         &proj.project_dir,
         &merge_prompt,
         "agent-merge",
+        AgentRunOpts::default(),
     )
     .await?;
+    if merge_result.interrupted_by_shutdown {
+        return Ok(());
+    }
 
     if !ticket_still_ours(&proj.project, task_id)? {
         let _ = abort_our_incomplete_merge(&proj.project_dir, &branch);
@@ -804,10 +878,31 @@ fn stage_agent_failure_reason(stage: Stage, outcome: &AgentOutcome) -> Option<St
 struct AgentOutcome {
     succeeded: bool,
     timed_out: bool,
+    /// Serve shut down while the agent was running — leave Run non-terminal.
+    interrupted_by_shutdown: bool,
+    /// `--resume` spawned a different session_id; caller should start fresh.
+    resume_mismatch: bool,
     exit_code: Option<i32>,
     verdict: Option<String>,
     failure_reason: Option<String>,
     saw_init: bool,
+}
+
+struct AgentRunOpts<'a> {
+    trigger: Trigger,
+    resume_session_id: Option<&'a str>,
+    /// Expected session id when resuming (for mismatch detection).
+    expect_session_id: Option<&'a str>,
+}
+
+impl Default for AgentRunOpts<'_> {
+    fn default() -> Self {
+        Self {
+            trigger: Trigger::Initial,
+            resume_session_id: None,
+            expect_session_id: None,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -823,6 +918,7 @@ async fn run_agent(
     cwd: &Path,
     prompt: &str,
     author: &str,
+    opts: AgentRunOpts<'_>,
 ) -> Result<AgentOutcome, String> {
     let workspace = cwd
         .canonicalize()
@@ -833,6 +929,7 @@ async fn run_agent(
         .test_timeout_secs
         .unwrap_or_else(|| (timeout_minutes as u64).saturating_mul(60));
     let started_at = Utc::now().to_rfc3339();
+    let config_dir = current_agent_config_dir();
     let mut attempt = Attempt {
         stage,
         model: model.to_string(),
@@ -842,8 +939,8 @@ async fn run_agent(
         transcript_path: None,
         pid: None,
         process_group_id: None,
-        agent_config_dir: None,
-        trigger: Trigger::Initial,
+        agent_config_dir: Some(config_dir),
+        trigger: opts.trigger,
         started_at,
         ended_at: None,
         exit_code: None,
@@ -863,27 +960,28 @@ async fn run_agent(
         .unwrap_or_else(|_| proj.project_dir.clone());
 
     let mut cmd = Command::new(&proj.agent_bin);
-    cmd.args([
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--trust",
-        "--force",
-        "--approve-mcps",
-        "--sandbox",
-        "disabled",
-        "--workspace",
-        &workspace,
-        "--model",
-        model,
-        prompt,
-    ])
-    .current_dir(cwd)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .env("MARKPLANE_ROOT", &main_root)
-    .env("MARKPLANE_AUTHOR", author);
+    cmd.arg("-p")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--trust")
+        .arg("--force")
+        .arg("--approve-mcps")
+        .arg("--sandbox")
+        .arg("disabled")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--model")
+        .arg(model);
+    if let Some(sid) = opts.resume_session_id {
+        cmd.arg("--resume").arg(sid);
+    }
+    cmd.arg(prompt)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("MARKPLANE_ROOT", &main_root)
+        .env("MARKPLANE_AUTHOR", author);
 
     #[cfg(unix)]
     {
@@ -906,6 +1004,10 @@ async fn run_agent(
     if let Some(a) = run.attempts.last_mut() {
         a.pid = Some(pid);
         a.process_group_id = Some(pid);
+    }
+    {
+        let mut g = engine.lock().await;
+        g.live_agents.insert(task_id.to_string(), pid);
     }
     update_latest_run(record, run);
     persist_run(engine, proj, task_id, record, run, false).await?;
@@ -1020,9 +1122,17 @@ async fn run_agent(
         }
     });
 
-    // Persist session_id as it arrives; poll until the blocking wait finishes.
+    // Persist session_id as it arrives; detect resume_mismatch early.
+    let mut resume_mismatch = false;
+    let expect_sid = opts.expect_session_id.map(str::to_string);
     let status = loop {
         while let Ok(sid) = sid_rx.try_recv() {
+            if let Some(expected) = expect_sid.as_deref()
+                && sid != expected
+            {
+                resume_mismatch = true;
+                kill_process_group(pid, Duration::from_secs(1));
+            }
             if let Some(a) = run.attempts.last_mut()
                 && a.session_id.is_none()
             {
@@ -1041,6 +1151,63 @@ async fn run_agent(
     };
 
     cancel_watchdog.store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut g = engine.lock().await;
+        g.live_agents.remove(task_id);
+    }
+    let shutdown = engine.lock().await.pickup_stopped;
+
+    if resume_mismatch {
+        let _ = reader_handle.await;
+        let stderr_tail = stderr_handle.await.unwrap_or_default();
+        if let Some(a) = run.attempts.last_mut() {
+            a.ended_at = Some(Utc::now().to_rfc3339());
+            a.result = Some(AttemptResult::ResumeMismatch);
+            a.exit_code = status.code();
+            a.stderr_tail = Some(stderr_tail);
+        }
+        update_latest_run(record, run);
+        persist_run(engine, proj, task_id, record, run, false).await?;
+        return Ok(AgentOutcome {
+            succeeded: false,
+            timed_out: false,
+            interrupted_by_shutdown: false,
+            resume_mismatch: true,
+            exit_code: status.code(),
+            verdict: None,
+            failure_reason: Some("resume_mismatch".into()),
+            saw_init: true,
+        });
+    }
+
+    if shutdown {
+        // Leave Run non-terminal; mark the open attempt interrupted for audit.
+        let _ = reader_handle.await;
+        let stderr_tail = stderr_handle.await.unwrap_or_default();
+        if let Some(a) = run.attempts.last_mut() {
+            a.ended_at = Some(Utc::now().to_rfc3339());
+            a.result = Some(AttemptResult::Interrupted);
+            a.exit_code = status.code();
+            a.stderr_tail = Some(stderr_tail);
+        }
+        // Keep run.status non-terminal (Running / MergeQueued).
+        update_latest_run(record, run);
+        persist_run(engine, proj, task_id, record, run, false).await?;
+        return Ok(AgentOutcome {
+            succeeded: false,
+            timed_out: false,
+            interrupted_by_shutdown: true,
+            resume_mismatch: false,
+            exit_code: status.code(),
+            verdict: None,
+            failure_reason: None,
+            saw_init: run
+                .attempts
+                .last()
+                .and_then(|a| a.session_id.as_ref())
+                .is_some(),
+        });
+    }
 
     if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
         let _ = reader_handle.await;
@@ -1061,6 +1228,8 @@ async fn run_agent(
         let outcome = AgentOutcome {
             succeeded: false,
             timed_out: true,
+            interrupted_by_shutdown: false,
+            resume_mismatch: false,
             exit_code: Some(-1),
             verdict: None,
             failure_reason: Some(format!("{} stage timeout", stage.as_str())),
@@ -1117,6 +1286,8 @@ async fn run_agent(
     let outcome = AgentOutcome {
         succeeded,
         timed_out: false,
+        interrupted_by_shutdown: false,
+        resume_mismatch: false,
         exit_code: Some(exit_code),
         verdict,
         failure_reason,
@@ -1544,3 +1715,720 @@ fn with_abort_note(project_dir: &Path, branch: &str, reason: String) -> String {
     }
 }
 
+
+/// Errors from [`resume_run`] mapped to HTTP 409 by serve.
+#[derive(Debug)]
+pub enum ResumeError {
+    OrphanRunning { pid: u32 },
+    NoFreeSlot,
+    NotResumable,
+    Internal(String),
+}
+
+impl std::fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OrphanRunning { pid } => {
+                write!(f, "previous agent process still running (pid {pid})")
+            }
+            Self::NoFreeSlot => write!(f, "no free dispatcher slot"),
+            Self::NotResumable => write!(f, "run is not resumable"),
+            Self::Internal(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+/// Claim a Slot and resume an interrupted Run (does not open Scan).
+pub async fn resume_run(
+    engine: Arc<Mutex<EngineState>>,
+    proj: ProjectTickInput,
+    task_id: String,
+    terminate_orphan: bool,
+) -> Result<(), ResumeError> {
+    // Orphan check before claiming the Slot.
+    {
+        let record = read_run_record(proj.project.root(), &task_id)
+            .map_err(|e| ResumeError::Internal(e.to_string()))?
+            .ok_or(ResumeError::NotResumable)?;
+        let run = record.runs.last().ok_or(ResumeError::NotResumable)?;
+        if !matches!(run.status, RunStatus::Running | RunStatus::MergeQueued) {
+            return Err(ResumeError::NotResumable);
+        }
+        if let Some(pid) = run_orphan_pid(run) {
+            if !terminate_orphan {
+                return Err(ResumeError::OrphanRunning { pid });
+            }
+            if let Some(last) = run.attempts.last().cloned() {
+                tokio::task::spawn_blocking(move || terminate_orphan_attempt(&last))
+                    .await
+                    .map_err(|e| ResumeError::Internal(e.to_string()))?;
+            }
+        }
+    }
+
+    if !claim_slot(engine.clone(), &proj, &task_id).await {
+        return Err(ResumeError::NoFreeSlot);
+    }
+    engine.lock().await.broadcast_dispatcher_changed();
+
+    let engine_bg = engine.clone();
+    let task_id_bg = task_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = resume_pipeline(engine_bg.clone(), &proj, &task_id_bg).await {
+            eprintln!("dispatcher: resume {task_id_bg} error: {e}");
+            let _ = fail_run_internal(
+                &engine_bg,
+                &proj,
+                &task_id_bg,
+                &format!("internal error: {e}"),
+            )
+            .await;
+        }
+        let mut g = engine_bg.lock().await;
+        g.active_slots.remove(&task_id_bg);
+        g.in_flight.remove(&task_id_bg);
+        g.broadcast_dispatcher_changed();
+    });
+    Ok(())
+}
+
+async fn resume_pipeline(
+    engine: Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+) -> Result<(), String> {
+    let mut record = read_run_record(proj.project.root(), task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no run record".to_string())?;
+    let mut run = record
+        .runs
+        .last()
+        .cloned()
+        .ok_or_else(|| "empty run record".to_string())?;
+
+    if !matches!(run.status, RunStatus::Running | RunStatus::MergeQueued) {
+        return Err("run is not interrupted".into());
+    }
+
+    // Worktree / branch must still exist.
+    let worktree = PathBuf::from(&run.worktree);
+    let branch = run.branch.clone();
+    if !worktree_and_branch_ok(&proj.project_dir, &worktree, &branch) {
+        let stage = run.current_stage.unwrap_or(Stage::Implement);
+        return fail_and_finish(
+            &engine,
+            proj,
+            task_id,
+            &mut record,
+            &mut run,
+            stage,
+            "worktree missing".into(),
+        )
+        .await
+        .map(|_| ());
+    }
+
+    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let title = doc.frontmatter.title.clone();
+    let git_dir = git_dir_realpath(&proj.project_dir)?;
+    let ctx = PromptContext {
+        task_id: task_id.to_string(),
+        title,
+        worktree: run.worktree.clone(),
+        branch: branch.clone(),
+        base_branch: run.merge_target.clone(),
+        base_sha: run.base_sha.clone(),
+        main_tree: proj.project_dir.display().to_string(),
+        target_branch: run.merge_target.clone(),
+        author: String::new(),
+        review_comment: String::new(),
+        prior_attempt: String::new(),
+    };
+
+    let config_dir = markplane_core::agent_config_dir();
+    let mut plan = plan_resume(&run, &config_dir)?;
+
+    // Mid-merge: if branch already landed, finish; else requeue at front.
+    if matches!(plan, ResumePlan::RequeueMerge { front: true })
+        && branch_is_ancestor(&proj.project_dir, &branch)?
+    {
+        plan = ResumePlan::FinishMergeSuccess;
+    }
+
+    match plan {
+        ResumePlan::FinishMergeSuccess => {
+            let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+            let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
+            run.status = RunStatus::Running;
+            run.current_stage = Some(Stage::Merge);
+            update_latest_run(&mut record, &run);
+            persist_run(&engine, proj, task_id, &record, &run, true).await?;
+            success_close(
+                &engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &target,
+                &merge_sha,
+            )
+            .await
+        }
+        ResumePlan::AdvanceCompleted { stage } => {
+            advance_from_completed(
+                engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &worktree,
+                &branch,
+                &git_dir,
+                stage,
+            )
+            .await
+        }
+        ResumePlan::RequeueMerge { front } => {
+            run_merge_from_queue(
+                engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &branch,
+                &git_dir,
+                front,
+                /*resume_agent*/ true,
+            )
+            .await
+        }
+        ResumePlan::RunAgent {
+            stage,
+            resume_session_id,
+            interrupted_fresh,
+        } => {
+            run.status = RunStatus::Running;
+            run.current_stage = Some(stage);
+            run.ended_at = None;
+            run.failure_reason = None;
+            update_latest_run(&mut record, &run);
+            persist_run(&engine, proj, task_id, &record, &run, true).await?;
+
+            let outcome = run_stage_agent(
+                &engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &worktree,
+                stage,
+                resume_session_id.as_deref(),
+                interrupted_fresh,
+            )
+            .await?;
+            if outcome.interrupted_by_shutdown {
+                return Ok(());
+            }
+            if outcome.resume_mismatch {
+                // Fresh session for the same Stage.
+                let outcome2 = run_stage_agent(
+                    &engine,
+                    proj,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                    &ctx,
+                    &worktree,
+                    stage,
+                    None,
+                    true,
+                )
+                .await?;
+                if outcome2.interrupted_by_shutdown {
+                    return Ok(());
+                }
+                return after_stage_agent(
+                    engine,
+                    proj,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                    &ctx,
+                    &worktree,
+                    &branch,
+                    &git_dir,
+                    stage,
+                    &outcome2,
+                )
+                .await;
+            }
+            after_stage_agent(
+                engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &worktree,
+                &branch,
+                &git_dir,
+                stage,
+                &outcome,
+            )
+            .await
+        }
+    }
+}
+
+fn worktree_and_branch_ok(project_dir: &Path, worktree: &Path, branch: &str) -> bool {
+    if !worktree.is_dir() {
+        return false;
+    }
+    Command::new("git")
+        .arg("-C")
+        .arg(project_dir)
+        .args(["rev-parse", "--verify", branch])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_stage_agent(
+    engine: &Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+    record: &mut RunRecord,
+    run: &mut Run,
+    ctx: &PromptContext,
+    worktree: &Path,
+    stage: Stage,
+    resume_session_id: Option<&str>,
+    interrupted_fresh: bool,
+) -> Result<AgentOutcome, String> {
+    let mut ctx = ctx.clone();
+    if interrupted_fresh && resume_session_id.is_none() {
+        ctx.prior_attempt = "interrupted".into();
+    }
+    let (model, timeout, author, prompt, cwd) = match stage {
+        Stage::Implement => {
+            let s = proj.settings.stages.implement.clone();
+            let prompt = if let Some(_sid) = resume_session_id {
+                serve_dispatcher_prompts::render_resume_interrupted_prompt(&ctx, stage)
+            } else {
+                serve_dispatcher_prompts::render_implement_prompt(&ctx)
+            };
+            (
+                s.model,
+                s.timeout_minutes,
+                "agent-implement",
+                prompt,
+                worktree.to_path_buf(),
+            )
+        }
+        Stage::Fix => {
+            let s = proj.settings.stages.fix.clone();
+            let review = {
+                let doc: MarkplaneDocument<Task> =
+                    proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+                latest_agent_implement_review(&doc.body).unwrap_or_default()
+            };
+            ctx.review_comment = review;
+            let prompt = if resume_session_id.is_some() {
+                serve_dispatcher_prompts::render_resume_interrupted_prompt(&ctx, stage)
+            } else {
+                serve_dispatcher_prompts::render_fix_prompt(&ctx)
+            };
+            (
+                s.model,
+                s.timeout_minutes,
+                "agent-fix",
+                prompt,
+                worktree.to_path_buf(),
+            )
+        }
+        Stage::Merge => {
+            let s = proj.settings.stages.merge.clone();
+            let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+            ctx.target_branch = target;
+            let prompt = if resume_session_id.is_some() {
+                serve_dispatcher_prompts::render_resume_interrupted_prompt(&ctx, stage)
+            } else {
+                serve_dispatcher_prompts::render_merge_prompt(&ctx)
+            };
+            (
+                s.model,
+                s.timeout_minutes,
+                "agent-merge",
+                prompt,
+                proj.project_dir.clone(),
+            )
+        }
+    };
+
+    let opts = AgentRunOpts {
+        trigger: Trigger::Resume,
+        resume_session_id,
+        expect_session_id: resume_session_id,
+    };
+    run_agent(
+        engine,
+        proj,
+        task_id,
+        record,
+        run,
+        stage,
+        &model,
+        timeout,
+        &cwd,
+        &prompt,
+        author,
+        opts,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn after_stage_agent(
+    engine: Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+    record: &mut RunRecord,
+    run: &mut Run,
+    ctx: &PromptContext,
+    worktree: &Path,
+    branch: &str,
+    git_dir: &Path,
+    stage: Stage,
+    outcome: &AgentOutcome,
+) -> Result<(), String> {
+    if !ticket_still_ours(&proj.project, task_id)? {
+        serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            record,
+            run,
+        )
+        .await?;
+        engine.lock().await.broadcast_dispatcher_changed();
+        return Ok(());
+    }
+    if let Some(reason) = stage_agent_failure_reason(stage, outcome) {
+        return fail_and_finish(&engine, proj, task_id, record, run, stage, reason).await;
+    }
+    advance_from_completed(
+        engine, proj, task_id, record, run, ctx, worktree, branch, git_dir, stage,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn advance_from_completed(
+    engine: Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+    record: &mut RunRecord,
+    run: &mut Run,
+    ctx: &PromptContext,
+    worktree: &Path,
+    branch: &str,
+    git_dir: &Path,
+    stage: Stage,
+) -> Result<(), String> {
+    match stage {
+        Stage::Implement => {
+            let verdict_line = run
+                .attempts
+                .iter()
+                .rev()
+                .find(|a| a.stage == Stage::Implement && a.result == Some(AttemptResult::Ok))
+                .and_then(|a| a.verdict.clone());
+            let impl_verdict = classify_implement_verdict(verdict_line.as_deref());
+            if let Some(reason) = implement_verdict_failure_reason(&impl_verdict) {
+                return fail_and_finish(
+                    &engine,
+                    proj,
+                    task_id,
+                    record,
+                    run,
+                    Stage::Implement,
+                    reason,
+                )
+                .await;
+            }
+            if !branch_has_new_commits(&proj.project_dir, &run.base_sha, branch)? {
+                return fail_and_finish(
+                    &engine,
+                    proj,
+                    task_id,
+                    record,
+                    run,
+                    Stage::Implement,
+                    "implement produced no new commits".into(),
+                )
+                .await;
+            }
+            if impl_verdict == ImplementVerdict::Issues {
+                // Need a fix Stage if none completed.
+                let fix_done = run.attempts.iter().any(|a| {
+                    a.stage == Stage::Fix
+                        && a.result == Some(AttemptResult::Ok)
+                        && is_fix_done(a.verdict.as_deref())
+                });
+                if !fix_done {
+                    run.status = RunStatus::Running;
+                    run.current_stage = Some(Stage::Fix);
+                    update_latest_run(record, run);
+                    persist_run(&engine, proj, task_id, record, run, true).await?;
+                    let outcome = run_stage_agent(
+                        &engine,
+                        proj,
+                        task_id,
+                        record,
+                        run,
+                        ctx,
+                        worktree,
+                        Stage::Fix,
+                        None,
+                        false,
+                    )
+                    .await?;
+                    if outcome.interrupted_by_shutdown {
+                        return Ok(());
+                    }
+                    if let Some(reason) = stage_agent_failure_reason(Stage::Fix, &outcome) {
+                        return fail_and_finish(
+                            &engine, proj, task_id, record, run, Stage::Fix, reason,
+                        )
+                        .await;
+                    }
+                    if !is_fix_done(outcome.verdict.as_deref()) {
+                        let line = outcome.verdict.as_deref().unwrap_or("<none>");
+                        return fail_and_finish(
+                            &engine,
+                            proj,
+                            task_id,
+                            record,
+                            run,
+                            Stage::Fix,
+                            format!("fix ended without FIX: done (got {line})"),
+                        )
+                        .await;
+                    }
+                }
+            }
+            run_merge_from_queue(
+                engine, proj, task_id, record, run, ctx, branch, git_dir, false, true,
+            )
+            .await
+        }
+        Stage::Fix => {
+            let ok = run
+                .attempts
+                .iter()
+                .rev()
+                .find(|a| a.stage == Stage::Fix && a.result == Some(AttemptResult::Ok))
+                .map(|a| is_fix_done(a.verdict.as_deref()))
+                .unwrap_or(false);
+            if !ok {
+                let line = run
+                    .attempts
+                    .iter()
+                    .rev()
+                    .find(|a| a.stage == Stage::Fix)
+                    .and_then(|a| a.verdict.clone())
+                    .unwrap_or_else(|| "<none>".into());
+                return fail_and_finish(
+                    &engine,
+                    proj,
+                    task_id,
+                    record,
+                    run,
+                    Stage::Fix,
+                    format!("fix ended without FIX: done (got {line})"),
+                )
+                .await;
+            }
+            run_merge_from_queue(
+                engine, proj, task_id, record, run, ctx, branch, git_dir, false, true,
+            )
+            .await
+        }
+        Stage::Merge => {
+            if branch_is_ancestor(&proj.project_dir, branch)? {
+                let target =
+                    git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
+                success_close(
+                    &engine, proj, task_id, record, run, &target, &merge_sha,
+                )
+                .await
+            } else {
+                run_merge_from_queue(
+                    engine, proj, task_id, record, run, ctx, branch, git_dir, true, true,
+                )
+                .await
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_merge_from_queue(
+    engine: Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+    record: &mut RunRecord,
+    run: &mut Run,
+    ctx: &PromptContext,
+    branch: &str,
+    git_dir: &Path,
+    front: bool,
+    run_agent_if_needed: bool,
+) -> Result<(), String> {
+    run.status = RunStatus::MergeQueued;
+    run.current_stage = Some(Stage::Merge);
+    update_latest_run(record, run);
+    persist_run(&engine, proj, task_id, record, run, true).await?;
+
+    let queue = {
+        let mut g = engine.lock().await;
+        g.merge_queue(git_dir.to_path_buf())
+    };
+    let _permit = if front {
+        queue.enter_front(task_id).await
+    } else {
+        queue.enter(task_id).await
+    };
+    engine.lock().await.broadcast_dispatcher_changed();
+
+    let merge_lock = acquire_merge_file_lock(
+        git_dir,
+        &MergeLockHolder {
+            pid: std::process::id(),
+            hostname: super::serve_dispatcher_lock::local_hostname(),
+            serve_url: proj.serve_url.clone(),
+            project_path: proj.project_dir.display().to_string(),
+            task_id: task_id.to_string(),
+            acquired_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .await?;
+    let _merge_guard = MergeCriticalGuard {
+        _lock: merge_lock,
+        project_dir: proj.project_dir.clone(),
+        branch: branch.to_string(),
+    };
+
+    if !ticket_still_ours(&proj.project, task_id)? {
+        serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            record,
+            run,
+        )
+        .await?;
+        engine.lock().await.broadcast_dispatcher_changed();
+        return Ok(());
+    }
+
+    if branch_is_ancestor(&proj.project_dir, branch)? {
+        let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
+        return success_close(
+            &engine, proj, task_id, record, run, &target, &merge_sha,
+        )
+        .await;
+    }
+
+    // Abort residual merge from a prior interrupted merge Stage.
+    let _ = abort_our_incomplete_merge(&proj.project_dir, branch);
+
+    if !run_agent_if_needed {
+        return Ok(());
+    }
+
+    let target_branch = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    run.merge_target = target_branch.clone();
+    run.status = RunStatus::Running;
+    run.current_stage = Some(Stage::Merge);
+    update_latest_run(record, run);
+    persist_run(&engine, proj, task_id, record, run, true).await?;
+
+    let mut merge_ctx = ctx.clone();
+    merge_ctx.target_branch = target_branch.clone();
+    let merge_settings = proj.settings.stages.merge.clone();
+    let merge_prompt = serve_dispatcher_prompts::render_merge_prompt(&merge_ctx);
+    let merge_result = run_agent(
+        &engine,
+        proj,
+        task_id,
+        record,
+        run,
+        Stage::Merge,
+        &merge_settings.model,
+        merge_settings.timeout_minutes,
+        &proj.project_dir,
+        &merge_prompt,
+        "agent-merge",
+        AgentRunOpts {
+            trigger: Trigger::Resume,
+            resume_session_id: None,
+            expect_session_id: None,
+        },
+    )
+    .await?;
+    if merge_result.interrupted_by_shutdown {
+        return Ok(());
+    }
+    if !ticket_still_ours(&proj.project, task_id)? {
+        let _ = abort_our_incomplete_merge(&proj.project_dir, branch);
+        serve_dispatcher_handoff::silent_stop(
+            &proj.project,
+            &proj.ws_tx,
+            task_id,
+            record,
+            run,
+        )
+        .await?;
+        engine.lock().await.broadcast_dispatcher_changed();
+        return Ok(());
+    }
+    if let Some(reason) = stage_agent_failure_reason(Stage::Merge, &merge_result) {
+        let reason = with_abort_note(&proj.project_dir, branch, reason);
+        return fail_and_finish(&engine, proj, task_id, record, run, Stage::Merge, reason).await;
+    }
+    if !is_merge_done(merge_result.verdict.as_deref()) {
+        let line = merge_result.verdict.as_deref().unwrap_or("<none>");
+        let reason = with_abort_note(
+            &proj.project_dir,
+            branch,
+            format!("merge ended without MERGE: done (got {line})"),
+        );
+        return fail_and_finish(&engine, proj, task_id, record, run, Stage::Merge, reason).await;
+    }
+    if !branch_is_ancestor(&proj.project_dir, branch)? {
+        let reason = with_abort_note(
+            &proj.project_dir,
+            branch,
+            "merge target does not contain agent branch".into(),
+        );
+        return fail_and_finish(&engine, proj, task_id, record, run, Stage::Merge, reason).await;
+    }
+    let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
+    success_close(
+        &engine,
+        proj,
+        task_id,
+        record,
+        run,
+        &target_branch,
+        &merge_sha,
+    )
+    .await
+}

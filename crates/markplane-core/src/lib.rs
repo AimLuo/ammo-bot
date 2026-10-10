@@ -1,3 +1,4 @@
+pub mod agent_session;
 pub mod agent_stream;
 pub mod comments;
 pub mod context;
@@ -19,6 +20,9 @@ pub mod stage_verdict;
 pub mod templates;
 pub mod transcripts;
 
+pub use agent_session::{
+    agent_config_dir, session_meta_exists, session_meta_path, workspace_chat_slug,
+};
 pub use agent_stream::{
     StreamEvent, agent_invocation_succeeded, last_nonempty_line, parse_stream_json_line,
     session_id_from_events, usage_from_events, verdict_from_events,
@@ -65,7 +69,7 @@ pub use references::{
 pub use runs::{
     Attempt, AttemptResult, Run, RunMemoryPresence, RunRecord, RunStatus, RunSummary, STAGE_ORDER,
     Stage, Trigger, Usage, ensure_runs_dir, list_run_records, read_run_record, run_display_status,
-    run_record_path, run_summary, stage_started_at, write_run_record,
+    run_record_path, run_summary, run_summary_with_orphan, stage_started_at, write_run_record,
 };
 pub use transcripts::{
     SessionTranscript, TranscriptBlock, TranscriptMessage, cursor_data_dir,

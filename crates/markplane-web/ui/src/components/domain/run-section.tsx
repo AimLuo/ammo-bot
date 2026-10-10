@@ -11,12 +11,17 @@ import {
   Copy,
   LoaderCircle,
   Minus,
+  Play,
   ScrollText,
   TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { RunBadge } from "@/components/domain/run-badge";
-import { useRunRecord, useRunSummaryMap } from "@/lib/hooks/use-runs";
+import {
+  useResumeRun,
+  useRunRecord,
+  useRunSummaryMap,
+} from "@/lib/hooks/use-runs";
 import { useConfig } from "@/lib/hooks/use-config";
 import { cn } from "@/lib/utils";
 import {
@@ -48,7 +53,7 @@ import { SessionLogModal } from "./session-log-modal";
 /**
  * Full Run section for the Task detail panel (TASK-d7i23).
  * Shown when this machine has a Run record, or when assignee is `dispatcher`
- * with no local record (grey hint). Action slot: View sessions only for now.
+ * with no local record (grey hint). Actions: View sessions, Resume (interrupted).
  */
 export function RunSection({
   taskId,
@@ -119,6 +124,42 @@ function ViewSessionsButton({ onClick }: { onClick: () => void }) {
     >
       <ScrollText className="size-3.5" />
       View sessions
+    </Button>
+  );
+}
+
+function ResumeRunButton({
+  taskId,
+  displayStatus,
+  orphanPid,
+}: {
+  taskId: string;
+  displayStatus?: string;
+  orphanPid?: number | null;
+}) {
+  const resume = useResumeRun(taskId);
+  if (displayStatus !== "interrupted") return null;
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-7 gap-1.5 text-xs"
+      disabled={resume.isPending}
+      onClick={() => {
+        if (orphanPid != null) {
+          const ok = window.confirm(
+            `Previous agent process still running (pid ${orphanPid}). Terminate it and resume?`
+          );
+          if (!ok) return;
+          resume.mutate(true);
+          return;
+        }
+        resume.mutate(false);
+      }}
+    >
+      <Play className="size-3.5" />
+      Resume
     </Button>
   );
 }
@@ -209,8 +250,21 @@ function LatestRunBlock({
           {fmtDuration(run.started_at, run.ended_at)}
         </span>
         <div className="min-w-2 flex-1" />
-        <ViewSessionsButton onClick={onViewSessions} />
+        <div className="flex items-center gap-1.5">
+          <ResumeRunButton
+            taskId={taskId}
+            displayStatus={listSummary?.status}
+            orphanPid={listSummary?.orphan_pid}
+          />
+          <ViewSessionsButton onClick={onViewSessions} />
+        </div>
       </div>
+
+      {listSummary?.status === "interrupted" && listSummary.orphan_pid ? (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          Previous agent process still running (pid {listSummary.orphan_pid})
+        </p>
+      ) : null}
 
       {/* Stage progress */}
       <ol className="flex flex-wrap items-stretch gap-1">

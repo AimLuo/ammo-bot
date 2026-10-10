@@ -28,6 +28,7 @@ mod serve_dispatcher_engine;
 mod serve_dispatcher_handoff;
 mod serve_dispatcher_lock;
 mod serve_dispatcher_prompts;
+mod serve_dispatcher_resume;
 mod serve_git;
 mod serve_registry;
 mod show;

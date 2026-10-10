@@ -281,6 +281,9 @@ pub struct RunSummary {
     /// Attempts recorded for the current Stage (hover tip).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_attempt_count: Option<u32>,
+    /// Live orphan agent PID when the last attempt's process is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphan_pid: Option<u32>,
 }
 
 /// Build a [`RunSummary`] for the latest Run in a record.
@@ -311,7 +314,14 @@ pub fn run_summary(
         } else {
             None
         },
+        orphan_pid: None,
     }
+}
+
+/// Attach a detected orphan PID to a summary (read-only enrichment).
+pub fn run_summary_with_orphan(mut summary: RunSummary, orphan_pid: Option<u32>) -> RunSummary {
+    summary.orphan_pid = orphan_pid;
+    summary
 }
 
 /// List all on-disk Run records as `(task_id, record)` pairs.
