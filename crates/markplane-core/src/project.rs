@@ -1096,6 +1096,16 @@ impl Project {
         self.write_item(id, &doc)
     }
 
+    /// Replace the non-comment part of a Task body under the item lock, appending
+    /// the on-disk `## Comments` section unchanged.
+    pub fn set_task_description(&self, id: &str, description: &str) -> Result<()> {
+        let _lock = self.lock_item(id)?;
+        let mut doc: MarkplaneDocument<Task> = self.read_item(id)?;
+        doc.body = crate::with_description(&doc.body, description);
+        doc.frontmatter.updated = Local::now().date_naive();
+        self.write_item(id, &doc)
+    }
+
     /// Update properties on an Epic.
     ///
     /// Holds an advisory file lock for the full read-modify-write cycle.

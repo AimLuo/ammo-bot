@@ -1,4 +1,207 @@
-//! Comment author defaults and body sanitization for `## Comments`.
+//! Comment author defaults, body sanitization, and Comments-section parsing.
+
+/// A single dated comment under `## Comments`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Comment {
+    pub date: String,
+    pub author: String,
+    pub body: String,
+}
+
+/// Body split into description (everything except the Comments section) and
+/// parsed comments. Text before the first `### {date} {author}` is kept on
+/// disk but not listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedBody {
+    pub description: String,
+    pub comments: Vec<Comment>,
+}
+
+/// Split an item body into description and comments.
+///
+/// The `## Comments` section runs from that heading (outside fences) to the
+/// next H2 or end of file. Headings inside fenced code blocks do not start or
+/// end sections, and do not start comments.
+pub fn parse_item_body(body: &str) -> ParsedBody {
+    let Some((before, comments_raw, after)) = split_comments_section(body) else {
+        return ParsedBody {
+            description: body.to_string(),
+            comments: Vec::new(),
+        };
+    };
+    let description = join_non_comment(before, after);
+    let comments = parse_comments_list(comments_raw);
+    ParsedBody {
+        description,
+        comments,
+    }
+}
+
+/// Replace the non-comment part of `body`, appending the on-disk Comments
+/// section unchanged at the end (when present).
+pub fn with_description(body: &str, description: &str) -> String {
+    let description = description.trim_end();
+    match split_comments_section(body) {
+        Some((_, comments_raw, _)) => {
+            let mut out = description.to_string();
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(comments_raw.trim_end());
+            out.push('\n');
+            out
+        }
+        None => {
+            if description.is_empty() {
+                String::new()
+            } else if description.ends_with('\n') {
+                description.to_string()
+            } else {
+                format!("{description}\n")
+            }
+        }
+    }
+}
+
+/// Split `body` into (before, comments_section_including_heading, after).
+/// Returns `None` when there is no `## Comments` outside fences.
+fn split_comments_section(body: &str) -> Option<(&str, &str, &str)> {
+    let bytes = body.as_bytes();
+    let mut in_fence = false;
+    let mut line_start = 0usize;
+    let mut comments_start: Option<usize> = None;
+    let mut after_start: Option<usize> = None;
+    let mut i = 0usize;
+
+    while i <= bytes.len() {
+        let is_eof = i == bytes.len();
+        let is_eol = is_eof || bytes[i] == b'\n';
+        if !is_eol {
+            i += 1;
+            continue;
+        }
+
+        let line_end = i;
+        let line = &body[line_start..line_end];
+        let trimmed = line.trim_end();
+        let trimmed_start = trimmed.trim_start();
+
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
+        } else if !in_fence {
+            if comments_start.is_none() && trimmed_start == "## Comments" {
+                comments_start = Some(line_start);
+            } else if comments_start.is_some()
+                && after_start.is_none()
+                && is_h2_heading(trimmed_start)
+            {
+                after_start = Some(line_start);
+            }
+        }
+
+        if is_eof {
+            break;
+        }
+        i += 1;
+        line_start = i;
+    }
+
+    let start = comments_start?;
+    let end = after_start.unwrap_or(body.len());
+    Some((&body[..start], &body[start..end], &body[end..]))
+}
+
+fn join_non_comment(before: &str, after: &str) -> String {
+    let before = before.trim_end();
+    let after = after.trim_start_matches('\n').trim_end();
+    if before.is_empty() {
+        after.to_string()
+    } else if after.is_empty() {
+        before.to_string()
+    } else {
+        format!("{before}\n\n{after}")
+    }
+}
+
+fn parse_comments_list(comments_section: &str) -> Vec<Comment> {
+    let mut comments = Vec::new();
+    let mut in_fence = false;
+    let mut current: Option<(String, String, Vec<String>)> = None;
+
+    let flush = |current: &mut Option<(String, String, Vec<String>)>, out: &mut Vec<Comment>| {
+        if let Some((date, author, lines)) = current.take() {
+            let body = trim_comment_body(&lines);
+            out.push(Comment { date, author, body });
+        }
+    };
+
+    for line in comments_section.lines() {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
+            if let Some((_, _, ref mut lines)) = current {
+                lines.push(line.to_string());
+            }
+            continue;
+        }
+        if !in_fence
+            && let Some((date, author)) = parse_comment_heading(trimmed_start)
+        {
+            flush(&mut current, &mut comments);
+            current = Some((date, author, Vec::new()));
+            continue;
+        }
+        if let Some((_, _, ref mut lines)) = current {
+            lines.push(line.to_string());
+        }
+        // Preamble before the first comment heading is ignored for the list.
+    }
+    flush(&mut current, &mut comments);
+    comments
+}
+
+fn trim_comment_body(lines: &[String]) -> String {
+    let mut start = 0;
+    let mut end = lines.len();
+    while start < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    lines[start..end].join("\n")
+}
+
+fn parse_comment_heading(trimmed: &str) -> Option<(String, String)> {
+    let rest = trimmed.strip_prefix("### ")?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let date = parts.next()?.to_string();
+    if !is_iso_date(&date) {
+        return None;
+    }
+    let author = parts.next()?.trim().to_string();
+    if author.is_empty() {
+        return None;
+    }
+    Some((date, author))
+}
+
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 {
+        return false;
+    }
+    // YYYY-MM-DD
+    b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn is_h2_heading(trimmed: &str) -> bool {
+    trimmed.starts_with("## ") && !trimmed.starts_with("###")
+}
 
 /// Default author for appended comments.
 ///
@@ -213,5 +416,69 @@ mod tests {
         assert!(result.contains("#### Also"));
         assert!(!result.contains("\n# Bad"));
         assert!(result.contains("### 2026-10-10 agent-implement"));
+    }
+
+    #[test]
+    fn parse_item_body_splits_description_and_comments() {
+        let body = "# Task\n\nDo the thing.\n\n## Comments\n\n### 2026-10-10 alice\n\nFirst\n\n### 2026-10-11 bob smith\n\nSecond\n";
+        let parsed = parse_item_body(body);
+        assert_eq!(parsed.description, "# Task\n\nDo the thing.");
+        assert_eq!(
+            parsed.comments,
+            vec![
+                Comment {
+                    date: "2026-10-10".into(),
+                    author: "alice".into(),
+                    body: "First".into(),
+                },
+                Comment {
+                    date: "2026-10-11".into(),
+                    author: "bob smith".into(),
+                    body: "Second".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_item_body_keeps_preamble_off_the_list() {
+        let body = "# T\n\n## Comments\n\nPreamble note\n\n### 2026-10-10 alice\n\nHi\n";
+        let parsed = parse_item_body(body);
+        assert_eq!(parsed.comments.len(), 1);
+        assert_eq!(parsed.comments[0].author, "alice");
+        assert_eq!(parsed.comments[0].body, "Hi");
+    }
+
+    #[test]
+    fn parse_item_body_ignores_headings_inside_fences() {
+        let body = "# T\n\n```\n## Comments\n### 2026-10-10 fake\n```\n\n## Comments\n\n### 2026-10-10 alice\n\nReal\n```\n### 2099-01-01 no\n```\n";
+        let parsed = parse_item_body(body);
+        assert_eq!(parsed.description, "# T\n\n```\n## Comments\n### 2026-10-10 fake\n```");
+        assert_eq!(parsed.comments.len(), 1);
+        assert_eq!(parsed.comments[0].author, "alice");
+        assert!(parsed.comments[0].body.contains("### 2099-01-01 no"));
+    }
+
+    #[test]
+    fn with_description_preserves_on_disk_comments_section() {
+        let body = "# Old\n\nDesc\n\n## Comments\n\nPreamble\n\n### 2026-10-10 alice\n\nKeep me\n";
+        let updated = with_description(body, "# New\n\nUpdated desc");
+        assert_eq!(
+            updated,
+            "# New\n\nUpdated desc\n\n## Comments\n\nPreamble\n\n### 2026-10-10 alice\n\nKeep me\n"
+        );
+        // Simulate a concurrent append then description write
+        let after_append = crate::append_comment_to_body(&body, "2026-10-10", "agent", "new");
+        let preserved = with_description(&after_append, "# New\n\nOnly desc");
+        assert!(preserved.contains("### 2026-10-10 alice"));
+        assert!(preserved.contains("Keep me"));
+        assert!(preserved.contains("### 2026-10-10 agent"));
+        assert!(preserved.contains("new"));
+        assert!(preserved.starts_with("# New\n\nOnly desc"));
+    }
+
+    #[test]
+    fn with_description_without_comments_writes_description_only() {
+        assert_eq!(with_description("# Old\n", "# New\n\nBody"), "# New\n\nBody\n");
     }
 }

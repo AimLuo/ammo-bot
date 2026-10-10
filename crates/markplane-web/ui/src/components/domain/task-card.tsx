@@ -1,7 +1,7 @@
 "use client";
 
 import { useDraggable } from "@dnd-kit/core";
-import { Archive } from "lucide-react";
+import { Archive, MessageSquare } from "lucide-react";
 import { PriorityIndicator } from "./priority-indicator";
 import type { Task } from "@/lib/types";
 
@@ -30,6 +30,7 @@ export function TaskCard({
   };
 
   const hasMetadata = task.epic || task.tags.length > 0;
+  const commentCount = task.comments?.length ?? 0;
 
   return (
     <div
@@ -95,9 +96,15 @@ export function TaskCard({
             ))}
           </div>
         )}
-        {task.assignee && (
-          <div className="text-xs text-muted-foreground">
-            @{task.assignee}
+        {(task.assignee || commentCount > 0) && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {task.assignee && <span>@{task.assignee}</span>}
+            {commentCount > 0 && (
+              <span className="inline-flex items-center gap-1 ml-auto">
+                <MessageSquare className="size-3" />
+                {commentCount}
+              </span>
+            )}
           </div>
         )}
       </div>

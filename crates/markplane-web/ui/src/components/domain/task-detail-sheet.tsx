@@ -6,7 +6,7 @@ import { useTask, useTasks } from "@/lib/hooks/use-tasks";
 import { useEpics } from "@/lib/hooks/use-epics";
 import { usePlans } from "@/lib/hooks/use-plans";
 import { useNotes } from "@/lib/hooks/use-notes";
-import { useUpdateTask, useArchiveItem, useUnarchiveItem } from "@/lib/hooks/use-mutations";
+import { useUpdateTask, useAddTaskComment, useArchiveItem, useUnarchiveItem } from "@/lib/hooks/use-mutations";
 import { CreateDialog } from "./create-dialog";
 import { PriorityIndicator } from "./priority-indicator";
 import { MarkdownRenderer } from "./markdown-renderer";
@@ -17,6 +17,7 @@ import { EntityCombobox } from "./entity-combobox";
 import { EntityRefEditor } from "./entity-ref-editor";
 import { FieldRow } from "./field-row";
 import { RunSection } from "./run-section";
+import { CommentComposer } from "./comment-composer";
 import {
   Sheet,
   SheetHeader,
@@ -40,8 +41,8 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { STATUS_CONFIG, buildStatusConfig, allStatuses, categoryOf } from "@/lib/constants";
 import { useConfig } from "@/lib/hooks/use-config";
-import { Circle, Pencil, Archive, ArchiveRestore, ArrowUpRight } from "lucide-react";
-import type { Priority, Effort } from "@/lib/types";
+import { Circle, Pencil, Archive, ArchiveRestore, ArrowUpRight, Bot } from "lucide-react";
+import type { Priority, Effort, Comment } from "@/lib/types";
 const ALL_PRIORITIES: Priority[] = [
   "critical",
   "high",
@@ -62,12 +63,13 @@ export function TaskDetailSheet({
   onOpenChange: (open: boolean) => void;
   archived?: boolean;
 }) {
-  const [isEditingBody, setIsEditingBody] = useState(false);
+  const [isEditingDescription, setIsEditingDescription] = useState(false);
   const [createPlanOpen, setCreatePlanOpen] = useState(false);
   const { data: task, isLoading } = useTask(taskId || "", {
-    enabled: !isEditingBody,
+    enabled: !isEditingDescription,
   });
   const updateTask = useUpdateTask();
+  const addComment = useAddTaskComment();
   const archiveItem = useArchiveItem();
   const unarchiveItem = useUnarchiveItem();
   const { data: epics } = useEpics();
@@ -401,32 +403,36 @@ export function TaskDetailSheet({
 
               <Separator />
 
-              {/* Body markdown */}
-              {isEditingBody ? (
+              {/* Description (Comments section excluded) */}
+              {isEditingDescription && !archived ? (
                 <MarkdownEditor
-                  content={task.body}
-                  onSave={(body) => {
-                    updateTask.mutate({ id: task.id, body });
-                    setIsEditingBody(false);
+                  content={task.description}
+                  onSave={(description) => {
+                    updateTask.mutate({ id: task.id, description });
+                    setIsEditingDescription(false);
                   }}
-                  onCancel={() => setIsEditingBody(false)}
+                  onCancel={() => setIsEditingDescription(false)}
                   isLoading={updateTask.isPending}
                 />
               ) : (
                 <div className="group relative">
-                  <button
-                    type="button"
-                    onClick={() => setIsEditingBody(true)}
-                    className="sticky top-11 float-right ml-2 p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-accent transition-opacity cursor-pointer z-10"
-                  >
-                    <Pencil className="size-4 text-primary/50 group-hover:text-primary" />
-                  </button>
-                  {task.body.trim() ? (
-                    <MarkdownRenderer content={task.body} />
+                  {!archived && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingDescription(true)}
+                      className="sticky top-11 float-right ml-2 p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-accent transition-opacity cursor-pointer z-10"
+                    >
+                      <Pencil className="size-4 text-primary/50 group-hover:text-primary" />
+                    </button>
+                  )}
+                  {task.description.trim() ? (
+                    <MarkdownRenderer content={task.description} />
+                  ) : archived ? (
+                    <p className="text-sm text-muted-foreground italic">No description</p>
                   ) : (
                     <button
                       type="button"
-                      onClick={() => setIsEditingBody(true)}
+                      onClick={() => setIsEditingDescription(true)}
                       className="text-sm text-muted-foreground italic hover:text-foreground cursor-pointer"
                     >
                       Click to add description...
@@ -434,6 +440,30 @@ export function TaskDetailSheet({
                   )}
                 </div>
               )}
+
+              <Separator />
+
+              <div className="space-y-3">
+                <h3 className="text-sm font-medium">
+                  Comments ({task.comments.length})
+                </h3>
+                {task.comments.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No comments yet</p>
+                ) : (
+                  <ul className="space-y-4">
+                    {task.comments.map((comment, index) => (
+                      <CommentItem key={`${comment.date}-${comment.author}-${index}`} comment={comment} />
+                    ))}
+                  </ul>
+                )}
+                {!archived && (
+                  <CommentComposer
+                    onSubmit={async (text) => {
+                      await addComment.mutateAsync({ id: task.id, text });
+                    }}
+                  />
+                )}
+              </div>
             </div>
           </>
         )}
@@ -448,6 +478,28 @@ export function TaskDetailSheet({
         )}
       </ResizableSheetContent>
     </Sheet>
+  );
+}
+
+function isMachineAuthor(author: string): boolean {
+  return author === "dispatcher" || author.startsWith("agent-");
+}
+
+function CommentItem({ comment }: { comment: Comment }) {
+  return (
+    <li className="space-y-1">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {isMachineAuthor(comment.author) && (
+          <Bot className="size-3.5 shrink-0" aria-label="Machine author" />
+        )}
+        <span className="font-medium text-foreground/80">{comment.author}</span>
+        <span>·</span>
+        <span>{comment.date}</span>
+      </div>
+      {comment.body.trim() ? (
+        <MarkdownRenderer content={comment.body} />
+      ) : null}
+    </li>
   );
 }
 

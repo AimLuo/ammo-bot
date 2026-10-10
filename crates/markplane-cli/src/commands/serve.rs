@@ -26,13 +26,13 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use markplane_core::{
-    AgentModel, DEFAULT_CONCURRENCY, DispatcherConfig, DispatcherStageConfig, Effort, Epic,
-    EpicStatus, EpicUpdate, EffectiveDispatcherSettings, LinkAction, LinkRelation, Map,
+    AgentModel, Comment, DEFAULT_CONCURRENCY, DispatcherConfig, DispatcherStageConfig, Effort, Epic,
+    EpicStatus, EpicUpdate, EffectiveDispatcherSettings, IdPrefix, LinkAction, LinkRelation, Map,
     MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, Plan, PlanUpdate, Priority,
     Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow,
-    effective_dispatcher_settings, find_blocked_items, find_frontier_items, parse_id,
-    split_markdown_sections, validate_concurrency, validate_dispatcher_config, validate_model,
-    validate_timeout_minutes,
+    default_comment_author, effective_dispatcher_settings, find_blocked_items, find_frontier_items,
+    parse_id, parse_item_body, split_markdown_sections, validate_concurrency,
+    validate_dispatcher_config, validate_model, validate_timeout_minutes,
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
@@ -497,6 +497,7 @@ fn build_router(state: Arc<AppState>) -> Router {
             "/api/tasks/{id}",
             get(get_task).patch(update_task).delete(delete_task),
         )
+        .route("/api/tasks/{id}/comments", post(create_task_comment))
         .route("/api/epics", get(get_epics).post(create_epic))
         .route("/api/epics/{id}", get(get_epic).patch(update_epic))
         .route("/api/plans", get(get_plans).post(create_plan))
@@ -1607,6 +1608,23 @@ fn diff_vec(current: &[String], desired: &[String]) -> (Vec<String>, Vec<String>
 // ── Task API types ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
+struct CommentResponse {
+    date: String,
+    author: String,
+    body: String,
+}
+
+impl From<&Comment> for CommentResponse {
+    fn from(c: &Comment) -> Self {
+        Self {
+            date: c.date.clone(),
+            author: c.author.clone(),
+            body: c.body.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct TaskResponse {
     id: String,
     title: String,
@@ -1628,10 +1646,13 @@ struct TaskResponse {
     created: String,
     updated: String,
     body: String,
+    description: String,
+    comments: Vec<CommentResponse>,
 }
 
 fn task_to_response(doc: &MarkplaneDocument<Task>) -> TaskResponse {
     let fm = &doc.frontmatter;
+    let parsed = parse_item_body(&doc.body);
     TaskResponse {
         id: fm.id.clone(),
         title: fm.title.clone(),
@@ -1651,6 +1672,8 @@ fn task_to_response(doc: &MarkplaneDocument<Task>) -> TaskResponse {
         created: fm.created.to_string(),
         updated: fm.updated.to_string(),
         body: doc.body.clone(),
+        description: parsed.description,
+        comments: parsed.comments.iter().map(CommentResponse::from).collect(),
     }
 }
 
@@ -1718,6 +1741,13 @@ struct UpdateTaskRequest {
     #[serde(default)]
     related: Option<Vec<String>>,
     body: Option<String>,
+    /// Replace non-comment body; preserves on-disk Comments section.
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateCommentRequest {
+    text: String,
 }
 
 // ── Epic API types ────────────────────────────────────────────────────────
@@ -3270,6 +3300,11 @@ async fn update_task(
             )
             .map_err(map_core_error)?;
     }
+    if let Some(ref description) = body.description {
+        project
+            .set_task_description(&id, description)
+            .map_err(map_core_error)?;
+    }
 
     // ── Links → link_items() per change ──────────────────────────────
 
@@ -3380,6 +3415,49 @@ async fn update_task(
     Ok(Json(ApiResponse {
         data: task_to_response(&doc),
     }))
+}
+
+async fn create_task_comment(
+    Extension(project): Extension<Project>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateCommentRequest>,
+) -> Result<(StatusCode, Json<ApiResponse<TaskResponse>>), (StatusCode, Json<ApiError>)> {
+    let (prefix, _) = parse_id(&id).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("Invalid ID format: {}", id),
+        )
+    })?;
+    if prefix != IdPrefix::Task {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            "Comments can only be posted on Task IDs via this endpoint",
+        ));
+    }
+
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_field",
+            "Comment text must not be empty",
+        ));
+    }
+
+    let author = default_comment_author();
+    project
+        .add_comment(&id, &author, text)
+        .map_err(map_core_error)?;
+
+    let doc: MarkplaneDocument<Task> = project.read_item(&id).map_err(map_core_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse {
+            data: task_to_response(&doc),
+        }),
+    ))
 }
 
 async fn delete_task(
@@ -5934,5 +6012,182 @@ mod tests {
         let p = &json["data"]["projects"][0];
         assert_eq!(p["scan_enabled"], true);
         assert_eq!(p["lock"]["status"], "held_by_us");
+    }
+
+    #[tokio::test]
+    async fn post_task_comment_appends_with_server_author() {
+        let _guard = markplane_author_guard(Some("serve-author"));
+        let env = setup_env("comment-post");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane);
+        let task = project
+            .create_task(
+                "Comment me",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/tasks/{}/comments", env.project_id, task.id),
+            Some(serde_json::json!({ "text": "# Heading\nhello" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let data = &json["data"];
+        assert_eq!(data["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(data["comments"][0]["author"], "serve-author");
+        assert_eq!(data["comments"][0]["body"], "#### Heading\nhello");
+        assert!(
+            data["description"]
+                .as_str()
+                .unwrap()
+                .contains("Comment me")
+        );
+        assert!(data["body"].as_str().unwrap().contains("## Comments"));
+
+        let on_disk: MarkplaneDocument<Task> = project.read_item(&task.id).unwrap();
+        assert!(on_disk.body.contains("### "));
+        assert!(on_disk.body.contains("serve-author"));
+        assert!(on_disk.body.contains("#### Heading"));
+    }
+
+    #[tokio::test]
+    async fn post_task_comment_rejects_blank_and_non_task() {
+        let env = setup_env("comment-reject");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane);
+        let task = project
+            .create_task(
+                "T",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let epic = project
+            .create_epic("E", Priority::Medium, vec![], None, None)
+            .unwrap();
+
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/tasks/{}/comments", env.project_id, task.id),
+            Some(serde_json::json!({ "text": "   \n  " })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/tasks/{}/comments", env.project_id, epic.id),
+            Some(serde_json::json!({ "text": "nope" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_description_keeps_concurrently_appended_comment() {
+        let env = setup_env("desc-race");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane);
+        let task = project
+            .create_task(
+                "Race",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks/{}", env.project_id, task.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let description = json["data"]["description"].as_str().unwrap().to_string();
+
+        // Concurrent append after the client read
+        project
+            .add_comment(&task.id, "agent-implement", "from agent")
+            .unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{}", env.project_id, task.id),
+            Some(serde_json::json!({
+                "description": format!("{description}\n\nEdited by human.")
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let comments = json["data"]["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["author"], "agent-implement");
+        assert_eq!(comments[0]["body"], "from agent");
+        assert!(
+            json["data"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Edited by human.")
+        );
+        let on_disk: MarkplaneDocument<Task> = project.read_item(&task.id).unwrap();
+        assert!(on_disk.body.contains("from agent"));
+        assert!(on_disk.body.contains("Edited by human."));
+    }
+
+    /// Serialize env mutation for comment-author API tests.
+    fn markplane_author_guard(value: Option<&str>) -> impl Drop {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        struct EnvGuard {
+            prev: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.prev {
+                        Some(v) => std::env::set_var("MARKPLANE_AUTHOR", v),
+                        None => std::env::remove_var("MARKPLANE_AUTHOR"),
+                    }
+                }
+            }
+        }
+        let prev = std::env::var_os("MARKPLANE_AUTHOR");
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("MARKPLANE_AUTHOR", v),
+                None => std::env::remove_var("MARKPLANE_AUTHOR"),
+            }
+        }
+        EnvGuard {
+            prev,
+            _lock: guard,
+        }
     }
 }

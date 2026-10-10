@@ -114,6 +114,12 @@ export interface ScanSwitch {
   enabled: boolean;
 }
 
+export interface Comment {
+  date: string;
+  author: string;
+  body: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -134,6 +140,9 @@ export interface Task {
   created: string;
   updated: string;
   body: string;
+  /** Body without the Comments section. */
+  description: string;
+  comments: Comment[];
 }
 
 /** Pipeline Stage for a Dispatcher Run. */
@@ -358,6 +367,8 @@ export interface UpdateTaskRequest {
   blocks?: string[];
   related?: string[];
   body?: string;
+  /** Replace non-comment body; preserves on-disk Comments. */
+  description?: string;
 }
 
 export interface UpdateEpicRequest {

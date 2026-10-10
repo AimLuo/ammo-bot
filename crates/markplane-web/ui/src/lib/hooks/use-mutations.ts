@@ -17,6 +17,7 @@ const TASK_FIELD_LABELS: [string, string][] = [
   ["assignee", "Assignee"],
   ["position", "Position"],
   ["body", "Content"],
+  ["description", "Description"],
 ];
 const EPIC_FIELD_LABELS: [string, string][] = [
   ["status", "Status"],
@@ -167,6 +168,20 @@ export function useUpdateTask() {
     },
     onSettled: () => {
       // Refetch to ensure server state is authoritative
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["summary"] });
+    },
+  });
+}
+
+export function useAddTaskComment() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, text }: { id: string; text: string }) =>
+      postJson<Task>(`/api/tasks/${id}/comments`, { text }),
+    onSuccess: (data) => {
+      queryClient.setQueryData<Task>(["tasks", "detail", data.id], data);
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["summary"] });
     },
