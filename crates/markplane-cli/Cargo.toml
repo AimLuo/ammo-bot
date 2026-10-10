@@ -29,6 +29,8 @@ notify.workspace = true
 notify-debouncer-mini.workspace = true
 futures.workspace = true
 open = "5"
+fs2 = "0.4"
+rand.workspace = true
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
 
