@@ -10634,6 +10634,196 @@ fi
         assert!(json["data"]["stopped_early"].as_bool().unwrap());
         assert_eq!(json["data"]["reason"], "no_free_slot");
         assert!(!json["data"]["remaining"].as_array().unwrap().is_empty());
+
         env.state.shutdown_dispatcher().await;
+    }
+
+    #[tokio::test]
+    async fn resume_happy_path_resumes_session_with_flag() {
+        let mut env = setup_engine_env("resume-happy-session", Some(false));
+        let cursor_cfg = env._tmp.path().join("cursor-cfg");
+        fs::create_dir_all(&cursor_cfg).unwrap();
+        unsafe { std::env::set_var("CURSOR_CONFIG_DIR", &cursor_cfg) };
+
+        let agent = env._tmp.path().join("fake-agent-resume");
+        write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Happy resume session", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, false).await;
+
+        let worktree = env.project_dir.join(".worktrees").join(&task_id);
+        let workspace = worktree.canonicalize().unwrap().display().to_string();
+        let sid = format!("sess-impl-{task_id}");
+        let meta = markplane_core::session_meta_path(&cursor_cfg, &workspace, &sid);
+        fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        fs::write(&meta, r#"{"hasConversation":true}"#).unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+        let rec = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
+        let run = rec.runs.last().unwrap();
+        assert!(
+            run.attempts.iter().any(|a| {
+                a.trigger == markplane_core::Trigger::Resume
+                    && a.session_id.as_deref() == Some(sid.as_str())
+                    && a.result == Some(markplane_core::AttemptResult::Ok)
+            }),
+            "expected successful --resume attempt reusing {sid}: {:?}",
+            run.attempts
+        );
+        unsafe { std::env::remove_var("CURSOR_CONFIG_DIR") };
+    }
+
+    #[tokio::test]
+    async fn resume_merge_queued_reenqueues_and_merges() {
+        let mut env = setup_engine_env("resume-merge-queued", Some(false));
+        let agent = env._tmp.path().join("fake-agent-resume");
+        write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Merge queued resume", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, true).await;
+        // Flip latest run to merge-queued with a completed implement attempt.
+        {
+            use markplane_core::{read_run_record, write_run_record, RunStatus, Stage};
+            let mut rec = read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                .unwrap()
+                .unwrap();
+            if let Some(run) = rec.runs.last_mut() {
+                run.status = RunStatus::MergeQueued;
+                run.current_stage = Some(Stage::Merge);
+            }
+            write_run_record(&env.project_dir.join(".markplane"), &task_id, &rec).unwrap();
+        }
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+    }
+
+    #[tokio::test]
+    async fn list_runs_running_elsewhere_when_lock_held_by_other() {
+        let env = setup_engine_env("runs-elsewhere", Some(false));
+        let task_id = add_ready_task(&env, "Elsewhere", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, false).await;
+
+        // Hold the Dispatcher lock as a different process identity.
+        let key = serve_git::resolve_lock_key(&env.project_dir).unwrap();
+        let holder = LockHolder {
+            pid: 1,
+            hostname: "other-host".into(),
+            serve_url: "http://localhost:9999".into(),
+            config_dir: "/tmp/other".into(),
+            project_path: env.project_dir.display().to_string(),
+            acquired_at: chrono::Utc::now(),
+        };
+        let _held = serve_dispatcher_lock::try_acquire(&key, holder).unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+
+        assert_eq!(json["data"][0]["status"], "running elsewhere");
+    }
+
+    #[tokio::test]
+    async fn resume_mid_merge_already_merged_finishes_without_agent() {
+        let env = setup_engine_env("resume-mid-merge", Some(false));
+        let task_id = add_ready_task(&env, "Mid merge done", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &task_id, true).await;
+        // Merge the agent branch into main ourselves, then leave Run as Running@merge.
+        let branch = format!("agent/{task_id}");
+        let _ = std::process::Command::new("git")
+            .args(["-C"]).arg(&env.project_dir)
+            .args(["merge", "--no-ff", "-m", "premerge", &branch])
+            .status();
+        {
+            use markplane_core::{
+                Attempt, AttemptResult, RunStatus, Stage, Trigger, read_run_record, write_run_record,
+            };
+            let mut rec = read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                .unwrap()
+                .unwrap();
+            if let Some(run) = rec.runs.last_mut() {
+                run.status = RunStatus::Running;
+                run.current_stage = Some(Stage::Merge);
+                run.attempts.push(Attempt {
+                    stage: Stage::Merge,
+                    model: "fake".into(),
+                    timeout_secs: Some(60),
+                    session_id: Some(format!("sess-merge-{task_id}")),
+                    workspace: env.project_dir.display().to_string(),
+                    transcript_path: None,
+                    pid: None,
+                    process_group_id: None,
+                    agent_config_dir: None,
+                    trigger: Trigger::Initial,
+                    started_at: "2026-10-10T10:00:00+08:00".into(),
+                    ended_at: None,
+                    exit_code: None,
+                    verdict: None,
+                    result: None,
+                    usage: None,
+                    duration_api_ms: None,
+                    stderr_tail: None,
+                });
+                let _ = AttemptResult::Ok; // silence unused in some rustc
+            }
+            write_run_record(&env.project_dir.join(".markplane"), &task_id, &rec).unwrap();
+        }
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.status, "done");
     }
 }

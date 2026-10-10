@@ -1745,16 +1745,39 @@ pub async fn resume_run(
     task_id: String,
     terminate_orphan: bool,
 ) -> Result<(), ResumeError> {
-    // Orphan check before claiming the Slot.
+    // Preflight (after lock + ticket ownership, checked by the HTTP layer):
+    // worktree/branch → orphan → free Slot.
     {
-        let record = read_run_record(proj.project.root(), &task_id)
+        let mut record = read_run_record(proj.project.root(), &task_id)
             .map_err(|e| ResumeError::Internal(e.to_string()))?
             .ok_or(ResumeError::NotResumable)?;
-        let run = record.runs.last().ok_or(ResumeError::NotResumable)?;
+        let mut run = record
+            .runs
+            .last()
+            .cloned()
+            .ok_or(ResumeError::NotResumable)?;
         if !matches!(run.status, RunStatus::Running | RunStatus::MergeQueued) {
             return Err(ResumeError::NotResumable);
         }
-        if let Some(pid) = run_orphan_pid(run) {
+        let worktree = PathBuf::from(&run.worktree);
+        let branch = run.branch.clone();
+        if !worktree_and_branch_ok(&proj.project_dir, &worktree, &branch) {
+            // Handoff without claiming a Slot (same failure path as mid-pipeline).
+            let stage = run.current_stage.unwrap_or(Stage::Implement);
+            fail_and_finish(
+                &engine,
+                &proj,
+                &task_id,
+                &mut record,
+                &mut run,
+                stage,
+                "worktree missing".into(),
+            )
+            .await
+            .map_err(ResumeError::Internal)?;
+            return Err(ResumeError::NotResumable);
+        }
+        if let Some(pid) = run_orphan_pid(&run) {
             if !terminate_orphan {
                 return Err(ResumeError::OrphanRunning { pid });
             }
