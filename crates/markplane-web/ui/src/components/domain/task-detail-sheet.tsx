@@ -16,6 +16,7 @@ import { TagEditor } from "./tag-editor";
 import { EntityCombobox } from "./entity-combobox";
 import { EntityRefEditor } from "./entity-ref-editor";
 import { FieldRow } from "./field-row";
+import { RunSection } from "./run-section";
 import {
   Sheet,
   SheetHeader,
@@ -395,6 +396,8 @@ export function TaskDetailSheet({
                   <span className="text-muted-foreground">{task.updated}</span>
                 </FieldRow>
               </div>
+
+              <RunSection taskId={task.id} assignee={task.assignee} />
 
               <Separator />
 

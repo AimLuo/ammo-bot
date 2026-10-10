@@ -66,6 +66,81 @@ export interface Task {
   body: string;
 }
 
+/** Pipeline Stage for a Dispatcher Run. */
+export type Stage = "implement" | "fix" | "merge";
+
+export type Trigger = "initial" | "resume" | "continue";
+
+export type AttemptResult =
+  | "ok"
+  | "failed"
+  | "timeout"
+  | "interrupted"
+  | "resume_mismatch";
+
+export type RunStatus =
+  | "running"
+  | "merge-queued"
+  | "succeeded"
+  | "failed"
+  | "stopped";
+
+export interface Usage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+}
+
+/** One agent process invocation within a Run. */
+export interface Attempt {
+  stage: Stage;
+  model: string;
+  timeout_secs?: number | null;
+  session_id?: string | null;
+  workspace: string;
+  transcript_path?: string | null;
+  pid?: number | null;
+  process_group_id?: number | null;
+  agent_config_dir?: string | null;
+  trigger: Trigger;
+  started_at: string;
+  ended_at?: string | null;
+  exit_code?: number | null;
+  verdict?: string | null;
+  result?: AttemptResult | null;
+  usage?: Usage | null;
+  duration_api_ms?: number | null;
+  stderr_tail?: string | null;
+}
+
+/** One Run of an Implementation ticket. */
+export interface Run {
+  seq: number;
+  status: RunStatus;
+  current_stage?: Stage | null;
+  worktree: string;
+  branch: string;
+  base_sha: string;
+  merge_target: string;
+  merge_sha?: string | null;
+  pushed: boolean;
+  started_at: string;
+  ended_at?: string | null;
+  failure_reason?: string | null;
+  worktree_removed_at?: string | null;
+  branch_removed_at?: string | null;
+  branch_head_at_removal?: string | null;
+  cleanup_blocked?: boolean | null;
+  cleanup_trigger?: string | null;
+  attempts: Attempt[];
+}
+
+/** Shape of `.markplane/.runs/<TASK-id>.json` / `GET /api/runs/{task_id}` when present. */
+export interface RunRecord {
+  runs: Run[];
+}
+
 export interface Epic {
   id: string;
   title: string;

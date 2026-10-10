@@ -776,6 +776,18 @@ impl Project {
         Ok(())
     }
 
+    /// Read the local Run record for `task_id`, if present.
+    pub fn read_run_record(&self, task_id: &str) -> Result<Option<crate::runs::RunRecord>> {
+        crate::runs::read_run_record(&self.root, task_id)
+    }
+
+    /// Atomically write the local Run record for `task_id`.
+    ///
+    /// Creates `.markplane/.runs/` (with a `*` `.gitignore`) on first use.
+    pub fn write_run_record(&self, task_id: &str, record: &crate::runs::RunRecord) -> Result<()> {
+        crate::runs::write_run_record(&self.root, task_id, record)
+    }
+
     /// Acquire an advisory exclusive lock for an item.
     ///
     /// This locks a sidecar file under `.markplane/.locks/` rather than the

@@ -10,6 +10,7 @@ pub mod position;
 pub mod project;
 pub mod query;
 pub mod references;
+pub mod runs;
 pub mod sections;
 pub mod templates;
 
@@ -33,6 +34,10 @@ pub use references::{
     AsymmetricLink, BrokenReference, DependencyCycle, build_reference_graph, detect_cycles,
     extract_references, find_orphans, validate_reciprocal_links, validate_references,
     validate_task_statuses,
+};
+pub use runs::{
+    Attempt, AttemptResult, Run, RunRecord, RunStatus, STAGE_ORDER, Stage, Trigger, Usage,
+    ensure_runs_dir, read_run_record, run_record_path, write_run_record,
 };
 pub use sections::{
     REQUIRED_MAP_SECTIONS, append_line_to_section, missing_map_sections, set_answer_section,

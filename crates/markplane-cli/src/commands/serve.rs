@@ -453,6 +453,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/graph", get(get_graph_all))
         .route("/api/graph/{id}", get(get_graph_focused))
+        .route("/api/runs/{task_id}", get(get_run_record))
         .route("/ws", get(ws_handler))
         .with_state(state.clone());
 
@@ -1070,7 +1071,8 @@ async fn run_file_watcher(root: PathBuf, tx: broadcast::Sender<String>) -> anyho
     while let Some(path) = notify_rx.recv().await {
         let path_str = path.to_string_lossy().to_string();
 
-        // Skip non-markdown files (except config.yaml)
+        // Skip non-markdown files (except config.yaml). Run records under
+        // `.runs/*.json` are therefore never pushed as WebSocket events.
         if !path_str.ends_with(".md") && !path_str.ends_with("config.yaml") {
             continue;
         }
@@ -3668,6 +3670,43 @@ async fn get_graph_focused(
     Ok(Json(ApiResponse { data: graph }))
 }
 
+/// `GET /api/runs/{task_id}` — full local Run record, or an empty array when absent.
+async fn get_run_record(
+    Extension(project): Extension<Project>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
+    let (prefix, _) = parse_id(&task_id).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("Invalid ID format: {}", task_id),
+        )
+    })?;
+    if prefix != markplane_core::IdPrefix::Task {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            &format!("runs are only available for Task IDs, got {}", task_id),
+        ));
+    }
+
+    match project.read_run_record(&task_id).map_err(map_core_error)? {
+        Some(record) => {
+            let value = serde_json::to_value(record).map_err(|e| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "serialize_error",
+                    &format!("Failed to serialize Run record: {e}"),
+                )
+            })?;
+            Ok(Json(ApiResponse { data: value }))
+        }
+        None => Ok(Json(ApiResponse {
+            data: serde_json::json!([]),
+        })),
+    }
+}
+
 fn build_graph(project: &Project, focus_id: Option<&str>) -> anyhow::Result<GraphResponse> {
     use std::collections::HashSet;
 
@@ -4398,6 +4437,149 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["project"]["name"], "cfg-proj");
+    }
+
+    #[tokio::test]
+    async fn get_runs_returns_empty_array_when_no_record() {
+        let env = setup_env("runs-empty");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane);
+        let task = project
+            .create_task(
+                "No run yet",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs/{}", env.project_id, task.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["data"].is_array());
+        assert_eq!(json["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_runs_returns_full_fixture_record() {
+        use markplane_core::{
+            Attempt, AttemptResult, Run, RunRecord, RunStatus, Stage, Trigger, Usage,
+            write_run_record,
+        };
+
+        let env = setup_env("runs-fixture");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Has a run",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        let record = RunRecord {
+            runs: vec![Run {
+                seq: 1,
+                status: RunStatus::Failed,
+                current_stage: Some(Stage::Fix),
+                worktree: format!("/tmp/.worktrees/{}", task.id),
+                branch: format!("agent/{}", task.id),
+                base_sha: "abc1234".into(),
+                merge_target: "main".into(),
+                merge_sha: None,
+                pushed: false,
+                started_at: "2026-10-10T09:00:00+08:00".into(),
+                ended_at: Some("2026-10-10T10:00:00+08:00".into()),
+                failure_reason: Some("fix timed out".into()),
+                worktree_removed_at: None,
+                branch_removed_at: None,
+                branch_head_at_removal: None,
+                cleanup_blocked: None,
+                cleanup_trigger: None,
+                attempts: vec![
+                    Attempt {
+                        stage: Stage::Implement,
+                        model: "claude-opus-4.5".into(),
+                        timeout_secs: Some(3600),
+                        session_id: Some("sess-implement".into()),
+                        workspace: format!("/tmp/.worktrees/{}", task.id),
+                        transcript_path: None,
+                        pid: Some(1001),
+                        process_group_id: Some(1001),
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:00:01+08:00".into(),
+                        ended_at: Some("2026-10-10T09:30:00+08:00".into()),
+                        exit_code: Some(0),
+                        verdict: Some("REVIEW: issues".into()),
+                        result: Some(AttemptResult::Ok),
+                        usage: Some(Usage {
+                            input_tokens: Some(1000),
+                            output_tokens: Some(50),
+                            cache_read_tokens: Some(800),
+                            cache_write_tokens: Some(100),
+                        }),
+                        duration_api_ms: Some(30_000),
+                        stderr_tail: None,
+                    },
+                    Attempt {
+                        stage: Stage::Fix,
+                        model: "gpt-5.3-codex".into(),
+                        timeout_secs: Some(3600),
+                        session_id: Some("sess-fix".into()),
+                        workspace: format!("/tmp/.worktrees/{}", task.id),
+                        transcript_path: None,
+                        pid: Some(1002),
+                        process_group_id: Some(1002),
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:30:10+08:00".into(),
+                        ended_at: Some("2026-10-10T10:00:00+08:00".into()),
+                        exit_code: Some(143),
+                        verdict: None,
+                        result: Some(AttemptResult::Timeout),
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: Some("killed by timeout".into()),
+                    },
+                ],
+            }],
+        };
+        write_run_record(&markplane, &task.id, &record).unwrap();
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs/{}", env.project_id, task.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["data"].is_object());
+        assert_eq!(json["data"]["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(json["data"]["runs"][0]["seq"], 1);
+        assert_eq!(json["data"]["runs"][0]["status"], "failed");
+        assert_eq!(json["data"]["runs"][0]["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            json["data"]["runs"][0]["attempts"][0]["usage"]["inputTokens"],
+            1000
+        );
+        assert_eq!(json["data"]["runs"][0]["attempts"][1]["result"], "timeout");
     }
 
     #[test]
