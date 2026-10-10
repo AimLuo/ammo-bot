@@ -60,7 +60,7 @@ export function RunSection({
 }) {
   const assignee = task.assignee;
   const { data: record, isLoading } = useRunRecord(taskId);
-  const { map: runMap } = useRunSummaryMap();
+  const { map: runMap, isFetched: runsFetched } = useRunSummaryMap();
   const { data: config } = useConfig();
   const workflow = config?.workflows.task;
   const [open, setOpen] = useState(false);
@@ -85,6 +85,7 @@ export function RunSection({
           run={latest}
           earlier={earlier}
           listSummary={listSummary}
+          runsFetched={runsFetched}
           workflow={workflow}
           onViewSessions={() => setOpen(true)}
         />
@@ -161,6 +162,7 @@ function LatestRunBlock({
   run,
   earlier,
   listSummary,
+  runsFetched,
   workflow,
   onViewSessions,
 }: {
@@ -169,16 +171,26 @@ function LatestRunBlock({
   run: Run;
   earlier: Run[];
   listSummary?: RunSummary;
+  runsFetched: boolean;
   workflow?: TaskWorkflow;
   onViewSessions: () => void;
 }) {
   const stages = stageSummaries(run);
   const remnant = remnantStatusLine(run);
   const total = sumUsage(run.attempts);
-  const badgeSummary = summaryFromRun(taskId, run, {
-    status: listSummary?.status,
-    queue_position: listSummary?.queue_position,
-  });
+  // Wait for GET /api/runs so display status (interrupted / elsewhere) is server-truth.
+  const badgeSummary =
+    runsFetched && listSummary
+      ? {
+          ...summaryFromRun(taskId, run, {
+            status: listSummary.status,
+            queue_position: listSummary.queue_position,
+          }),
+          model: listSummary.model ?? undefined,
+          timeout_secs: listSummary.timeout_secs ?? undefined,
+          stage_attempt_count: listSummary.stage_attempt_count ?? undefined,
+        }
+      : null;
 
   return (
     <div className="space-y-2">
@@ -186,7 +198,9 @@ function LatestRunBlock({
       <div className="space-y-2 rounded-md border px-3 py-2.5">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <RunBadge summary={badgeSummary} task={task} workflow={workflow} />
+        {badgeSummary ? (
+          <RunBadge summary={badgeSummary} task={task} workflow={workflow} />
+        ) : null}
         <span className="text-sm font-semibold">Run #{run.seq}</span>
         <span className="text-xs text-muted-foreground tabular-nums">
           {fmtTime(run.started_at)}

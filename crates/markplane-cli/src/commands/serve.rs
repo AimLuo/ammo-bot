@@ -5935,6 +5935,96 @@ mod tests {
         assert_eq!(json["data"][0]["seq"], 3);
     }
 
+    #[tokio::test]
+    async fn list_runs_merge_queued_reports_position() {
+        use markplane_core::{
+            Attempt, Run, RunRecord, RunStatus, Stage, Trigger, write_run_record,
+        };
+
+        let env = setup_env("runs-list-queued");
+        let markplane = env.project_dir.join(".markplane");
+        let project = Project::new(markplane.clone());
+        let task = project
+            .create_task(
+                "Queued run",
+                "feature",
+                Priority::Medium,
+                Effort::Small,
+                None,
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+
+        write_run_record(
+            &markplane,
+            &task.id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::MergeQueued,
+                    current_stage: Some(Stage::Merge),
+                    worktree: format!("/tmp/.worktrees/{}", task.id),
+                    branch: format!("agent/{}", task.id),
+                    base_sha: "eee".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: None,
+                    failure_reason: None,
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![Attempt {
+                        stage: Stage::Merge,
+                        model: "m".into(),
+                        timeout_secs: Some(60),
+                        session_id: None,
+                        workspace: format!("/tmp/.worktrees/{}", task.id),
+                        transcript_path: None,
+                        pid: None,
+                        process_group_id: None,
+                        agent_config_dir: None,
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:30:00+08:00".into(),
+                        ended_at: None,
+                        exit_code: None,
+                        verdict: None,
+                        result: None,
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: None,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        {
+            let mut engine = env.state.engine.lock().await;
+            engine
+                .active_slots
+                .insert(task.id.clone(), env.project_id.clone());
+        }
+
+        let (status, json) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["data"][0]["status"], "merge-queued");
+        assert_eq!(json["data"][0]["stage"], "merge");
+        // Position is None unless the task is in a MergeQueue waiter list.
+        assert!(json["data"][0]["queue_position"].is_null());
+    }
+
     /// Serialize env mutation for CURSOR_DATA_DIR session-transcript tests.
     fn cursor_data_dir_guard(value: Option<&std::path::Path>) -> impl Drop {
         use std::sync::{Mutex, OnceLock};

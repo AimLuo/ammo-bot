@@ -211,10 +211,11 @@ export function deriveDisplayStatus(
 ): RunDisplayStatus {
   const base = summary.status as RunDisplayStatus;
   if (!isLiveRunStatus(summary.status)) return base;
-  const cat = workflow ? categoryOf(workflow, task.status) : undefined;
-  const leftActive = cat !== "active";
-  const reassigned = task.assignee !== "dispatcher";
-  if (leftActive || reassigned) return "stopping";
+  // Assignee can be checked without workflow; category needs it (avoid
+  // flashing Stopping while config is still loading).
+  if (task.assignee !== "dispatcher") return "stopping";
+  if (!workflow) return base;
+  if (categoryOf(workflow, task.status) !== "active") return "stopping";
   return base;
 }
 
