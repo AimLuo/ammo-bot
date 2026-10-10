@@ -17,8 +17,8 @@ use markplane_core::{
     Patch, Project, QueryFilter, Run, RunRecord, RunStatus, Stage, StatusCategory, StreamEvent,
     Task, Trigger, UpdateFields, agent_invocation_succeeded, classify_implement_verdict,
     filter_and_sort_pickup_candidates, implement_verdict_failure_reason, is_fix_done,
-    is_merge_done, parse_stream_json_line, read_run_record, usage_from_events,
-    verdict_from_events, write_run_record,
+    is_merge_done, parse_stream_json_line, read_run_record, round_robin_pickup,
+    usage_from_events, verdict_from_events, write_run_record,
 };
 use serde_json::json;
 use tokio::sync::{Mutex, broadcast};
@@ -41,6 +41,10 @@ pub struct EngineState {
     merge_queues: HashMap<PathBuf, Arc<MergeQueue>>,
     /// Tasks currently being processed (pickup through end) — skip re-pickup.
     in_flight: HashSet<String>,
+    /// Next Project index for cross-Project round-robin (stable project_id order).
+    rr_start: usize,
+    /// Fan-out targets for `dispatcher_changed` (refreshed each tick / by serve).
+    pub dispatcher_channels: Vec<broadcast::Sender<String>>,
 }
 
 impl EngineState {
@@ -50,6 +54,25 @@ impl EngineState {
 
     pub fn project_has_active_runs(&self, project_id: &str) -> bool {
         self.active_slots.values().any(|p| p == project_id)
+    }
+
+    /// 1-based merge-queue position for `task_id`, or `None` if not queued.
+    pub fn merge_queue_position(&self, task_id: &str) -> Option<u32> {
+        for queue in self.merge_queues.values() {
+            if let Ok(g) = queue.inner.try_lock()
+                && let Some(pos) = g.waiters.iter().position(|t| t == task_id)
+            {
+                return Some((pos + 1) as u32);
+            }
+        }
+        None
+    }
+
+    pub fn broadcast_dispatcher_changed(&self) {
+        let msg = r#"{"type":"dispatcher_changed"}"#.to_string();
+        for tx in &self.dispatcher_channels {
+            let _ = tx.send(msg.clone());
+        }
     }
 
     fn merge_queue(&mut self, git_dir: PathBuf) -> Arc<MergeQueue> {
@@ -114,6 +137,7 @@ impl Drop for MergePermit<'_> {
 }
 
 /// Inputs for one Project on a scan tick.
+#[derive(Clone)]
 pub struct ProjectTickInput {
     pub project_id: String,
     pub project: Project,
@@ -128,65 +152,109 @@ pub struct ProjectTickInput {
 }
 
 /// Explicit scan tick (tests call this; production uses a 15s interval).
-pub async fn dispatcher_tick(engine: Arc<Mutex<EngineState>>, projects: Vec<ProjectTickInput>) {
-    // One pickup per Project per tick (within global concurrency).
-    for proj in projects {
-        if !proj.scan_on {
-            continue;
-        }
-        try_pickup_one(engine.clone(), proj).await;
+pub async fn dispatcher_tick(engine: Arc<Mutex<EngineState>>, mut projects: Vec<ProjectTickInput>) {
+    projects.retain(|p| p.scan_on);
+    if projects.is_empty() {
+        return;
     }
-}
+    // Stable order so rr_start indexes stay meaningful across ticks.
+    projects.sort_by(|a, b| a.project_id.cmp(&b.project_id));
 
-async fn try_pickup_one(engine: Arc<Mutex<EngineState>>, proj: ProjectTickInput) {
+    let concurrency = projects[0].concurrency;
     let free = {
         let g = engine.lock().await;
         let used = g.slots_used() as u32;
-        if used >= proj.concurrency {
-            return;
-        }
-        proj.concurrency - used
+        concurrency.saturating_sub(used) as usize
     };
     if free == 0 {
         return;
     }
 
+    let mut queues: Vec<Vec<String>> = Vec::with_capacity(projects.len());
+    {
+        let g = engine.lock().await;
+        for proj in &projects {
+            let ids = match candidate_ids(proj) {
+                Some(ids) => ids,
+                None => {
+                    queues.push(Vec::new());
+                    continue;
+                }
+            };
+            let available: Vec<String> = ids
+                .into_iter()
+                .filter(|id| !g.in_flight.contains(id) && !g.active_slots.contains_key(id))
+                .collect();
+            queues.push(available);
+        }
+    }
+
+    let (picks, next_start) = {
+        let mut g = engine.lock().await;
+        let (picks, next) = round_robin_pickup(&queues, free, g.rr_start);
+        g.rr_start = next;
+        (picks, next)
+    };
+    let _ = next_start;
+
+    if picks.is_empty() {
+        return;
+    }
+
+    let mut started = false;
+    for (proj_idx, task_id) in picks {
+        let Some(proj) = projects.get(proj_idx).cloned() else {
+            continue;
+        };
+        if !claim_slot(engine.clone(), &proj, &task_id).await {
+            break;
+        }
+        started = true;
+        spawn_pipeline(engine.clone(), proj, task_id);
+    }
+    if started {
+        engine.lock().await.broadcast_dispatcher_changed();
+    }
+}
+
+fn candidate_ids(proj: &ProjectTickInput) -> Option<Vec<String>> {
     let config = match proj.project.load_config() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("dispatcher: load_config {}: {e}", proj.project_id);
-            return;
+            return None;
         }
     };
     let tasks = match proj.project.list_tasks(&QueryFilter::default()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("dispatcher: list_tasks {}: {e}", proj.project_id);
-            return;
+            return None;
         }
     };
-    let candidates = filter_and_sort_pickup_candidates(&tasks, &config.workflows.task);
-    let task_id = {
-        let g = engine.lock().await;
-        candidates
-            .iter()
+    Some(
+        filter_and_sort_pickup_candidates(&tasks, &config.workflows.task)
+            .into_iter()
             .map(|d| d.frontmatter.id.clone())
-            .find(|id| !g.in_flight.contains(id) && !g.active_slots.contains_key(id))
-    };
-    let Some(task_id) = task_id else {
-        return;
-    };
+            .collect(),
+    )
+}
 
-    {
-        let mut g = engine.lock().await;
-        if g.slots_used() as u32 >= proj.concurrency {
-            return;
-        }
-        g.in_flight.insert(task_id.clone());
-        g.active_slots
-            .insert(task_id.clone(), proj.project_id.clone());
+async fn claim_slot(engine: Arc<Mutex<EngineState>>, proj: &ProjectTickInput, task_id: &str) -> bool {
+    let mut g = engine.lock().await;
+    if g.slots_used() as u32 >= proj.concurrency {
+        return false;
     }
+    if g.in_flight.contains(task_id) || g.active_slots.contains_key(task_id) {
+        return false;
+    }
+    g.in_flight.insert(task_id.to_string());
+    g.active_slots
+        .insert(task_id.to_string(), proj.project_id.clone());
+    true
+}
 
+fn spawn_pipeline(engine: Arc<Mutex<EngineState>>, proj: ProjectTickInput, task_id: String) {
     let engine_bg = engine.clone();
     let task_id_bg = task_id.clone();
     tokio::spawn(async move {
@@ -198,6 +266,7 @@ async fn try_pickup_one(engine: Arc<Mutex<EngineState>>, proj: ProjectTickInput)
         let mut g = engine_bg.lock().await;
         g.active_slots.remove(&task_id_bg);
         g.in_flight.remove(&task_id_bg);
+        g.broadcast_dispatcher_changed();
     });
 }
 
@@ -254,7 +323,7 @@ async fn run_pipeline(
         attempts: vec![],
     };
     record.runs.push(run.clone());
-    persist_run(proj, task_id, &record, &run).await?;
+    persist_run(&engine, proj, task_id, &record, &run, true).await?;
 
     proj.project
         .update_item(
@@ -316,11 +385,12 @@ async fn run_pipeline(
     run.status = RunStatus::Running;
     run.current_stage = Some(Stage::Implement);
     update_latest_run(&mut record, &run);
-    persist_run(proj, task_id, &record, &run).await?;
+    persist_run(&engine, proj, task_id, &record, &run, true).await?;
 
     let impl_settings = proj.settings.stages.implement.clone();
     let impl_prompt = serve_dispatcher_prompts::render_implement_prompt(&ctx);
     let impl_result = run_agent(
+        &engine,
         proj,
         task_id,
         &mut record,
@@ -384,11 +454,12 @@ async fn run_pipeline(
         run.status = RunStatus::Running;
         run.current_stage = Some(Stage::Fix);
         update_latest_run(&mut record, &run);
-        persist_run(proj, task_id, &record, &run).await?;
+        persist_run(&engine, proj, task_id, &record, &run, true).await?;
 
         let fix_settings = proj.settings.stages.fix.clone();
         let fix_prompt = serve_dispatcher_prompts::render_fix_prompt(&ctx);
         let fix_result = run_agent(
+            &engine,
             proj,
             task_id,
             &mut record,
@@ -434,13 +505,15 @@ async fn run_pipeline(
     run.status = RunStatus::MergeQueued;
     run.current_stage = Some(Stage::Merge);
     update_latest_run(&mut record, &run);
-    persist_run(proj, task_id, &record, &run).await?;
+    persist_run(&engine, proj, task_id, &record, &run, true).await?;
 
     let queue = {
         let mut g = engine.lock().await;
         g.merge_queue(git_dir.clone())
     };
     let _permit = queue.enter(task_id).await;
+    // Queue positions for other waiters may have advanced.
+    engine.lock().await.broadcast_dispatcher_changed();
 
     // Cross-serve merge file lock (best-effort; hold while merging).
     let _merge_lock = acquire_merge_file_lock(&git_dir)?;
@@ -463,13 +536,14 @@ async fn run_pipeline(
     run.status = RunStatus::Running;
     run.current_stage = Some(Stage::Merge);
     update_latest_run(&mut record, &run);
-    persist_run(proj, task_id, &record, &run).await?;
+    persist_run(&engine, proj, task_id, &record, &run, true).await?;
 
     let mut merge_ctx = ctx.clone();
     merge_ctx.target_branch = target_branch.clone();
     let merge_settings = proj.settings.stages.merge.clone();
     let merge_prompt = serve_dispatcher_prompts::render_merge_prompt(&merge_ctx);
     let merge_result = run_agent(
+        &engine,
         proj,
         task_id,
         &mut record,
@@ -528,6 +602,7 @@ async fn run_pipeline(
 
     let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
     success_close(
+        &engine,
         proj,
         task_id,
         &mut record,
@@ -567,6 +642,7 @@ struct AgentOutcome {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
+    engine: &Arc<Mutex<EngineState>>,
     proj: &ProjectTickInput,
     task_id: &str,
     record: &mut RunRecord,
@@ -609,7 +685,7 @@ async fn run_agent(
     };
     run.attempts.push(attempt.clone());
     update_latest_run(record, run);
-    persist_run(proj, task_id, record, run).await?;
+    persist_run(&engine, proj, task_id, record, run, false).await?;
 
     let main_root = proj
         .project_dir
@@ -655,7 +731,7 @@ async fn run_agent(
         a.process_group_id = Some(pid);
     }
     update_latest_run(record, run);
-    persist_run(proj, task_id, record, run).await?;
+    persist_run(&engine, proj, task_id, record, run, false).await?;
 
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
@@ -775,7 +851,7 @@ async fn run_agent(
             {
                 a.session_id = Some(sid);
                 update_latest_run(record, run);
-                persist_run(proj, task_id, record, run).await?;
+                persist_run(&engine, proj, task_id, record, run, false).await?;
             }
         }
         if wait_handle.is_finished() {
@@ -799,7 +875,7 @@ async fn run_agent(
             a.exit_code = Some(-1);
         }
         update_latest_run(record, run);
-        persist_run(proj, task_id, record, run).await?;
+        persist_run(&engine, proj, task_id, record, run, false).await?;
         return Ok(AgentOutcome {
             succeeded: false,
             timed_out: true,
@@ -835,7 +911,7 @@ async fn run_agent(
         a.stderr_tail = Some(stderr_tail);
     }
     update_latest_run(record, run);
-    persist_run(proj, task_id, record, run).await?;
+    persist_run(&engine, proj, task_id, record, run, false).await?;
 
     let failure_reason = if !succeeded {
         Some(format!(
@@ -857,6 +933,7 @@ async fn run_agent(
 }
 
 async fn success_close(
+    engine: &Arc<Mutex<EngineState>>,
     proj: &ProjectTickInput,
     task_id: &str,
     record: &mut RunRecord,
@@ -945,7 +1022,7 @@ async fn success_close(
     run.ended_at = Some(Utc::now().to_rfc3339());
     run.failure_reason = None;
     update_latest_run(record, run);
-    persist_run(proj, task_id, record, run).await?;
+    persist_run(&engine, proj, task_id, record, run, true).await?;
     Ok(())
 }
 
@@ -1002,13 +1079,18 @@ fn update_latest_run(record: &mut RunRecord, run: &Run) {
 }
 
 async fn persist_run(
+    engine: &Arc<Mutex<EngineState>>,
     proj: &ProjectTickInput,
     task_id: &str,
     record: &RunRecord,
     run: &Run,
+    notify_dispatcher: bool,
 ) -> Result<(), String> {
     write_run_record(proj.project.root(), task_id, record).map_err(|e| e.to_string())?;
     broadcast_run_changed(&proj.ws_tx, task_id, run);
+    if notify_dispatcher {
+        engine.lock().await.broadcast_dispatcher_changed();
+    }
     Ok(())
 }
 

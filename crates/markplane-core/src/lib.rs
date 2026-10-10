@@ -36,7 +36,7 @@ pub use dispatcher::{
 };
 pub use pickup::{
     READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, PickupSortKey, cmp_pickup_keys,
-    filter_and_sort_pickup_candidates, is_implementation_ticket,
+    filter_and_sort_pickup_candidates, is_implementation_ticket, round_robin_pickup,
 };
 pub use stage_verdict::{
     ImplementVerdict, classify_implement_verdict, implement_verdict_failure_reason, is_fix_done,

@@ -211,6 +211,11 @@ impl AppState {
                 test_timeout_secs,
             });
         }
+        {
+            let mut engine = self.engine.lock().await;
+            let guard = self.runtimes.lock().await;
+            engine.dispatcher_channels = guard.values().map(|rt| rt.ws_tx.clone()).collect();
+        }
         serve_dispatcher_engine::dispatcher_tick(self.engine.clone(), inputs).await;
 
         // Release locks for Projects with Scan off and no active Runs.
@@ -1411,7 +1416,7 @@ struct DispatcherStageResponse {
 #[derive(Serialize)]
 struct DispatcherConcurrencyResponse {
     concurrency: u32,
-    /// Slot usage; 0 until the Dispatcher Slot counter exists.
+    /// Slots held by active Runs (including merge-queued).
     in_use: u32,
 }
 
@@ -2813,10 +2818,11 @@ async fn get_dispatcher_concurrency(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<DispatcherConcurrencyResponse>>, (StatusCode, Json<ApiError>)> {
     let concurrency = load_concurrency(&state).await;
+    let in_use = state.engine.lock().await.slots_used() as u32;
     Ok(Json(ApiResponse {
         data: DispatcherConcurrencyResponse {
             concurrency,
-            in_use: 0,
+            in_use,
         },
     }))
 }
@@ -2844,10 +2850,12 @@ async fn patch_dispatcher_concurrency(
         let mut guard = state.concurrency_last_good.lock().await;
         *guard = Some(concurrency);
     }
+    broadcast_dispatcher_changed(&state).await;
+    let in_use = state.engine.lock().await.slots_used() as u32;
     Ok(Json(ApiResponse {
         data: DispatcherConcurrencyResponse {
             concurrency,
-            in_use: 0,
+            in_use,
         },
     }))
 }
@@ -2893,24 +2901,49 @@ struct LockStatusResponse {
 }
 
 #[derive(Serialize)]
+struct DispatcherActiveRun {
+    task_id: String,
+    title: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_position: Option<u32>,
+}
+
+#[derive(Serialize)]
 struct DispatcherProjectStatus {
     id: String,
     name: String,
     path: String,
     scan_enabled: bool,
     lock: LockStatusResponse,
+    active_runs: Vec<DispatcherActiveRun>,
 }
 
 #[derive(Serialize)]
 struct DispatcherStatusResponse {
+    concurrency: u32,
+    slots_used: u32,
+    running: u32,
+    merge_queued: u32,
     projects: Vec<DispatcherProjectStatus>,
 }
 
 async fn broadcast_dispatcher_changed(state: &AppState) {
     let msg = r#"{"type":"dispatcher_changed"}"#.to_string();
-    let guard = state.runtimes.lock().await;
-    for rt in guard.values() {
-        let _ = rt.ws_tx.send(msg.clone());
+    let channels: Vec<_> = {
+        let guard = state.runtimes.lock().await;
+        guard.values().map(|rt| rt.ws_tx.clone()).collect()
+    };
+    {
+        let mut engine = state.engine.lock().await;
+        engine.dispatcher_channels = channels.clone();
+    }
+    for tx in &channels {
+        let _ = tx.send(msg.clone());
     }
 }
 
@@ -3080,6 +3113,89 @@ async fn get_dispatcher_status(
         )
     })?;
 
+    let concurrency = load_concurrency(&state).await;
+    let (slots_snapshot, queue_positions) = {
+        let engine = state.engine.lock().await;
+        let slots: Vec<(String, String)> = engine
+            .active_slots
+            .iter()
+            .map(|(t, p)| (t.clone(), p.clone()))
+            .collect();
+        let positions: HashMap<String, u32> = slots
+            .iter()
+            .filter_map(|(task_id, _)| {
+                engine
+                    .merge_queue_position(task_id)
+                    .map(|pos| (task_id.clone(), pos))
+            })
+            .collect();
+        (slots, positions)
+    };
+
+    let mut runs_by_project: HashMap<String, Vec<DispatcherActiveRun>> = HashMap::new();
+    let mut running = 0u32;
+    let mut merge_queued = 0u32;
+
+    for (task_id, project_id) in &slots_snapshot {
+        let Ok(rt) = state.get_or_create_runtime(project_id).await else {
+            continue;
+        };
+        let title = rt
+            .project
+            .read_item::<Task>(task_id)
+            .map(|d| d.frontmatter.title)
+            .unwrap_or_else(|_| task_id.clone());
+        let (status, stage, stage_started_at) =
+            match rt.project.read_run_record(task_id).ok().flatten() {
+                Some(rec) => match rec.runs.last() {
+                    Some(run) => {
+                        let status = match run.status {
+                            markplane_core::RunStatus::Running => "running",
+                            markplane_core::RunStatus::MergeQueued => "merge-queued",
+                            markplane_core::RunStatus::Succeeded => "succeeded",
+                            markplane_core::RunStatus::Failed => "failed",
+                            markplane_core::RunStatus::Stopped => "stopped",
+                        }
+                        .to_string();
+                        let stage = run.current_stage.map(|s| s.as_str().to_string());
+                        let stage_started_at = run
+                            .attempts
+                            .iter()
+                            .rev()
+                            .find(|a| stage.as_deref() == Some(a.stage.as_str()))
+                            .map(|a| a.started_at.clone())
+                            .or_else(|| Some(run.started_at.clone()));
+                        (status, stage, stage_started_at)
+                    }
+                    None => ("running".into(), None, None),
+                },
+                None => ("running".into(), None, None),
+            };
+
+        match status.as_str() {
+            "merge-queued" => merge_queued += 1,
+            _ => running += 1,
+        }
+
+        let queue_position = if status == "merge-queued" {
+            queue_positions.get(task_id).copied()
+        } else {
+            None
+        };
+
+        runs_by_project
+            .entry(project_id.clone())
+            .or_default()
+            .push(DispatcherActiveRun {
+                task_id: task_id.clone(),
+                title,
+                status,
+                stage,
+                stage_started_at,
+                queue_position,
+            });
+    }
+
     let disp = state.dispatcher.lock().await;
     let mut projects = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -3108,17 +3224,26 @@ async fn get_dispatcher_status(
                 holder: None,
             },
         };
+        let mut active_runs = runs_by_project.remove(&entry.id).unwrap_or_default();
+        active_runs.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         projects.push(DispatcherProjectStatus {
             id: entry.id,
             name: entry.name,
             path: entry.path,
             scan_enabled,
             lock,
+            active_runs,
         });
     }
 
     Ok(Json(ApiResponse {
-        data: DispatcherStatusResponse { projects },
+        data: DispatcherStatusResponse {
+            concurrency,
+            slots_used: slots_snapshot.len() as u32,
+            running,
+            merge_queued,
+            projects,
+        },
     }))
 }
 
@@ -7992,5 +8117,348 @@ esac
             "no dispatcher failure write after reassign"
         );
         let _ = before;
+    }
+
+    // ── Cross-Project RR + Slot overview (TASK-mzkqb) ──────────────────────
+
+    struct DualEngineEnv {
+        _tmp: TempDir,
+        config_dir: PathBuf,
+        _a_dir: PathBuf,
+        _b_dir: PathBuf,
+        a_id: String,
+        b_id: String,
+        state: Arc<AppState>,
+        app: tower::util::BoxCloneService<Request, Response, Infallible>,
+    }
+
+    fn setup_dual_engine_env(prefix: &str) -> DualEngineEnv {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let mut ids = Vec::new();
+        let mut dirs = Vec::new();
+        for name in [format!("{prefix}-a"), format!("{prefix}-b")] {
+            let project_dir = tmp.path().join(&name);
+            fs::create_dir_all(&project_dir).unwrap();
+            init_git_repo(&project_dir);
+            git_config_identity(&project_dir);
+            let _ = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&project_dir)
+                .args(["checkout", "-b", "main"])
+                .status();
+            Project::init(
+                project_dir.join(".markplane"),
+                &name,
+                "dual dispatcher tests",
+            )
+            .unwrap();
+            let mut cfg = Project::new(project_dir.join(".markplane"))
+                .load_config()
+                .unwrap();
+            cfg.dispatcher.push_after_merge = Some(false);
+            fs::write(
+                project_dir.join(".markplane/config.yaml"),
+                serde_yaml::to_string(&cfg).unwrap(),
+            )
+            .unwrap();
+            git_commit_all(&project_dir, "init");
+            let entry = serve_registry::register(&config_dir, &project_dir).unwrap();
+            ids.push(entry.id);
+            dirs.push(project_dir);
+        }
+
+        let agent_bin = tmp.path().join("fake-agent");
+        write_happy_fake_agent(&agent_bin, &markplane_debug_bin());
+        let state = AppState::with_options(
+            config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent_bin),
+        );
+        let app = build_app(state.clone());
+        // Stable order: project_id sort used by RR.
+        let (a_id, a_dir, b_id, b_dir) = if ids[0] <= ids[1] {
+            (ids[0].clone(), dirs[0].clone(), ids[1].clone(), dirs[1].clone())
+        } else {
+            (ids[1].clone(), dirs[1].clone(), ids[0].clone(), dirs[0].clone())
+        };
+        DualEngineEnv {
+            _tmp: tmp,
+            config_dir,
+            _a_dir: a_dir,
+            _b_dir: b_dir,
+            a_id,
+            b_id,
+            state,
+            app,
+        }
+    }
+
+    async fn add_ready_task_on(
+        app: &tower::util::BoxCloneService<Request, Response, Infallible>,
+        project_id: &str,
+        title: &str,
+        priority: &str,
+    ) -> String {
+        let (status, json) = oneshot_json_body(
+            app,
+            "POST",
+            &format!("/api/p/{project_id}/tasks"),
+            Some(serde_json::json!({
+                "title": title,
+                "type": "feature",
+                "priority": priority,
+                "effort": "small",
+                "tags": ["ready-for-agent"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        let id = json["data"]["id"].as_str().unwrap().to_string();
+        let (status, json) = oneshot_json_body(
+            app,
+            "PATCH",
+            &format!("/api/p/{project_id}/tasks/{id}"),
+            Some(serde_json::json!({ "status": "planned" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        id
+    }
+
+    async fn enable_scan_on(
+        app: &tower::util::BoxCloneService<Request, Response, Infallible>,
+        project_id: &str,
+    ) {
+        let (status, json) = oneshot_json_body(
+            app,
+            "PATCH",
+            &format!("/api/p/{project_id}/dispatcher/scan"),
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_round_robin_alternates_projects() {
+        let env = setup_dual_engine_env("rr");
+        super::super::serve_dispatcher::write_concurrency(&env.config_dir, 2).unwrap();
+
+        let a1 = add_ready_task_on(&env.app, &env.a_id, "A1", "critical").await;
+        let a2 = add_ready_task_on(&env.app, &env.a_id, "A2", "high").await;
+        let b1 = add_ready_task_on(&env.app, &env.b_id, "B1", "critical").await;
+        let b2 = add_ready_task_on(&env.app, &env.b_id, "B2", "high").await;
+        let _ = (a2, b2);
+
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.a_id)).await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.b_id)).await;
+        enable_scan_on(&env.app, &env.a_id).await;
+        enable_scan_on(&env.app, &env.b_id).await;
+
+        env.state.dispatcher_tick().await;
+        // Concurrency 2 → one from each Project (not two from A).
+        let slots = {
+            let g = env.state.engine.lock().await;
+            let mut pairs: Vec<_> = g
+                .active_slots
+                .iter()
+                .map(|(t, p)| (t.clone(), p.clone()))
+                .collect();
+            pairs.sort();
+            pairs
+        };
+        assert_eq!(slots.len(), 2, "expected one slot per Project: {slots:?}");
+        let projects: std::collections::HashSet<_> =
+            slots.iter().map(|(_, p)| p.as_str()).collect();
+        assert!(projects.contains(env.a_id.as_str()));
+        assert!(projects.contains(env.b_id.as_str()));
+        let tasks: std::collections::HashSet<_> =
+            slots.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(tasks.contains(a1.as_str()));
+        assert!(tasks.contains(b1.as_str()));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_lowering_concurrency_keeps_existing_runs() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let env = setup_engine_env("lower-conc", Some(false));
+            super::super::serve_dispatcher::write_concurrency(&env.config_dir, 2).unwrap();
+            let a = add_ready_task(&env, "Hold A", "critical").await;
+            let b = add_ready_task(&env, "Hold B", "high").await;
+            let c = add_ready_task(&env, "Wait C", "medium").await;
+            let _ = oneshot_json(
+                &env.app,
+                "GET",
+                &format!("/api/p/{}/tasks", env.project_id),
+            )
+            .await;
+
+            let agent = env._tmp.path().join("fake-agent");
+            let mp = markplane_debug_bin();
+            write_happy_fake_agent(&agent, &mp);
+            let wrapper = env._tmp.path().join("slow-agent");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/bash\nif [ \"${{MARKPLANE_AUTHOR:-}}\" = agent-implement ]; then sleep 2; fi\nexec '{}' \"$@\"\n",
+                    agent.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let state = AppState::with_options(
+                env.config_dir.clone(),
+                4200,
+                true,
+                false,
+                None,
+                Some(wrapper),
+            );
+            let app = build_app(state.clone());
+            let _ = oneshot_json(&app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+            let (status, _) = oneshot_json_body(
+                &app,
+                "PATCH",
+                &format!("/api/p/{}/dispatcher/scan", env.project_id),
+                Some(serde_json::json!({ "enabled": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            state.dispatcher_tick().await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(state.engine.lock().await.slots_used(), 2);
+
+            // Lower below in-use; existing Runs must keep their Slots.
+            let (status, json) = oneshot_json_body(
+                &app,
+                "PATCH",
+                "/api/dispatcher/concurrency",
+                Some(serde_json::json!({ "concurrency": 1 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["data"]["concurrency"], 1);
+            assert_eq!(json["data"]["in_use"], 2);
+            assert_eq!(state.engine.lock().await.slots_used(), 2);
+
+            state.dispatcher_tick().await;
+            assert_eq!(
+                state.engine.lock().await.slots_used(),
+                2,
+                "must not kill Runs or pick a third while over limit"
+            );
+            assert!(
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), &c)
+                    .unwrap()
+                    .is_none(),
+                "third candidate must stay unpicked"
+            );
+
+            let wait_env = EngineEnv {
+                _tmp: TempDir::new().unwrap(),
+                config_dir: env.config_dir.clone(),
+                project_dir: env.project_dir.clone(),
+                project_id: env.project_id.clone(),
+                state: state.clone(),
+                app: app.clone(),
+                remote: None,
+            };
+            wait_run_status(&wait_env, &a, "succeeded", 40).await;
+            wait_run_status(&wait_env, &b, "succeeded", 40).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn get_dispatcher_reports_slots_and_active_runs() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let env = setup_engine_env("slot-api", Some(false));
+            super::super::serve_dispatcher::write_concurrency(&env.config_dir, 2).unwrap();
+            let a = add_ready_task(&env, "Running one", "critical").await;
+            let b = add_ready_task(&env, "Running two", "high").await;
+            let _ = oneshot_json(
+                &env.app,
+                "GET",
+                &format!("/api/p/{}/tasks", env.project_id),
+            )
+            .await;
+
+            let agent = env._tmp.path().join("fake-agent");
+            write_happy_fake_agent(&agent, &markplane_debug_bin());
+            let wrapper = env._tmp.path().join("slow-agent");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/bash\nif [ \"${{MARKPLANE_AUTHOR:-}}\" = agent-implement ]; then sleep 2; fi\nexec '{}' \"$@\"\n",
+                    agent.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let state = AppState::with_options(
+                env.config_dir.clone(),
+                4200,
+                true,
+                false,
+                None,
+                Some(wrapper),
+            );
+            let app = build_app(state.clone());
+            let _ = oneshot_json(&app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+            let (status, _) = oneshot_json_body(
+                &app,
+                "PATCH",
+                &format!("/api/p/{}/dispatcher/scan", env.project_id),
+                Some(serde_json::json!({ "enabled": true })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let tick = state.clone();
+            let t1 = tokio::spawn(async move { tick.dispatcher_tick().await });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let (status, json) = oneshot_json(&app, "GET", "/api/dispatcher").await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            assert_eq!(json["data"]["concurrency"], 2);
+            assert_eq!(json["data"]["slots_used"], 2);
+            assert_eq!(json["data"]["running"], 2);
+            assert_eq!(json["data"]["merge_queued"], 0);
+            let projects = json["data"]["projects"].as_array().unwrap();
+            let mine = projects
+                .iter()
+                .find(|p| p["id"] == env.project_id)
+                .unwrap();
+            let runs = mine["active_runs"].as_array().unwrap();
+            assert_eq!(runs.len(), 2);
+            let ids: std::collections::HashSet<_> = runs
+                .iter()
+                .map(|r| r["task_id"].as_str().unwrap())
+                .collect();
+            assert!(ids.contains(a.as_str()));
+            assert!(ids.contains(b.as_str()));
+            for r in runs {
+                assert_eq!(r["status"], "running");
+                assert!(r["title"].as_str().unwrap().contains("Running"));
+            }
+
+            let (status, json) = oneshot_json(&app, "GET", "/api/dispatcher/concurrency").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["data"]["in_use"], 2);
+
+            t1.await.unwrap();
+        }
     }
 }

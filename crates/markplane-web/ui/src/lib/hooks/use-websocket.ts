@@ -67,6 +67,9 @@ export function useWebSocket() {
               break;
             case "dispatcher_changed":
               queryClient.invalidateQueries({ queryKey: ["dispatcher"] });
+              queryClient.invalidateQueries({
+                queryKey: ["dispatcher-concurrency"],
+              });
               break;
             case "connected":
               break;

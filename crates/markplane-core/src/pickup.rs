@@ -94,6 +94,50 @@ pub fn filter_and_sort_pickup_candidates<'a>(
     candidates
 }
 
+/// Interleave per-Project candidate queues in round-robin order.
+///
+/// Each queue must already be sorted in Project-local pickup order.
+/// `start` is the queue index to take from first. Returns up to `limit`
+/// `(queue_index, item)` pairs and the `start` index for the next call so
+/// Projects rotate fairly when `limit` is smaller than the number of
+/// non-empty queues.
+pub fn round_robin_pickup<T: Clone>(
+    queues: &[Vec<T>],
+    limit: usize,
+    start: usize,
+) -> (Vec<(usize, T)>, usize) {
+    let n = queues.len();
+    if n == 0 || limit == 0 {
+        return (Vec::new(), start);
+    }
+
+    let mut start = start % n;
+    let mut offsets = vec![0usize; n];
+    let mut result = Vec::with_capacity(limit.min(queues.iter().map(Vec::len).sum()));
+    let mut cursor = start;
+
+    while result.len() < limit {
+        let mut picked = false;
+        for step in 0..n {
+            let idx = (cursor + step) % n;
+            let off = offsets[idx];
+            if off < queues[idx].len() {
+                result.push((idx, queues[idx][off].clone()));
+                offsets[idx] = off + 1;
+                start = (idx + 1) % n;
+                cursor = start;
+                picked = true;
+                break;
+            }
+        }
+        if !picked {
+            break;
+        }
+    }
+
+    (result, start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +354,61 @@ mod tests {
             .map(|d| d.frontmatter.id.as_str())
             .collect();
         assert_eq!(ids, vec!["TASK-cand1"]);
+    }
+
+    #[test]
+    fn round_robin_alternates_projects_preserving_within_order() {
+        let queues = vec![
+            vec!["A1", "A2", "A3"],
+            vec!["B1", "B2"],
+        ];
+        let (picked, next) = round_robin_pickup(&queues, 5, 0);
+        assert_eq!(
+            picked,
+            vec![
+                (0, "A1"),
+                (1, "B1"),
+                (0, "A2"),
+                (1, "B2"),
+                (0, "A3"),
+            ]
+        );
+        assert_eq!(next, 1);
+    }
+
+    #[test]
+    fn round_robin_low_limit_rotates_start_across_calls() {
+        // Caller removes already-picked / in-flight IDs between ticks.
+        let mut queues = vec![vec!["A1", "A2"], vec!["B1", "B2"]];
+        let (first, start) = round_robin_pickup(&queues, 1, 0);
+        assert_eq!(first, vec![(0, "A1")]);
+        assert_eq!(start, 1);
+        queues[0].remove(0);
+
+        let (second, start) = round_robin_pickup(&queues, 1, start);
+        assert_eq!(second, vec![(1, "B1")]);
+        assert_eq!(start, 0);
+        queues[1].remove(0);
+
+        let (third, start) = round_robin_pickup(&queues, 1, start);
+        assert_eq!(third, vec![(0, "A2")]);
+        assert_eq!(start, 1);
+    }
+
+    #[test]
+    fn round_robin_skips_empty_queues() {
+        let queues = vec![vec![], vec!["B1"], vec!["C1", "C2"]];
+        let (picked, next) = round_robin_pickup(&queues, 3, 0);
+        assert_eq!(picked, vec![(1, "B1"), (2, "C1"), (2, "C2")]);
+        assert_eq!(next, 0);
+    }
+
+    #[test]
+    fn round_robin_empty_or_zero_limit() {
+        assert_eq!(round_robin_pickup::<&str>(&[], 5, 3), (vec![], 3));
+        assert_eq!(
+            round_robin_pickup(&[vec!["A1"]], 0, 0),
+            (vec![], 0)
+        );
     }
 }

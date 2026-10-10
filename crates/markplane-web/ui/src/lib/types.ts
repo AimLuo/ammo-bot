@@ -98,15 +98,29 @@ export interface DispatcherLockStatus {
   holder?: DispatcherLockHolder;
 }
 
+export interface DispatcherActiveRun {
+  task_id: string;
+  title: string;
+  status: string;
+  stage?: string | null;
+  stage_started_at?: string | null;
+  queue_position?: number | null;
+}
+
 export interface DispatcherProjectStatus {
   id: string;
   name: string;
   path: string;
   scan_enabled: boolean;
   lock: DispatcherLockStatus;
+  active_runs: DispatcherActiveRun[];
 }
 
 export interface DispatcherStatus {
+  concurrency: number;
+  slots_used: number;
+  running: number;
+  merge_queued: number;
   projects: DispatcherProjectStatus[];
 }
 

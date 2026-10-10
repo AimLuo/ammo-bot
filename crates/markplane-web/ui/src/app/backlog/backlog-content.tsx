@@ -58,6 +58,7 @@ import {
   useScanSwitch,
   useSetScanSwitch,
 } from "@/lib/hooks/use-dispatcher";
+import { SlotsBadge } from "@/components/domain/slots-badge";
 import type { Task, TaskStatus, Priority, Effort, StatusCategory } from "@/lib/types";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -377,6 +378,7 @@ export function BacklogContent() {
                 </span>
               ) : null;
             })()}
+            <SlotsBadge />
           </div>
           {view !== "needs-you" && (
             <div className="flex items-center gap-2">
