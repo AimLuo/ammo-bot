@@ -1,20 +1,14 @@
 //! CLI seam tests for `markplane serve` HTTPS / cert generation (TASK-kcivc).
 
+mod common;
+
 use assert_cmd::cargo::cargo_bin;
+use common::free_port;
 use std::io::{BufRead, BufReader, Read};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn setup_project() -> TempDir {
     let tmp = TempDir::new().unwrap();

@@ -78,12 +78,93 @@ pub fn trust_instructions(cert_path: &Path) -> String {
             "Trust this certificate (macOS Keychain):\n  security add-trusted-cert -r trustRoot -p ssl \\\n    -k \"$HOME/Library/Keychains/login.keychain-db\" \\\n    {cert}"
         )
     } else if cfg!(target_os = "linux") {
-        format!(
-            "Trust this certificate (Linux browsers):\n  # Chrome / Chromium (NSS trusted peer):\n  certutil -d sql:\"$HOME/.local/share/pki/nssdb\" -A -t \"P,,\" -n markplane-localhost \\\n    -i {cert}\n  # Firefox (each profile; use about:profiles for the path):\n  certutil -d sql:<firefox-profile-dir> -A -t \"C,,\" -n markplane-localhost \\\n    -i {cert}"
-        )
+        linux_trust_instructions(cert_path)
     } else {
         format!("Trust this certificate in your OS/browser trust store:\n  {cert}")
     }
+}
+
+/// Chrome NSS + one `certutil … "C,,"` line per discovered Firefox profile.
+fn linux_trust_instructions(cert_path: &Path) -> String {
+    let cert = cert_path.display();
+    let mut out = format!(
+        "Trust this certificate (Linux browsers):\n  # Chrome / Chromium (NSS trusted peer):\n  certutil -d sql:\"$HOME/.local/share/pki/nssdb\" -A -t \"P,,\" -n markplane-localhost \\\n    -i {cert}"
+    );
+    let profiles = firefox_profile_dirs();
+    if profiles.is_empty() {
+        out.push_str(
+            "\n  # Firefox: no profiles found under ~/.mozilla/firefox (or snap/flatpak paths).\n  \
+             # Open about:profiles, then for each profile run:\n  \
+             certutil -d sql:<firefox-profile-dir> -A -t \"C,,\" -n markplane-localhost \\\n    \
+             -i ",
+        );
+        out.push_str(&cert.to_string());
+    } else {
+        out.push_str("\n  # Firefox (one command per profile):");
+        for profile in profiles {
+            out.push_str(&format!(
+                "\n  certutil -d sql:\"{}\" -A -t \"C,,\" -n markplane-localhost \\\n    -i {cert}",
+                profile.display()
+            ));
+        }
+    }
+    out
+}
+
+/// Discover Firefox profile directories from typical Linux install locations.
+fn firefox_profile_dirs() -> Vec<PathBuf> {
+    let Some(home) = super::serve_registry::user_home() else {
+        return Vec::new();
+    };
+    let roots = [
+        home.join(".mozilla/firefox"),
+        home.join("snap/firefox/common/.mozilla/firefox"),
+        home.join(".var/app/org.mozilla.firefox/.mozilla/firefox"),
+    ];
+    let mut profiles = Vec::new();
+    for root in &roots {
+        profiles.extend(profiles_from_firefox_root(root));
+    }
+    profiles.sort();
+    profiles.dedup();
+    profiles
+}
+
+fn profiles_from_firefox_root(root: &Path) -> Vec<PathBuf> {
+    let ini = root.join("profiles.ini");
+    let Ok(text) = fs::read_to_string(&ini) else {
+        return Vec::new();
+    };
+    let mut profiles = Vec::new();
+    let mut is_relative = true;
+    let mut path: Option<String> = None;
+    let flush = |is_relative: bool, path: &mut Option<String>, out: &mut Vec<PathBuf>| {
+        if let Some(p) = path.take() {
+            let dir = if is_relative {
+                root.join(&p)
+            } else {
+                PathBuf::from(&p)
+            };
+            if dir.is_dir() {
+                out.push(dir);
+            }
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            flush(is_relative, &mut path, &mut profiles);
+            is_relative = true;
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("IsRelative=") {
+            is_relative = v.trim() != "0";
+        } else if let Some(v) = line.strip_prefix("Path=") {
+            path = Some(v.trim().to_string());
+        }
+    }
+    flush(is_relative, &mut path, &mut profiles);
+    profiles
 }
 
 fn generate_certs(certs_dir: &Path) -> Result<()> {
@@ -491,6 +572,83 @@ mod tests {
             assert!(text.contains("P,,"));
             assert!(text.contains("C,,"));
         }
+    }
+
+    #[test]
+    fn profiles_from_firefox_root_reads_profiles_ini() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("firefox");
+        let rel = root.join("abcd.default-release");
+        fs::create_dir_all(&rel).unwrap();
+        fs::write(
+            root.join("profiles.ini"),
+            "[Profile0]\nName=default\nIsRelative=1\nPath=abcd.default-release\nDefault=1\n",
+        )
+        .unwrap();
+        let found = profiles_from_firefox_root(&root);
+        assert_eq!(found, vec![rel]);
+    }
+
+    #[test]
+    fn linux_trust_lists_discovered_firefox_profiles() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let profile = home.join(".mozilla/firefox/zz.default");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            home.join(".mozilla/firefox/profiles.ini"),
+            "[Profile0]\nIsRelative=1\nPath=zz.default\n",
+        )
+        .unwrap();
+        let prev_home = std::env::var_os("HOME");
+        let prev_profile = std::env::var_os("USERPROFILE");
+        // SAFETY: restored before return; test is single-threaded for env.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("USERPROFILE");
+        }
+        let text = linux_trust_instructions(Path::new("/tmp/cert.pem"));
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_profile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+        assert!(text.contains("P,,"));
+        assert!(text.contains("C,,"));
+        assert!(text.contains(&format!("sql:\"{}\"", profile.display())));
+        assert!(!text.contains("no profiles found"));
+    }
+
+    #[test]
+    fn linux_trust_hints_when_no_firefox_profiles() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("empty-home");
+        fs::create_dir_all(&home).unwrap();
+        let prev_home = std::env::var_os("HOME");
+        let prev_profile = std::env::var_os("USERPROFILE");
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("USERPROFILE");
+        }
+        let text = linux_trust_instructions(Path::new("/tmp/cert.pem"));
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_profile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+        assert!(text.contains("no profiles found"));
+        assert!(text.contains("about:profiles"));
+        assert!(text.contains("C,,"));
     }
 
     #[test]

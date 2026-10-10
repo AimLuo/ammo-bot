@@ -36,9 +36,11 @@ time.workspace = true
 rand.workspace = true
 open = "5"
 fs2 = "0.4"
-libc = "0.2"
 rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

@@ -1,4 +1,9 @@
+#[cfg(unix)]
+mod common;
+
 use assert_cmd::Command;
+#[cfg(unix)]
+use common::free_port;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -4148,17 +4153,14 @@ fn test_serve_registers_project_and_serves_prefixed_api() {
 
 // ── Serve daemon (start/stop/status/logs) ────────────────────────────────
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
+#[cfg(unix)]
 fn serve_cmd(xdg: &TempDir) -> Command {
     let mut c = cmd();
     c.env("XDG_CONFIG_HOME", xdg.path());
     c
 }
 
+#[cfg(unix)]
 #[test]
 fn test_serve_start_status_stop() {
     let xdg = TempDir::new().unwrap();
@@ -4191,6 +4193,7 @@ fn test_serve_start_status_stop() {
         .stdout(predicate::str::contains("not running").or(predicate::str::contains("Not running")));
 }
 
+#[cfg(unix)]
 #[test]
 fn test_serve_start_when_already_running() {
     let xdg = TempDir::new().unwrap();
@@ -4211,6 +4214,7 @@ fn test_serve_start_when_already_running() {
     serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
 }
 
+#[cfg(unix)]
 #[test]
 fn test_serve_start_ignores_stale_pid_file() {
     let xdg = TempDir::new().unwrap();
@@ -4258,6 +4262,7 @@ fn test_serve_start_ignores_stale_pid_file() {
     serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
 }
 
+#[cfg(unix)]
 #[test]
 fn test_serve_start_port_in_use() {
     let xdg = TempDir::new().unwrap();
@@ -4279,6 +4284,7 @@ fn test_serve_start_port_in_use() {
     drop(listener);
 }
 
+#[cfg(unix)]
 #[test]
 fn test_serve_foreground_reuses_running_server() {
     let xdg = TempDir::new().unwrap();
@@ -4319,6 +4325,7 @@ fn test_serve_foreground_reuses_running_server() {
     serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
 }
 
+#[cfg(unix)]
 #[test]
 fn test_serve_logs_shows_output() {
     let xdg = TempDir::new().unwrap();

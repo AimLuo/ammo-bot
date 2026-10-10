@@ -12,7 +12,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Json, Redirect, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, patch, post};
 use hyper::body::Incoming;
 use futures::SinkExt;
@@ -116,11 +116,7 @@ impl AppState {
 
         let entry = match serve_registry::find(&self.config_dir, id) {
             Ok(Some(e)) => e,
-            Ok(None) => match serve_registry::find_reread(&self.config_dir, id) {
-                Ok(Some(e)) => e,
-                _ => return Err(RuntimeError::NotFound),
-            },
-            Err(_) => return Err(RuntimeError::NotFound),
+            Ok(None) | Err(_) => return Err(RuntimeError::NotFound),
         };
 
         self.establish_runtime(id, &entry).await
@@ -590,7 +586,13 @@ async fn project_prefix_middleware(
     let path = req.uri().path().to_string();
 
     if is_legacy_page_path(&path) {
-        return Redirect::temporary("/").into_response();
+        // Spec: unprefixed legacy pages (e.g. `/backlog/`) 302 to `/`.
+        // axum::Redirect has no 302 helper (only 303/307/308).
+        return (
+            StatusCode::FOUND,
+            [(axum::http::header::LOCATION, "/")],
+        )
+            .into_response();
     }
 
     if let Some((id, rest, kind)) = parse_project_prefix(&path) {
@@ -681,14 +683,13 @@ fn home_dir(state: &AppState) -> Result<PathBuf, (StatusCode, Json<ApiError>)> {
     if let Some(home) = &state.home_override {
         return Ok(home.clone());
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
+    serve_registry::user_home().ok_or_else(|| {
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
-            "HOME is not set",
+            "HOME or USERPROFILE is not set",
         )
-    })?;
-    Ok(PathBuf::from(home))
+    })
 }
 
 fn expand_fs_path(
@@ -4356,7 +4357,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(
             response.headers().get("location").unwrap(),
             "/"

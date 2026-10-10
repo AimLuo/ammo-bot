@@ -25,15 +25,28 @@ struct RegistryFile {
     projects: Vec<RegistryEntry>,
 }
 
-/// Resolve `~/.config/markplane` (honours `XDG_CONFIG_HOME`).
+/// Portable user home directory (`HOME`, then `USERPROFILE`).
+pub fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Resolve `~/.config/markplane` (honours `XDG_CONFIG_HOME`, then portable home).
+///
+/// Does not panic when `HOME` is unset: uses `USERPROFILE` on Windows, or a
+/// relative `.config/markplane` path as a last resort.
 pub fn config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
         && !xdg.is_empty()
     {
         return PathBuf::from(xdg).join("markplane");
     }
-    let home = std::env::var_os("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".config/markplane")
+    match user_home() {
+        Some(home) => home.join(".config").join("markplane"),
+        None => PathBuf::from(".config").join("markplane"),
+    }
 }
 
 fn registry_path(config_dir: &Path) -> PathBuf {
@@ -118,11 +131,6 @@ pub fn find_by_path(config_dir: &Path, project_path: &Path) -> anyhow::Result<Op
             .into_iter()
             .find(|p| p.path == path_str))
     })
-}
-
-/// Re-read the registry without holding a long-lived cache (locked).
-pub fn find_reread(config_dir: &Path, id: &str) -> anyhow::Result<Option<RegistryEntry>> {
-    find(config_dir, id)
 }
 
 fn slugify(name: &str) -> String {

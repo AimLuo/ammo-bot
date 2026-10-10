@@ -1,26 +1,31 @@
-//! Background `markplane serve` process management (macOS / Linux).
+//! Background `markplane serve` process management.
 //!
-//! Re-execs the current binary with `--daemon-child`, locks `serve.pid` for the
-//! server lifetime, and exposes start / stop / status / logs.
+//! Cross-platform pieces: pid lock, status probe, reuse of a running server.
+//! Daemon spawn / stop / log-follow use Unix process APIs and are stubbed on
+//! other targets with a clear error.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context};
+#[cfg(unix)]
+use anyhow::anyhow;
+use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::TryLockError;
-use std::os::unix::process::CommandExt;
 
 use super::serve_registry;
 
+#[cfg(unix)]
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const STOP_GRACE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 
@@ -90,11 +95,13 @@ fn pid_path(config_dir: &Path) -> PathBuf {
     config_dir.join("serve.pid")
 }
 
+#[cfg(unix)]
 fn log_path(config_dir: &Path) -> PathBuf {
     config_dir.join("serve.log")
 }
 
 /// Returns `Some(info)` when the exclusive lock is held and the pid file has content.
+#[cfg_attr(not(unix), allow(dead_code))] // used by Unix `start`
 pub fn read_running_info(config_dir: &Path) -> anyhow::Result<Option<PidInfo>> {
     if !lock_held(config_dir)? {
         return Ok(None);
@@ -137,6 +144,7 @@ fn read_pid_info(config_dir: &Path) -> anyhow::Result<Option<PidInfo>> {
     Ok(Some(serde_json::from_str(trimmed)?))
 }
 
+#[cfg(unix)]
 fn rotate_log_if_needed(config_dir: &Path) -> anyhow::Result<()> {
     let path = log_path(config_dir);
     if !path.exists() {
@@ -152,6 +160,7 @@ fn rotate_log_if_needed(config_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn tail_log(config_dir: &Path, lines: usize) -> String {
     let path = log_path(config_dir);
     if !path.exists() {
@@ -168,7 +177,10 @@ fn tail_log(config_dir: &Path, lines: usize) -> String {
 }
 
 /// Start the server in the background (no tokio runtime in this process).
+#[cfg(unix)]
 pub fn start(port: u16, dev: bool, no_tls: bool) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+
     let config_dir = serve_registry::config_dir();
     fs::create_dir_all(&config_dir)?;
 
@@ -205,7 +217,8 @@ pub fn start(port: u16, dev: bool, no_tls: bool) -> anyhow::Result<()> {
         .context("open serve.log")?;
     let log_err = log_file.try_clone()?;
 
-    let home = std::env::var_os("HOME").context("HOME must be set")?;
+    let home = serve_registry::user_home()
+        .context("HOME or USERPROFILE must be set to start the serve daemon")?;
 
     let mut command = Command::new(&exe);
     command
@@ -213,7 +226,7 @@ pub fn start(port: u16, dev: bool, no_tls: bool) -> anyhow::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err))
-        .current_dir(home)
+        .current_dir(&home)
         .process_group(0);
 
     if dev {
@@ -274,6 +287,12 @@ pub fn start(port: u16, dev: bool, no_tls: bool) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(not(unix))]
+pub fn start(_port: u16, _dev: bool, _no_tls: bool) -> anyhow::Result<()> {
+    bail!("`markplane serve start` is only supported on macOS and Linux")
+}
+
+#[cfg(unix)]
 pub fn stop() -> anyhow::Result<()> {
     let config_dir = serve_registry::config_dir();
     if !lock_held(&config_dir)? {
@@ -321,6 +340,11 @@ pub fn stop() -> anyhow::Result<()> {
     bail!("failed to stop serve (pid {pid})");
 }
 
+#[cfg(not(unix))]
+pub fn stop() -> anyhow::Result<()> {
+    bail!("`markplane serve stop` is only supported on macOS and Linux")
+}
+
 pub fn status() -> anyhow::Result<()> {
     let config_dir = serve_registry::config_dir();
     if !lock_held(&config_dir)? {
@@ -361,7 +385,10 @@ pub fn status() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn logs(lines: usize, follow: bool) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+
     let config_dir = serve_registry::config_dir();
     let path = log_path(&config_dir);
     if !path.exists() {
@@ -376,6 +403,11 @@ pub fn logs(lines: usize, follow: bool) -> anyhow::Result<()> {
 
     let err = Command::new("tail").args(&args).exec();
     Err(anyhow!("failed to exec tail: {err}"))
+}
+
+#[cfg(not(unix))]
+pub fn logs(_lines: usize, _follow: bool) -> anyhow::Result<()> {
+    bail!("`markplane serve logs` is only supported on macOS and Linux")
 }
 
 /// Register the current Project with a running server and return the URL to open.
