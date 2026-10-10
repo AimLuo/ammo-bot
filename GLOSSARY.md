@@ -4,6 +4,14 @@ A markdown-first project management system kept inside the repo, serving as the 
 
 ## Language
 
+**Project**:
+A directory containing a `.markplane/` folder; the unit of work the web UI opens, one at a time per view.
+_Avoid_: Workspace, repo
+
+**Project registry**:
+The user-level list of Projects the web UI can open and switch between; adding or removing an entry never touches the Project's files.
+_Avoid_: Project list, recent projects
+
 **Map**:
 An item that charts the way from the current state to a Destination as a set of Decision tickets; the wayfinder skill's canonical artifact.
 _Avoid_: Roadmap, wayfinding issue
