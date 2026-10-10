@@ -541,7 +541,11 @@ export function BacklogContent() {
         <BacklogListView tasks={filteredTasks} onTaskClick={openTask} sortKey={sortKey} />
       )}
       {view === "needs-you" && (
-        <NeedsYouListView tasks={filteredTasks} onTaskClick={openTask} />
+        <NeedsYouListView
+          tasks={filteredTasks}
+          unfilteredCount={needsYouCount}
+          onTaskClick={openTask}
+        />
       )}
 
       {/* Task detail sheet */}
@@ -1278,14 +1282,17 @@ function PromoteDropZone() {
 
 function NeedsYouListView({
   tasks,
+  unfilteredCount,
   onTaskClick,
 }: {
   tasks: Task[];
+  /** Count before priority/epic/tag/assignee filters (drives the empty copy). */
+  unfilteredCount: number;
   onTaskClick: (id: string) => void;
 }) {
   const sorted = useMemo(() => sortNeedsYouTasks(tasks), [tasks]);
 
-  if (sorted.length === 0) {
+  if (unfilteredCount === 0) {
     return <EmptyState title="Nothing needs you" />;
   }
 
