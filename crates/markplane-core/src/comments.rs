@@ -529,7 +529,7 @@ none
             "# New\n\nUpdated desc\n\n## Comments\n\nPreamble\n\n### 2026-10-10 alice\n\nKeep me\n"
         );
         // Simulate a concurrent append then description write
-        let after_append = crate::append_comment_to_body(&body, "2026-10-10", "agent", "new");
+        let after_append = crate::append_comment_to_body(body, "2026-10-10", "agent", "new");
         let preserved = with_description(&after_append, "# New\n\nOnly desc");
         assert!(preserved.contains("### 2026-10-10 alice"));
         assert!(preserved.contains("Keep me"));

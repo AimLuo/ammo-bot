@@ -14,15 +14,10 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  check:
-    name: Check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  check-macos:
+    name: Check (macos-arm64)
+    runs-on: macos-latest
     timeout-minutes: 30
-
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +29,37 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Formatting is platform-independent — checking it once is enough.
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace
+
+  check-debian:
+    name: Check (debian-13-amd64)
+    runs-on: ubuntu-latest
+    container: debian:13
+    timeout-minutes: 30
+
+    steps:
+      - name: Install Debian build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl git \
+            libclang-dev pkg-config
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.0'
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Rustfmt
-        if: runner.os == 'Linux'
         run: cargo fmt --check
 
       - name: Clippy
@@ -45,16 +68,13 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
-      # The frontend build is platform-independent and slow; Linux only.
       - uses: actions/setup-node@v4
-        if: runner.os == 'Linux'
         with:
           node-version-file: crates/markplane-web/ui/.nvmrc
           cache: npm
           cache-dependency-path: crates/markplane-web/ui/package-lock.json
 
       - name: Frontend lint & build
-        if: runner.os == 'Linux'
         working-directory: crates/markplane-web/ui
         run: |
           npm ci
@@ -64,9 +84,18 @@ jobs:
   musl:
     name: musl (x86_64-unknown-linux-musl)
     runs-on: ubuntu-latest
+    container: debian:13
     timeout-minutes: 30
 
     steps:
+      - name: Install Debian build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl git \
+            libclang-dev musl-tools pkg-config
+          rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@master
@@ -77,9 +106,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build (aws-lc-rs / musl smoke)
         run: cargo build --locked --target x86_64-unknown-linux-musl -p markplane-cli

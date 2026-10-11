@@ -15,10 +15,17 @@ jobs:
   validate:
     name: Validate tag
     runs-on: ubuntu-latest
+    container: debian:13
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Install Debian deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git
+          rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v4
 
       - name: Extract and validate version
@@ -38,8 +45,15 @@ jobs:
     name: Build frontend
     needs: validate
     runs-on: ubuntu-latest
+    container: debian:13
     timeout-minutes: 10
     steps:
+      - name: Install Debian deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+          rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -60,36 +74,22 @@ jobs:
           path: crates/markplane-web/ui/out/
           retention-days: 1
 
-  build-binaries:
-    name: Build ${{ matrix.target }}
+  build-macos:
+    name: Build aarch64-apple-darwin
     needs: [validate, build-frontend]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.93.0'
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-
-      - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+          key: aarch64-apple-darwin
 
       - uses: actions/download-artifact@v4
         with:
@@ -97,29 +97,85 @@ jobs:
           path: crates/markplane-web/ui/out/
 
       - name: Build
-        run: cargo build --locked --release --features embed-ui --target ${{ matrix.target }}
+        run: cargo build --locked --release --features embed-ui --target aarch64-apple-darwin
 
       - name: Smoke test
-        run: ./target/${{ matrix.target }}/release/markplane --version
+        run: ./target/aarch64-apple-darwin/release/markplane --version
 
       - name: Package
         run: |
-          ARCHIVE="markplane-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release markplane
+          ARCHIVE="markplane-v${{ needs.validate.outputs.version }}-aarch64-apple-darwin.tar.gz"
+          tar -czf "$ARCHIVE" -C target/aarch64-apple-darwin/release markplane
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.target }}
+          name: binary-aarch64-apple-darwin
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  build-linux:
+    name: Build x86_64-unknown-linux-musl
+    needs: [validate, build-frontend]
+    runs-on: ubuntu-latest
+    container: debian:13
+    timeout-minutes: 30
+    steps:
+      - name: Install Debian build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl git \
+            libclang-dev musl-tools pkg-config
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.0'
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-musl
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend
+          path: crates/markplane-web/ui/out/
+
+      - name: Build
+        run: cargo build --locked --release --features embed-ui --target x86_64-unknown-linux-musl
+
+      - name: Smoke test
+        run: ./target/x86_64-unknown-linux-musl/release/markplane --version
+
+      - name: Package
+        run: |
+          ARCHIVE="markplane-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz"
+          tar -czf "$ARCHIVE" -C target/x86_64-unknown-linux-musl/release markplane
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-x86_64-unknown-linux-musl
           path: ${{ env.ARCHIVE }}
           retention-days: 1
 
   create-release:
     name: Create release
-    needs: [validate, build-binaries]
+    needs: [validate, build-macos, build-linux]
     runs-on: ubuntu-latest
+    container: debian:13
     timeout-minutes: 10
     steps:
+      - name: Install Debian deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+          rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v4
         with:
           sparse-checkout: install.sh

@@ -5133,18 +5133,11 @@ async fn cleanup_one_run(
         terminate_orphan,
     ) {
         Ok(()) => {}
-        Err(serve_dispatcher_cleanup::CleanupError::OrphanRunning { pid }) => {
+        Err(err) => {
             return Err(error_response(
                 StatusCode::CONFLICT,
-                "orphan_running",
-                &format!("Previous agent process still running (pid {pid})"),
-            ));
-        }
-        Err(serve_dispatcher_cleanup::CleanupError::NotEligible) => {
-            return Err(error_response(
-                StatusCode::CONFLICT,
-                "not_cleanup_eligible",
-                "Clean up is not available for this Run",
+                err.code(),
+                &err.message(),
             ));
         }
     }
@@ -7099,7 +7092,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["status"], "unavailable");
         assert!(json["data"]["path"].as_str().unwrap().contains(session_id));
-        assert!(json["data"]["reason"].as_str().unwrap().len() > 0);
+        assert!(!json["data"]["reason"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -7424,8 +7417,6 @@ mod tests {
         config.dispatcher.stages.implement.timeout_minutes = Some(9999);
         // Bypass API validation by writing YAML directly.
         let yaml = serde_yaml::to_string(&config).unwrap();
-        // Force an out-of-range value that still deserializes.
-        let yaml = yaml.replace("timeout_minutes: 9999", "timeout_minutes: 9999");
         fs::write(&path, yaml).unwrap();
         // Confirm file has the illegal value.
         let on_disk = Project::new(env.project_dir.join(".markplane"))
@@ -9137,8 +9128,8 @@ mod tests {
         loop {
             let pos_a = state.engine.lock().await.merge_queue_position(&task_a).await;
             let pos_b = state.engine.lock().await.merge_queue_position(&task_b).await;
-            if pos_a.is_some() && pos_b.is_some() {
-                let positions = [pos_a.unwrap(), pos_b.unwrap()];
+            if let (Some(a), Some(b)) = (pos_a, pos_b) {
+                let positions = [a, b];
                 assert!(
                     positions.contains(&1) && positions.contains(&2),
                     "same worktree queue positions 1 and 2, got {positions:?}"
@@ -10644,13 +10635,11 @@ fi
             if let Ok(Some(rec)) = markplane_core::read_run_record(
                 &env.project_dir.join(".markplane"),
                 &task_id,
-            ) {
-                if let Some(a) = rec.runs.last().and_then(|r| r.attempts.last()) {
-                    if let Some(p) = a.pid {
-                        pid = Some(p);
-                        break;
-                    }
-                }
+            ) && let Some(a) = rec.runs.last().and_then(|r| r.attempts.last())
+                && let Some(p) = a.pid
+            {
+                pid = Some(p);
+                break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -10893,11 +10882,11 @@ fi
             let mut rec = read_run_record(&env.project_dir.join(".markplane"), &task_id)
                 .unwrap()
                 .unwrap();
-            if let Some(run) = rec.runs.last_mut() {
-                if let Some(a) = run.attempts.last_mut() {
-                    a.pid = Some(orphan_pid);
-                    a.process_group_id = Some(orphan_pid);
-                }
+            if let Some(run) = rec.runs.last_mut()
+                && let Some(a) = run.attempts.last_mut()
+            {
+                a.pid = Some(orphan_pid);
+                a.process_group_id = Some(orphan_pid);
             }
             write_run_record(&env.project_dir.join(".markplane"), &task_id, &rec).unwrap();
         }
@@ -11524,6 +11513,7 @@ fi
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn continue_routes_scenario(
         name: &str,
         stage: markplane_core::Stage,

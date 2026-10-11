@@ -181,14 +181,12 @@ pub fn force_cleanup_for_repickup(project_dir: &Path, run: &mut Run) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupError {
     OrphanRunning { pid: u32 },
-    NotEligible,
 }
 
 impl CleanupError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::OrphanRunning { .. } => "orphan_running",
-            Self::NotEligible => "not_cleanup_eligible",
         }
     }
 
@@ -197,7 +195,6 @@ impl CleanupError {
             Self::OrphanRunning { pid } => {
                 format!("Previous agent process still running (pid {pid})")
             }
-            Self::NotEligible => "Clean up is not available for this Run".into(),
         }
     }
 }
@@ -224,12 +221,10 @@ pub fn auto_cleanup_project(
         if !attempt_auto_cleanup(project_dir, &mut run) {
             continue;
         }
-        if run.cleanup_blocked != before_blocked {
-            if let Some(reason) = &run.cleanup_blocked {
-                eprintln!(
-                    "dispatcher: cleanup skipped for {task_id}: {reason}"
-                );
-            }
+        if run.cleanup_blocked != before_blocked
+            && let Some(reason) = &run.cleanup_blocked
+        {
+            eprintln!("dispatcher: cleanup skipped for {task_id}: {reason}");
         }
         update_latest(&mut record, &run);
         if write_run_record(project.root(), &task_id, &record).is_ok() {
@@ -257,12 +252,12 @@ fn cleanup_run(
 ) -> bool {
     let mut changed = false;
 
-    if !force {
-        if let Some(_pid) = run_orphan_pid(run) {
-            changed |= set_blocked(run, BLOCKED_ORPHAN);
-            run.cleanup_trigger = Some(trigger.to_string());
-            return changed;
-        }
+    if !force
+        && let Some(_pid) = run_orphan_pid(run)
+    {
+        changed |= set_blocked(run, BLOCKED_ORPHAN);
+        run.cleanup_trigger = Some(trigger.to_string());
+        return changed;
     }
 
     if run.worktree_removed_at.is_none() {
@@ -288,11 +283,12 @@ fn cleanup_run(
         }
     }
 
-    if run.worktree_removed_at.is_some() && run.branch_removed_at.is_some() {
-        if run.cleanup_blocked.is_some() {
-            run.cleanup_blocked = None;
-            changed = true;
-        }
+    if run.worktree_removed_at.is_some()
+        && run.branch_removed_at.is_some()
+        && run.cleanup_blocked.is_some()
+    {
+        run.cleanup_blocked = None;
+        changed = true;
     }
     if changed {
         run.cleanup_trigger = Some(trigger.to_string());

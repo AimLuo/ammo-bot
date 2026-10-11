@@ -144,6 +144,7 @@ mod tests {
     use crate::models::{Effort, MarkplaneDocument, default_task_workflow};
     use chrono::NaiveDate;
 
+    #[allow(clippy::too_many_arguments)]
     fn task(
         id: &str,
         status: &str,

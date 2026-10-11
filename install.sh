@@ -43,14 +43,17 @@ detect_platform() {
             TARGET="aarch64-apple-darwin"
             ;;
         x86_64)
-            case "$OS" in
-                Darwin) TARGET="x86_64-apple-darwin" ;;
-                Linux)  TARGET="x86_64-unknown-linux-musl" ;;
-            esac
+            if [ "$OS" = "Darwin" ]; then
+                echo "Error: Unsupported architecture: macOS Intel (x86_64)" >&2
+                echo "Pre-built binaries are available for Apple Silicon and Linux x86_64. Build from source for other architectures:" >&2
+                echo "  https://github.com/${REPO}#build-from-source" >&2
+                exit 1
+            fi
+            TARGET="x86_64-unknown-linux-musl"
             ;;
         *)
             echo "Error: Unsupported architecture: $ARCH" >&2
-            echo "Pre-built binaries are available for x86_64 and Apple Silicon. Build from source for other architectures:" >&2
+            echo "Pre-built binaries are available for Apple Silicon and Linux x86_64. Build from source for other architectures:" >&2
             echo "  https://github.com/${REPO}#build-from-source" >&2
             exit 1
             ;;

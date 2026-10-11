@@ -394,8 +394,10 @@ has spaces in slug - Label
 
     #[test]
     fn dispatcher_config_omits_unset_fields_on_serialize() {
-        let mut cfg = DispatcherConfig::default();
-        cfg.push_after_merge = Some(false);
+        let cfg = DispatcherConfig {
+            push_after_merge: Some(false),
+            ..Default::default()
+        };
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         assert!(yaml.contains("push_after_merge: false"));
         assert!(!yaml.contains("stages"));

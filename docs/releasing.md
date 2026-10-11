@@ -43,8 +43,7 @@ Markplane uses a tag-triggered release workflow. Pushing a `v*` tag to GitHub bu
 2. **Builds the frontend** once (`npm ci && npm run build` in `crates/markplane-web/ui/`)
 3. **Builds platform binaries** with `--release --features embed-ui` (frontend embedded in the binary):
    - `aarch64-apple-darwin` (macOS Apple Silicon)
-   - `x86_64-apple-darwin` (macOS Intel)
-   - `x86_64-unknown-linux-musl` (Linux x86_64, statically linked)
+   - `x86_64-unknown-linux-musl` (Linux x86_64 / Debian 13-compatible, statically linked)
 4. **Smoke tests** each binary (`markplane --version`)
 5. **Creates a GitHub Release** with:
    - Binary archives (e.g., `markplane-v0.2.0-aarch64-apple-darwin.tar.gz`)

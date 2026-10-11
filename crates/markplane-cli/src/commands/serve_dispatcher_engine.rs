@@ -484,19 +484,16 @@ async fn run_pipeline(
         .unwrap_or_default();
 
     // Re-pickup: force-clean the previous Run's remnants and record old branch head.
-    if let Some(mut prev) = record.runs.last().cloned() {
-        if prev.worktree_removed_at.is_none() || prev.branch_removed_at.is_none() {
-            if serve_dispatcher_cleanup::force_cleanup_for_repickup(&proj.project_dir, &mut prev)
-            {
-                if let Some(last) = record.runs.last_mut() {
-                    *last = prev;
-                }
-                write_run_record(proj.project.root(), task_id, &record)
-                    .map_err(|e| e.to_string())?;
-                if let Some(prev_run) = record.runs.last() {
-                    broadcast_run_changed(&proj.ws_tx, task_id, prev_run);
-                }
-            }
+    if let Some(mut prev) = record.runs.last().cloned()
+        && (prev.worktree_removed_at.is_none() || prev.branch_removed_at.is_none())
+        && serve_dispatcher_cleanup::force_cleanup_for_repickup(&proj.project_dir, &mut prev)
+    {
+        if let Some(last) = record.runs.last_mut() {
+            *last = prev;
+        }
+        write_run_record(proj.project.root(), task_id, &record).map_err(|e| e.to_string())?;
+        if let Some(prev_run) = record.runs.last() {
+            broadcast_run_changed(&proj.ws_tx, task_id, prev_run);
         }
     }
 
@@ -2584,12 +2581,12 @@ async fn run_stage_agent(
 
 /// Insert `prior` after the leading `/implement …` skill line (keep skill first).
 fn insert_after_skill_line(body: &str, prior: &str) -> String {
-    if let Some(rest) = body.strip_prefix("/implement ") {
-        if let Some(nl) = rest.find('\n') {
-            let skill = &body[.."/implement ".len() + nl + 1];
-            let after = rest[nl + 1..].trim_start_matches('\n');
-            return format!("{skill}\n{prior}{after}");
-        }
+    if let Some(rest) = body.strip_prefix("/implement ")
+        && let Some(nl) = rest.find('\n')
+    {
+        let skill = &body[.."/implement ".len() + nl + 1];
+        let after = rest[nl + 1..].trim_start_matches('\n');
+        return format!("{skill}\n{prior}{after}");
     }
     format!("{prior}{body}")
 }

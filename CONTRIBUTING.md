@@ -76,18 +76,19 @@ All code must be clippy-clean with no warnings.
 
 ## Continuous Integration
 
-Every push and pull request runs CI on **both `ubuntu-latest` and
-`macos-latest`**. Both platform checks must pass before a PR can merge.
+Every push and pull request runs CI on **macOS Apple Silicon** (`macos-latest`)
+and **Debian 13 amd64** (`debian:13` container). Both platform checks must pass
+before a PR can merge.
 
-| Step | Linux | macOS |
-|------|-------|-------|
+| Step | Debian 13 | macOS ARM |
+|------|-----------|-----------|
 | `cargo fmt --check` | ✅ | — |
 | `cargo clippy --locked --workspace --all-targets -- -D warnings` | ✅ | ✅ |
 | `cargo test --locked --workspace` | ✅ | ✅ |
 | `npm ci && npm run lint && npm run build` | ✅ | — |
 
 Formatting and the frontend build are platform-independent, so they run once
-on Linux. Clippy and the test suite run on both, because that is where
+on Debian 13. Clippy and the test suite run on both, because that is where
 platform differences surface.
 
 Two failure modes this catches that testing on a single machine will not:
