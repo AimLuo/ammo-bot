@@ -5112,7 +5112,14 @@ async fn cleanup_one_run(
     let display =
         run_display_for_cleanup(&state, &project, &project_id, &task_id, &run).await;
     let ticket_cat = ticket_category_for_cleanup(&project, &task_id);
-    if !serve_dispatcher_cleanup::manual_cleanup_eligible(&run, &display, ticket_cat) {
+    let project_dir = project_dir_from_project(&project);
+    let preview = serve_dispatcher_cleanup::cleanup_preview(
+        &project_dir,
+        &run,
+        &display,
+        ticket_cat,
+    );
+    if !preview.eligible {
         return Err(error_response(
             StatusCode::CONFLICT,
             "not_cleanup_eligible",
@@ -5120,7 +5127,6 @@ async fn cleanup_one_run(
         ));
     }
 
-    let project_dir = project_dir_from_project(&project);
     match serve_dispatcher_cleanup::attempt_force_cleanup(
         &project_dir,
         &mut run,

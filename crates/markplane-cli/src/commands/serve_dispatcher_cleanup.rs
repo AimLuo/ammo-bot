@@ -116,18 +116,26 @@ pub fn cleanup_preview(
     } else {
         0
     };
+    let worktree_registered = worktree_present && registered;
+    let branch_is_agent = run.branch.starts_with("agent/");
+    // Spec: only when a recorded remnant is still there and deletable
+    // (registered worktree, agent/* branch, and/or orphan to terminate).
+    let has_deletable_remnant = worktree_registered
+        || (branch_present && branch_is_agent)
+        || orphan_pid.is_some();
     CleanupPreview {
         worktree: run.worktree.clone(),
         worktree_present,
-        worktree_registered: worktree_present && registered,
+        worktree_registered,
         uncommitted_files,
         branch: run.branch.clone(),
         branch_present,
-        branch_is_agent: run.branch.starts_with("agent/"),
+        branch_is_agent,
         unmerged_commits,
         branch_head,
         orphan_pid,
-        eligible: manual_cleanup_eligible(run, display_status, ticket_category),
+        eligible: manual_cleanup_eligible(run, display_status, ticket_category)
+            && has_deletable_remnant,
     }
 }
 
@@ -832,6 +840,23 @@ mod tests {
         assert!(preview.worktree_registered);
         assert!(preview.branch_present);
         assert!(preview.branch_is_agent);
+    }
+
+    #[test]
+    fn preview_not_eligible_when_nothing_deletable() {
+        let (_tmp, root) = init_repo();
+        let handmade = root.join("handmade");
+        fs::create_dir_all(&handmade).unwrap();
+        let run_rec = sample_run(&handmade, "feature/mine");
+        let preview = cleanup_preview(
+            &root,
+            &run_rec,
+            "failed",
+            Some(StatusCategory::Completed),
+        );
+        assert!(!preview.worktree_registered);
+        assert!(!preview.branch_present);
+        assert!(!preview.eligible);
     }
 
     #[test]

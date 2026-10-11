@@ -364,8 +364,9 @@ export function activeRunConfirmMessage(
 
 /**
  * Whether the Run section should show "Clean up…".
- * Mirrors server `manual_cleanup_eligible`: not live/interrupted/elsewhere,
- * not failed-while-active, and at least one remnant remains.
+ * Coarse client gate (removed_at + display status + failed/active).
+ * Server `GET …/cleanup` `eligible` is authoritative (live registered
+ * worktree / agent/* branch / orphan).
  */
 export function canCleanupRun(
   run: Run,
