@@ -8629,7 +8629,7 @@ mod tests {
         let remote_log = std::process::Command::new("git")
             .args(["--git-dir"])
             .arg(remote)
-            .args(["log", "--oneline", "-3"])
+            .args(["log", "--oneline", "-3", "refs/heads/main"])
             .output()
             .unwrap();
         assert!(remote_log.status.success(), "remote should have commits");
