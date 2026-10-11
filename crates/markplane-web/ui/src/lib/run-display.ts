@@ -387,7 +387,13 @@ export function canCleanupRun(
   const cat: StatusCategory | undefined = workflow
     ? categoryOf(workflow, task.status)
     : undefined;
-  if (run.status === "failed" && cat === "active") return false;
+  // Failed + still active (or category unknown while config loads) → Continue, not Clean up.
+  if (
+    run.status === "failed" &&
+    (cat === "active" || cat === undefined)
+  ) {
+    return false;
+  }
   return true;
 }
 
