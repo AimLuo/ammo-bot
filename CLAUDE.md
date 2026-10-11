@@ -12,7 +12,7 @@
 
 ## Git
 
-仅本地提交，不 push
+已关联远程；用户要求发布时可 push
 
 # CLAUDE.md
 
