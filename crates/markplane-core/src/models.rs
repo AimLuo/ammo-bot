@@ -602,7 +602,10 @@ pub struct Config {
     #[serde(default)]
     pub workflows: WorkflowConfig,
     /// Dispatcher shared settings. Omitted from YAML when unset.
-    #[serde(default, skip_serializing_if = "crate::dispatcher::DispatcherConfig::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::dispatcher::DispatcherConfig::is_empty"
+    )]
     pub dispatcher: crate::dispatcher::DispatcherConfig,
 }
 

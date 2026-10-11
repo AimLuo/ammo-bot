@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use std::fs::TryLockError;
 use markplane_core::{
     Attempt, AttemptResult, EffectiveDispatcherSettings, ImplementVerdict, MarkplaneDocument,
     Patch, Project, QueryFilter, READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, Run, RunRecord,
@@ -23,6 +22,7 @@ use markplane_core::{
     read_run_record, round_robin_pickup, usage_from_events, verdict_from_events, write_run_record,
 };
 use serde_json::json;
+use std::fs::TryLockError;
 use tokio::sync::{Mutex, broadcast};
 
 use super::serve_dispatcher_cleanup;
@@ -93,8 +93,7 @@ impl ScanAutoCloseState {
     /// Lock file identity mismatch → close reason.
     pub fn note_lock_lost(&mut self, project_id: &str) -> String {
         self.startup_fail_streak.remove(project_id);
-        let reason =
-            "Scan closed: Dispatcher lock file was deleted or replaced".to_string();
+        let reason = "Scan closed: Dispatcher lock file was deleted or replaced".to_string();
         self.mark_closed(project_id, reason)
             .expect("mark_closed always returns Some")
     }
@@ -124,7 +123,9 @@ mod scan_auto_close_tests {
         assert!(s.note_stage_ended("p1", true).is_none());
         assert!(s.note_stage_ended("p1", false).is_none());
         assert!(s.note_stage_ended("p1", false).is_none());
-        let reason = s.note_stage_ended("p1", false).expect("third no-init closes");
+        let reason = s
+            .note_stage_ended("p1", false)
+            .expect("third no-init closes");
         assert!(reason.contains("system/init"));
         assert_eq!(s.reason("p1"), Some(reason.as_str()));
         assert!(s.is_immediate_off("p1"));
@@ -421,7 +422,11 @@ fn candidate_ids(proj: &ProjectTickInput) -> Option<Vec<String>> {
     )
 }
 
-async fn claim_slot(engine: Arc<Mutex<EngineState>>, proj: &ProjectTickInput, task_id: &str) -> bool {
+async fn claim_slot(
+    engine: Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+) -> bool {
     let mut g = engine.lock().await;
     if g.slots_used() as u32 >= proj.concurrency {
         return false;
@@ -441,7 +446,13 @@ fn spawn_pipeline(engine: Arc<Mutex<EngineState>>, proj: ProjectTickInput, task_
     tokio::spawn(async move {
         if let Err(e) = run_pipeline(engine_bg.clone(), &proj, &task_id_bg).await {
             eprintln!("dispatcher: run {task_id_bg} error: {e}");
-            let _ = fail_run_internal(&engine_bg, &proj, &task_id_bg, &format!("internal error: {e}")).await;
+            let _ = fail_run_internal(
+                &engine_bg,
+                &proj,
+                &task_id_bg,
+                &format!("internal error: {e}"),
+            )
+            .await;
         }
         // Slot freed as soon as the Run ends (failed / stopped / succeeded).
         let mut g = engine_bg.lock().await;
@@ -456,10 +467,7 @@ async fn run_pipeline(
     proj: &ProjectTickInput,
     task_id: &str,
 ) -> Result<(), String> {
-    let config = proj
-        .project
-        .load_config()
-        .map_err(|e| e.to_string())?;
+    let config = proj.project.load_config().map_err(|e| e.to_string())?;
     let active_status = config
         .workflows
         .task
@@ -468,7 +476,8 @@ async fn run_pipeline(
         .cloned()
         .ok_or_else(|| "no active status in workflow".to_string())?;
 
-    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let doc: MarkplaneDocument<Task> =
+        proj.project.read_item(task_id).map_err(|e| e.to_string())?;
     let title = doc.frontmatter.title.clone();
 
     let base_branch = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
@@ -537,7 +546,12 @@ async fn run_pipeline(
     if worktree.exists() {
         let _ = git_run(
             &proj.project_dir,
-            &["worktree", "remove", "--force", &worktree.display().to_string()],
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &worktree.display().to_string(),
+            ],
         );
         let _ = fs::remove_dir_all(&worktree);
     }
@@ -575,13 +589,13 @@ async fn run_pipeline(
     if !ticket_still_ours(&proj.project, task_id)? {
         {
             serve_dispatcher_handoff::silent_stop(
-            &proj.project,
-            &proj.ws_tx,
-            task_id,
-            &mut record,
-            &mut run,
-        )
-        .await?;
+                &proj.project,
+                &proj.ws_tx,
+                task_id,
+                &mut record,
+                &mut run,
+            )
+            .await?;
             engine.lock().await.broadcast_dispatcher_changed();
             return Ok(());
         }
@@ -617,27 +631,43 @@ async fn run_pipeline(
     if !ticket_still_ours(&proj.project, task_id)? {
         {
             serve_dispatcher_handoff::silent_stop(
-            &proj.project,
-            &proj.ws_tx,
-            task_id,
-            &mut record,
-            &mut run,
-        )
-        .await?;
+                &proj.project,
+                &proj.ws_tx,
+                task_id,
+                &mut record,
+                &mut run,
+            )
+            .await?;
             engine.lock().await.broadcast_dispatcher_changed();
             return Ok(());
         }
     }
 
     if let Some(reason) = stage_agent_failure_reason(Stage::Implement, &impl_result) {
-        return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Implement, reason)
-            .await;
+        return fail_and_finish(
+            &engine,
+            proj,
+            task_id,
+            &mut record,
+            &mut run,
+            Stage::Implement,
+            reason,
+        )
+        .await;
     }
 
     let impl_verdict = classify_implement_verdict(impl_result.verdict.as_deref());
     if let Some(reason) = implement_verdict_failure_reason(&impl_verdict) {
-        return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Implement, reason)
-            .await;
+        return fail_and_finish(
+            &engine,
+            proj,
+            task_id,
+            &mut record,
+            &mut run,
+            Stage::Implement,
+            reason,
+        )
+        .await;
     }
 
     if !branch_has_new_commits(&proj.project_dir, &base_sha, &branch)? {
@@ -658,13 +688,13 @@ async fn run_pipeline(
         if !ticket_still_ours(&proj.project, task_id)? {
             {
                 serve_dispatcher_handoff::silent_stop(
-                &proj.project,
-                &proj.ws_tx,
-                task_id,
-                &mut record,
-                &mut run,
-            )
-            .await?;
+                    &proj.project,
+                    &proj.ws_tx,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                )
+                .await?;
                 engine.lock().await.broadcast_dispatcher_changed();
                 return Ok(());
             }
@@ -706,20 +736,29 @@ async fn run_pipeline(
         if !ticket_still_ours(&proj.project, task_id)? {
             {
                 serve_dispatcher_handoff::silent_stop(
-                &proj.project,
-                &proj.ws_tx,
-                task_id,
-                &mut record,
-                &mut run,
-            )
-            .await?;
+                    &proj.project,
+                    &proj.ws_tx,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                )
+                .await?;
                 engine.lock().await.broadcast_dispatcher_changed();
                 return Ok(());
             }
         }
 
         if let Some(reason) = stage_agent_failure_reason(Stage::Fix, &fix_result) {
-            return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Fix, reason).await;
+            return fail_and_finish(
+                &engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                Stage::Fix,
+                reason,
+            )
+            .await;
         }
         if !is_fix_done(fix_result.verdict.as_deref()) {
             let line = fix_result.verdict.as_deref().unwrap_or("<none>");
@@ -833,8 +872,16 @@ async fn run_pipeline(
 
     if let Some(reason) = stage_agent_failure_reason(Stage::Merge, &merge_result) {
         let reason = with_abort_note(&proj.project_dir, &branch, reason);
-        return fail_and_finish(&engine, proj, task_id, &mut record, &mut run, Stage::Merge, reason)
-            .await;
+        return fail_and_finish(
+            &engine,
+            proj,
+            task_id,
+            &mut record,
+            &mut run,
+            Stage::Merge,
+            reason,
+        )
+        .await;
     }
     if !is_merge_done(merge_result.verdict.as_deref()) {
         let line = merge_result.verdict.as_deref().unwrap_or("<none>");
@@ -1361,11 +1408,9 @@ async fn success_close(
         .cloned()
         .ok_or_else(|| "no completed status".to_string())?;
 
-    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
-    let already_done = config
-        .workflows
-        .task
-        .category_of(&doc.frontmatter.status)
+    let doc: MarkplaneDocument<Task> =
+        proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let already_done = config.workflows.task.category_of(&doc.frontmatter.status)
         == Some(StatusCategory::Completed);
 
     if !already_done {
@@ -1394,9 +1439,10 @@ async fn success_close(
         }
     }
 
-    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
-    let already_commented = doc.body.contains(&format!("`{merge_sha}`"))
-        && doc.body.contains("**Merged**");
+    let doc: MarkplaneDocument<Task> =
+        proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let already_commented =
+        doc.body.contains(&format!("`{merge_sha}`")) && doc.body.contains("**Merged**");
     if !already_commented {
         let flag = if pushed { "yes" } else { "no" };
         let comment_text =
@@ -1413,15 +1459,16 @@ async fn success_close(
         .to_path_buf();
     let rel_str = rel.to_string_lossy().replace('\\', "/");
 
-    let status = git_stdout(&proj.project_dir, &["status", "--porcelain", "--", &rel_str])
-        .unwrap_or_default();
+    let status = git_stdout(
+        &proj.project_dir,
+        &["status", "--porcelain", "--", &rel_str],
+    )
+    .unwrap_or_default();
     if !status.trim().is_empty() {
         git_run(&proj.project_dir, &["add", "--", &rel_str])?;
         let msg = format!("Mark ticket {task_id} done\n\nRefs: {task_id}");
         git_run(&proj.project_dir, &["commit", "-m", &msg])?;
-        if pushed
-            && let Err(e) = git_run(&proj.project_dir, &["push", "origin", "HEAD"])
-        {
+        if pushed && let Err(e) = git_run(&proj.project_dir, &["push", "origin", "HEAD"]) {
             eprintln!("dispatcher: ticket push failed for {task_id}: {e}");
         }
     }
@@ -1449,14 +1496,8 @@ async fn fail_and_finish(
     reason: String,
 ) -> Result<(), String> {
     if !ticket_still_ours(&proj.project, task_id)? {
-        serve_dispatcher_handoff::silent_stop(
-            &proj.project,
-            &proj.ws_tx,
-            task_id,
-            record,
-            run,
-        )
-        .await?;
+        serve_dispatcher_handoff::silent_stop(&proj.project, &proj.ws_tx, task_id, record, run)
+            .await?;
         engine.lock().await.broadcast_dispatcher_changed();
         return Ok(());
     }
@@ -1528,7 +1569,8 @@ fn broadcast_run_changed(ws_tx: &broadcast::Sender<String>, task_id: &str, run: 
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "".into());
     // Broadcasts fire while this serve still owns the Run, so presence is InMemory.
-    let display = markplane_core::run_display_status(run, markplane_core::RunMemoryPresence::InMemory);
+    let display =
+        markplane_core::run_display_status(run, markplane_core::RunMemoryPresence::InMemory);
     let msg = json!({
         "type": "run_changed",
         "task_id": task_id,
@@ -1575,7 +1617,10 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_dir_realpath(project_dir: &Path) -> Result<PathBuf, String> {
-    let git_dir = git_stdout(project_dir, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
+    let git_dir = git_stdout(
+        project_dir,
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    )?;
     let p = PathBuf::from(git_dir);
     Ok(p.canonicalize().unwrap_or(p))
 }
@@ -1747,7 +1792,6 @@ fn with_abort_note(project_dir: &Path, branch: &str, reason: String) -> String {
     }
 }
 
-
 /// Errors from [`resume_run`] / [`continue_run`] mapped to HTTP 409 by serve.
 #[derive(Debug)]
 pub enum ResumeError {
@@ -1905,7 +1949,8 @@ async fn resume_pipeline(
         .map(|_| ());
     }
 
-    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let doc: MarkplaneDocument<Task> =
+        proj.project.read_item(task_id).map_err(|e| e.to_string())?;
     let title = doc.frontmatter.title.clone();
     let git_dir = git_dir_realpath(&proj.project_dir)?;
     let ctx = PromptContext {
@@ -2161,10 +2206,7 @@ pub async fn continue_run(
             .project
             .read_item(&task_id)
             .map_err(|e| ContinueError::Internal(e.to_string()))?;
-        if config
-            .workflows
-            .task
-            .category_of(&doc.frontmatter.status)
+        if config.workflows.task.category_of(&doc.frontmatter.status)
             != Some(StatusCategory::Active)
         {
             return Err(ContinueError::NotContinuable);
@@ -2191,7 +2233,10 @@ pub async fn continue_run(
         }
 
         // Single ticket write: comment + tags + assignee.
-        let date = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let date = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         let _lock = proj
             .project
             .lock_item(&task_id)
@@ -2300,7 +2345,8 @@ async fn continue_pipeline(
         .map(|_| ());
     }
 
-    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let doc: MarkplaneDocument<Task> =
+        proj.project.read_item(task_id).map_err(|e| e.to_string())?;
     let title = doc.frontmatter.title.clone();
     let git_dir = git_dir_realpath(&proj.project_dir)?;
     let ctx = PromptContext {
@@ -2331,8 +2377,7 @@ async fn continue_pipeline(
     match plan {
         ContinuePlan::MergeQueue => {
             if branch_is_ancestor(&proj.project_dir, &branch)? {
-                let target =
-                    git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
                 let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
                 run.current_stage = Some(Stage::Merge);
                 // Record a continue invocation even when no agent runs (AC: trigger continue).
@@ -2563,18 +2608,7 @@ async fn run_stage_agent(
         expect_session_id: resume_session_id,
     };
     run_agent(
-        engine,
-        proj,
-        task_id,
-        record,
-        run,
-        stage,
-        &model,
-        timeout,
-        &cwd,
-        &prompt,
-        author,
-        opts,
+        engine, proj, task_id, record, run, stage, &model, timeout, &cwd, &prompt, author, opts,
     )
     .await
 }
@@ -2606,14 +2640,8 @@ async fn after_stage_agent(
     outcome: &AgentOutcome,
 ) -> Result<(), String> {
     if !ticket_still_ours(&proj.project, task_id)? {
-        serve_dispatcher_handoff::silent_stop(
-            &proj.project,
-            &proj.ws_tx,
-            task_id,
-            record,
-            run,
-        )
-        .await?;
+        serve_dispatcher_handoff::silent_stop(&proj.project, &proj.ws_tx, task_id, record, run)
+            .await?;
         engine.lock().await.broadcast_dispatcher_changed();
         return Ok(());
     }
@@ -2703,7 +2731,13 @@ async fn advance_from_completed(
                     }
                     if let Some(reason) = stage_agent_failure_reason(Stage::Fix, &outcome) {
                         return fail_and_finish(
-                            &engine, proj, task_id, record, run, Stage::Fix, reason,
+                            &engine,
+                            proj,
+                            task_id,
+                            record,
+                            run,
+                            Stage::Fix,
+                            reason,
                         )
                         .await;
                     }
@@ -2761,13 +2795,9 @@ async fn advance_from_completed(
         }
         Stage::Merge => {
             if branch_is_ancestor(&proj.project_dir, branch)? {
-                let target =
-                    git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
                 let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
-                success_close(
-                    &engine, proj, task_id, record, run, &target, &merge_sha,
-                )
-                .await
+                success_close(&engine, proj, task_id, record, run, &target, &merge_sha).await
             } else {
                 run_merge_from_queue(
                     engine, proj, task_id, record, run, ctx, branch, git_dir, true, true, None,
@@ -2827,14 +2857,8 @@ async fn run_merge_from_queue(
     };
 
     if !ticket_still_ours(&proj.project, task_id)? {
-        serve_dispatcher_handoff::silent_stop(
-            &proj.project,
-            &proj.ws_tx,
-            task_id,
-            record,
-            run,
-        )
-        .await?;
+        serve_dispatcher_handoff::silent_stop(&proj.project, &proj.ws_tx, task_id, record, run)
+            .await?;
         engine.lock().await.broadcast_dispatcher_changed();
         return Ok(());
     }
@@ -2842,10 +2866,7 @@ async fn run_merge_from_queue(
     if branch_is_ancestor(&proj.project_dir, branch)? {
         let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
-        return success_close(
-            &engine, proj, task_id, record, run, &target, &merge_sha,
-        )
-        .await;
+        return success_close(&engine, proj, task_id, record, run, &target, &merge_sha).await;
     }
 
     // Abort residual merge from a prior interrupted merge Stage.
@@ -2884,14 +2905,8 @@ async fn run_merge_from_queue(
     }
     if !ticket_still_ours(&proj.project, task_id)? {
         let _ = abort_our_incomplete_merge(&proj.project_dir, branch);
-        serve_dispatcher_handoff::silent_stop(
-            &proj.project,
-            &proj.ws_tx,
-            task_id,
-            record,
-            run,
-        )
-        .await?;
+        serve_dispatcher_handoff::silent_stop(&proj.project, &proj.ws_tx, task_id, record, run)
+            .await?;
         engine.lock().await.broadcast_dispatcher_changed();
         return Ok(());
     }

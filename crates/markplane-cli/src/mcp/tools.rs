@@ -806,9 +806,7 @@ fn handle_add(project: &Project, args: &Value) -> Result<String, String> {
                 .map(|s| s.to_string());
 
             if map.is_some() && plan.is_some() {
-                return Err(
-                    "A Decision ticket (map) cannot also have an epic or plan".to_string(),
-                );
+                return Err("A Decision ticket (map) cannot also have an epic or plan".to_string());
             }
 
             let tags: Vec<String> = args
@@ -1210,8 +1208,7 @@ fn handle_plan(project: &Project, args: &Value) -> Result<String, String> {
             let task_doc: MarkplaneDocument<Task> =
                 project.read_item(task_id).map_err(|e| e.to_string())?;
 
-            let default_title =
-                format!("Implementation plan for {}", task_doc.frontmatter.title);
+            let default_title = format!("Implementation plan for {}", task_doc.frontmatter.title);
             let title = args
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -1236,9 +1233,7 @@ fn handle_plan(project: &Project, args: &Value) -> Result<String, String> {
             let title = args
                 .get("title")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    "title is required when creating a standalone plan".to_string()
-                })?;
+                .ok_or_else(|| "title is required when creating a standalone plan".to_string())?;
 
             let plan = project
                 .create_plan(title, vec![], tags, template, body)

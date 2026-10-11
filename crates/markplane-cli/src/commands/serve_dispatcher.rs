@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use markplane_core::{
-    AgentModel, DEFAULT_CONCURRENCY, parse_agent_models, validate_concurrency,
-};
+use markplane_core::{AgentModel, DEFAULT_CONCURRENCY, parse_agent_models, validate_concurrency};
 use serde::{Deserialize, Serialize};
 
 /// How long to cache `agent models` output.
@@ -55,21 +53,14 @@ pub fn read_concurrency(config_dir: &Path) -> Result<u32, ConcurrencyReadError> 
     if !path.exists() {
         return Ok(DEFAULT_CONCURRENCY);
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| {
-        ConcurrencyReadError::Unreadable(format!("cannot read serve.json: {e}"))
-    })?;
-    let file: ServeFile = serde_json::from_str(&content).map_err(|e| {
-        ConcurrencyReadError::Unreadable(format!("cannot parse serve.json: {e}"))
-    })?;
-    let Some(concurrency) = file
-        .dispatcher
-        .as_ref()
-        .and_then(|d| d.concurrency)
-    else {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ConcurrencyReadError::Unreadable(format!("cannot read serve.json: {e}")))?;
+    let file: ServeFile = serde_json::from_str(&content)
+        .map_err(|e| ConcurrencyReadError::Unreadable(format!("cannot parse serve.json: {e}")))?;
+    let Some(concurrency) = file.dispatcher.as_ref().and_then(|d| d.concurrency) else {
         return Ok(DEFAULT_CONCURRENCY);
     };
-    validate_concurrency(concurrency)
-        .map_err(|e| ConcurrencyReadError::Invalid(e.message))?;
+    validate_concurrency(concurrency).map_err(|e| ConcurrencyReadError::Invalid(e.message))?;
     Ok(concurrency)
 }
 
@@ -79,13 +70,12 @@ pub fn read_concurrency(config_dir: &Path) -> Result<u32, ConcurrencyReadError> 
 /// can round-trip through [`ServeFile`]).
 pub fn write_concurrency(config_dir: &Path, concurrency: u32) -> Result<(), String> {
     validate_concurrency(concurrency).map_err(|e| e.message)?;
-    std::fs::create_dir_all(config_dir)
-        .map_err(|e| format!("cannot create config dir: {e}"))?;
+    std::fs::create_dir_all(config_dir).map_err(|e| format!("cannot create config dir: {e}"))?;
     let path = serve_json_path(config_dir);
 
     let mut file = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read serve.json: {e}"))?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| format!("cannot read serve.json: {e}"))?;
         serde_json::from_str::<ServeFile>(&content).unwrap_or_default()
     } else {
         ServeFile::default()

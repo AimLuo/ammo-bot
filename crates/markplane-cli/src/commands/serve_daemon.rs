@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use anyhow::anyhow;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::TryLockError;
@@ -448,10 +448,6 @@ pub fn reuse_running_server(config_dir: &Path) -> anyhow::Result<Option<(PidInfo
         }
     };
 
-    let url = format!(
-        "{}{}",
-        info.url.trim_end_matches('/'),
-        open_path
-    );
+    let url = format!("{}{}", info.url.trim_end_matches('/'), open_path);
     Ok(Some((info, url)))
 }

@@ -88,10 +88,7 @@ fn read_unlocked(config_dir: &Path) -> anyhow::Result<RegistryFile> {
 fn write_unlocked(config_dir: &Path, registry: &RegistryFile) -> anyhow::Result<()> {
     fs::create_dir_all(config_dir)?;
     let path = registry_path(config_dir);
-    let tmp = config_dir.join(format!(
-        "projects.json.tmp.{}",
-        std::process::id()
-    ));
+    let tmp = config_dir.join(format!("projects.json.tmp.{}", std::process::id()));
     {
         let mut file = File::create(&tmp)?;
         let json = serde_json::to_string_pretty(registry)?;
@@ -119,7 +116,10 @@ pub fn find(config_dir: &Path, id: &str) -> anyhow::Result<Option<RegistryEntry>
 }
 
 /// Find an entry by realpath'd project directory (locked read).
-pub fn find_by_path(config_dir: &Path, project_path: &Path) -> anyhow::Result<Option<RegistryEntry>> {
+pub fn find_by_path(
+    config_dir: &Path,
+    project_path: &Path,
+) -> anyhow::Result<Option<RegistryEntry>> {
     let canonical = match fs::canonicalize(project_path) {
         Ok(p) => p,
         Err(_) => return Ok(None),

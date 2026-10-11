@@ -2611,7 +2611,9 @@ fn test_markplane_root_missing_markplane_errors_clearly() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("MARKPLANE_ROOT"))
-        .stderr(predicate::str::contains("does not contain a .markplane/ directory"))
+        .stderr(predicate::str::contains(
+            "does not contain a .markplane/ directory",
+        ))
         .stderr(predicate::str::contains(root.as_str()));
 }
 
@@ -4392,16 +4394,15 @@ fn test_serve_start_status_stop() {
         .stdout(predicate::str::contains(&port_s))
         .stdout(predicate::str::contains("http://localhost:"));
 
-    serve_cmd(&xdg)
-        .args(["serve", "stop"])
-        .assert()
-        .success();
+    serve_cmd(&xdg).args(["serve", "stop"]).assert().success();
 
     serve_cmd(&xdg)
         .args(["serve", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("not running").or(predicate::str::contains("Not running")));
+        .stdout(
+            predicate::str::contains("not running").or(predicate::str::contains("Not running")),
+        );
 }
 
 #[cfg(unix)]

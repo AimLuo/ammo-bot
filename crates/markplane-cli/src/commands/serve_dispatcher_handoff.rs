@@ -13,11 +13,7 @@ pub fn ticket_still_ours(project: &Project, task_id: &str) -> Result<bool, Strin
     let config = project.load_config().map_err(|e| e.to_string())?;
     let doc: MarkplaneDocument<Task> = project.read_item(task_id).map_err(|e| e.to_string())?;
     Ok(
-        config
-            .workflows
-            .task
-            .category_of(&doc.frontmatter.status)
-            == Some(StatusCategory::Active)
+        config.workflows.task.category_of(&doc.frontmatter.status) == Some(StatusCategory::Active)
             && doc.frontmatter.assignee.as_deref() == Some("dispatcher"),
     )
 }
@@ -56,11 +52,7 @@ pub async fn handoff_failure(
         .rev()
         .find(|a| a.stage == stage)
         .and_then(|a| a.session_id.clone())
-        .or_else(|| {
-            run.attempts
-                .last()
-                .and_then(|a| a.session_id.clone())
-        });
+        .or_else(|| run.attempts.last().and_then(|a| a.session_id.clone()));
 
     run.status = RunStatus::Failed;
     run.current_stage = Some(stage);

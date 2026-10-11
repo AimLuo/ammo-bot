@@ -433,7 +433,9 @@ mod tests {
     #[test]
     fn fix_prompt_inlines_review_and_allows_false_positive() {
         let mut c = ctx();
-        c.review_comment = "**Review** base `deadbee` · 1 must-fix · 0 optional\n\n**Must-fix**\n1. rename foo\n".into();
+        c.review_comment =
+            "**Review** base `deadbee` · 1 must-fix · 0 optional\n\n**Must-fix**\n1. rename foo\n"
+                .into();
         let p = render_fix_prompt(&c);
         assert!(p.contains("**fix** stage"));
         assert!(p.contains("<review>"));

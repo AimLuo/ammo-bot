@@ -118,11 +118,7 @@ pub fn plan_continue(run: &Run, config_dir: &Path) -> Result<ContinuePlan, Strin
 }
 
 fn resume_session_for_stage(run: &Run, stage: Stage, config_dir: &Path) -> Option<String> {
-    let last = run
-        .attempts
-        .iter()
-        .rev()
-        .find(|a| a.stage == stage)?;
+    let last = run.attempts.iter().rev().find(|a| a.stage == stage)?;
     let sid = last.session_id.as_ref().filter(|s| !s.is_empty())?;
     // Resume only when meta.json still exists (same rule as Resume).
     if !session_meta_exists(config_dir, &last.workspace, sid) {
@@ -237,11 +233,7 @@ mod tests {
             classify_continue_failure(&r1),
             ContinueFailureClass::Implement
         );
-        let r2 = failed_run(
-            Stage::Implement,
-            "implement produced no new commits",
-            a,
-        );
+        let r2 = failed_run(Stage::Implement, "implement produced no new commits", a);
         assert_eq!(
             classify_continue_failure(&r2),
             ContinueFailureClass::Implement

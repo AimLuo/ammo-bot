@@ -75,7 +75,9 @@ impl HeldDispatcherLock {
 #[derive(Debug)]
 pub enum AcquireError {
     /// Another process holds the OS lock.
-    Contended { holder: Option<LockHolder> },
+    Contended {
+        holder: Option<LockHolder>,
+    },
     Io(String),
 }
 
@@ -175,7 +177,9 @@ fn write_holder_atomic(path: &Path, holder: &LockHolder) -> std::io::Result<()> 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
         ".{}.tmp",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("holder")
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("holder")
     ));
     {
         let mut f = File::create(&tmp)?;
@@ -416,6 +420,12 @@ mod tests {
     #[test]
     fn git_is_available_for_lock_key_tests() {
         // Sanity: git exists in CI/dev so other modules' tests can run.
-        assert!(Command::new("git").arg("--version").status().unwrap().success());
+        assert!(
+            Command::new("git")
+                .arg("--version")
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

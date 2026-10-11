@@ -618,7 +618,7 @@ pub fn execute(cmd: Commands) -> anyhow::Result<()> {
                 rt.shutdown_timeout(std::time::Duration::from_secs(3));
                 result
             }
-        }
+        },
         Commands::Mcp { project } => mcp::run(project),
     }
 }
@@ -650,4 +650,3 @@ pub fn optional_body_file(body_file: &Option<String>) -> anyhow::Result<Option<S
         None => Ok(None),
     }
 }
-

@@ -139,9 +139,7 @@ pub fn validate_model(raw: &str) -> Result<String, DispatcherValidationError> {
 pub fn validate_timeout_minutes(value: u32) -> Result<u32, DispatcherValidationError> {
     if !(TIMEOUT_MIN..=TIMEOUT_MAX).contains(&value) {
         return Err(DispatcherValidationError {
-            message: format!(
-                "timeout_minutes must be between {TIMEOUT_MIN} and {TIMEOUT_MAX}"
-            ),
+            message: format!("timeout_minutes must be between {TIMEOUT_MIN} and {TIMEOUT_MAX}"),
         });
     }
     Ok(value)
@@ -151,9 +149,7 @@ pub fn validate_timeout_minutes(value: u32) -> Result<u32, DispatcherValidationE
 pub fn validate_concurrency(value: u32) -> Result<u32, DispatcherValidationError> {
     if !(CONCURRENCY_MIN..=CONCURRENCY_MAX).contains(&value) {
         return Err(DispatcherValidationError {
-            message: format!(
-                "concurrency must be between {CONCURRENCY_MIN} and {CONCURRENCY_MAX}"
-            ),
+            message: format!("concurrency must be between {CONCURRENCY_MIN} and {CONCURRENCY_MAX}"),
         });
     }
     Ok(value)
@@ -379,7 +375,10 @@ has spaces in slug - Label
             DEFAULT_TIMEOUT_MINUTES
         );
         assert_eq!(effective.stages.fix.model, DEFAULT_DISPATCHER_MODEL);
-        assert_eq!(effective.stages.merge.timeout_minutes, DEFAULT_TIMEOUT_MINUTES);
+        assert_eq!(
+            effective.stages.merge.timeout_minutes,
+            DEFAULT_TIMEOUT_MINUTES
+        );
     }
 
     #[test]

@@ -33,12 +33,7 @@ impl Drop for ServeChild {
 }
 
 #[allow(clippy::zombie_processes)] // ServeChild::drop always kill()+wait()
-fn spawn_serve(
-    project: &Path,
-    xdg: &Path,
-    port: u16,
-    extra_args: &[&str],
-) -> ServeChild {
+fn spawn_serve(project: &Path, xdg: &Path, port: u16, extra_args: &[&str]) -> ServeChild {
     let mut child = Command::new(cargo_bin!("markplane"))
         .current_dir(project)
         .env("XDG_CONFIG_HOME", xdg)
@@ -61,9 +56,7 @@ fn spawn_serve(
                 let _ = stderr.read_to_string(&mut err);
             }
             let _ = child.kill();
-            panic!(
-                "serve did not become ready in time.\nstdout:\n{collected}\nstderr:\n{err}"
-            );
+            panic!("serve did not become ready in time.\nstdout:\n{collected}\nstderr:\n{err}");
         }
 
         let mut line = String::new();
@@ -121,10 +114,7 @@ fn curl_get(url: &str, cacert: Option<&Path>) -> (i32, String) {
         .rev()
         .collect::<String>();
     let status: i32 = status_str.parse().unwrap_or(-1);
-    let body_only = body
-        .strip_suffix(&status_str)
-        .unwrap_or(&body)
-        .to_string();
+    let body_only = body.strip_suffix(&status_str).unwrap_or(&body).to_string();
     if !output.status.success() && status < 0 {
         let err = String::from_utf8_lossy(&output.stderr);
         panic!("curl failed for {url}: {err}\nstdout: {body}");
@@ -185,9 +175,11 @@ fn serve_reuses_cert_without_reprinting_trust_on_second_start() {
 
     {
         let serve = spawn_serve(project.path(), xdg.path(), port1, &[]);
-        assert!(serve.stdout.contains("Trust this certificate")
-            || serve.stdout.contains("security add-trusted-cert")
-            || serve.stdout.contains("certutil"));
+        assert!(
+            serve.stdout.contains("Trust this certificate")
+                || serve.stdout.contains("security add-trusted-cert")
+                || serve.stdout.contains("certutil")
+        );
     }
 
     let (cert, _) = cert_paths(xdg.path());
@@ -227,16 +219,17 @@ fn serve_dev_and_no_tls_use_http() {
         "dev must not use https:\n{}",
         serve_dev.stdout
     );
-    let (status, _) = curl_get(
-        &format!("http://127.0.0.1:{port_dev}/api/projects"),
-        None,
-    );
+    let (status, _) = curl_get(&format!("http://127.0.0.1:{port_dev}/api/projects"), None);
     assert_eq!(status, 200);
     drop(serve_dev);
 
     // --dev should not create certs
     assert!(
-        !xdg.path().join("markplane").join("certs").join("cert.pem").is_file(),
+        !xdg.path()
+            .join("markplane")
+            .join("certs")
+            .join("cert.pem")
+            .is_file(),
         "dev mode must not write certificates"
     );
 
@@ -250,14 +243,10 @@ fn serve_dev_and_no_tls_use_http() {
         serve_plain.stdout
     );
     assert!(
-        serve_plain.stdout.contains("TLS disabled")
-            || serve_plain.stdout.contains("--no-tls"),
+        serve_plain.stdout.contains("TLS disabled") || serve_plain.stdout.contains("--no-tls"),
         "expected --no-tls notice:\n{}",
         serve_plain.stdout
     );
-    let (status, _) = curl_get(
-        &format!("http://127.0.0.1:{port_plain}/api/projects"),
-        None,
-    );
+    let (status, _) = curl_get(&format!("http://127.0.0.1:{port_plain}/api/projects"), None);
     assert_eq!(status, 200);
 }

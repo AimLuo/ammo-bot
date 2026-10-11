@@ -174,10 +174,7 @@ pub fn read_run_record(markplane_root: &Path, task_id: &str) -> Result<Option<Ru
     }
     let bytes = fs::read(&path)?;
     let record: RunRecord = serde_json::from_slice(&bytes).map_err(|e| {
-        MarkplaneError::Config(format!(
-            "Invalid Run record {}: {e}",
-            path.display()
-        ))
+        MarkplaneError::Config(format!("Invalid Run record {}: {e}", path.display()))
     })?;
     Ok(Some(record))
 }
@@ -186,9 +183,8 @@ pub fn read_run_record(markplane_root: &Path, task_id: &str) -> Result<Option<Ru
 pub fn write_run_record(markplane_root: &Path, task_id: &str, record: &RunRecord) -> Result<()> {
     ensure_runs_dir(markplane_root)?;
     let path = run_record_path(markplane_root, task_id);
-    let bytes = serde_json::to_vec_pretty(record).map_err(|e| {
-        MarkplaneError::Config(format!("Failed to serialize Run record: {e}"))
-    })?;
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|e| MarkplaneError::Config(format!("Failed to serialize Run record: {e}")))?;
     atomic_write(&path, &bytes)
 }
 
@@ -460,10 +456,7 @@ mod tests {
 
     #[test]
     fn stage_order_is_implement_fix_merge() {
-        assert_eq!(
-            STAGE_ORDER,
-            &[Stage::Implement, Stage::Fix, Stage::Merge]
-        );
+        assert_eq!(STAGE_ORDER, &[Stage::Implement, Stage::Fix, Stage::Merge]);
     }
 
     fn bare_run(status: RunStatus, stage: Option<Stage>) -> Run {
@@ -560,10 +553,7 @@ mod tests {
 
         let listed = list_run_records(&root).unwrap();
         assert_eq!(
-            listed
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
+            listed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
             vec!["TASK-aaa11", "TASK-bbb22"]
         );
     }

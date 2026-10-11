@@ -74,7 +74,10 @@ pub fn lock_stem(project_rel: &Path) -> String {
 pub fn lock_paths(key: &DispatcherLockKey) -> (PathBuf, PathBuf) {
     let dir = key.common_dir.join("markplane").join("dispatcher");
     let stem = lock_stem(&key.project_rel);
-    (dir.join(format!("{stem}.lock")), dir.join(format!("{stem}.json")))
+    (
+        dir.join(format!("{stem}.lock")),
+        dir.join(format!("{stem}.json")),
+    )
 }
 
 fn rev_parse(cwd: &Path, args: &[&str]) -> Result<PathBuf, GitResolveError> {
@@ -177,10 +180,7 @@ mod tests {
     #[test]
     fn lock_stem_encodes_relative_path() {
         assert_eq!(lock_stem(Path::new(".")), "2e");
-        assert_eq!(
-            lock_stem(Path::new("apps/api")),
-            "617070732f617069"
-        );
+        assert_eq!(lock_stem(Path::new("apps/api")), "617070732f617069");
     }
 
     #[test]

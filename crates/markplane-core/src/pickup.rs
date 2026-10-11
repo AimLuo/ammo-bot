@@ -359,20 +359,11 @@ mod tests {
 
     #[test]
     fn round_robin_alternates_projects_preserving_within_order() {
-        let queues = vec![
-            vec!["A1", "A2", "A3"],
-            vec!["B1", "B2"],
-        ];
+        let queues = vec![vec!["A1", "A2", "A3"], vec!["B1", "B2"]];
         let (picked, next) = round_robin_pickup(&queues, 5, 0);
         assert_eq!(
             picked,
-            vec![
-                (0, "A1"),
-                (1, "B1"),
-                (0, "A2"),
-                (1, "B2"),
-                (0, "A3"),
-            ]
+            vec![(0, "A1"), (1, "B1"), (0, "A2"), (1, "B2"), (0, "A3"),]
         );
         assert_eq!(next, 1);
     }
@@ -407,9 +398,6 @@ mod tests {
     #[test]
     fn round_robin_empty_or_zero_limit() {
         assert_eq!(round_robin_pickup::<&str>(&[], 5, 3), (vec![], 3));
-        assert_eq!(
-            round_robin_pickup(&[vec!["A1"]], 0, 0),
-            (vec![], 0)
-        );
+        assert_eq!(round_robin_pickup(&[vec!["A1"]], 0, 0), (vec![], 0));
     }
 }

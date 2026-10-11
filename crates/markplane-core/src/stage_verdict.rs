@@ -42,9 +42,10 @@ pub fn implement_verdict_failure_reason(verdict: &ImplementVerdict) -> Option<St
         ImplementVerdict::Invalid(line) if line.is_empty() => {
             Some("implement ended without a legal REVIEW: clean|issues line".into())
         }
-        ImplementVerdict::Invalid(line) if line.starts_with("BLOCKED:") => {
-            Some(format!("implement blocked: {}", line.trim_start_matches("BLOCKED:").trim()))
-        }
+        ImplementVerdict::Invalid(line) if line.starts_with("BLOCKED:") => Some(format!(
+            "implement blocked: {}",
+            line.trim_start_matches("BLOCKED:").trim()
+        )),
         ImplementVerdict::Invalid(line) => {
             Some(format!("implement ended with illegal verdict line: {line}"))
         }

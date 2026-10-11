@@ -144,9 +144,7 @@ fn parse_comments_list(comments_section: &str) -> Vec<Comment> {
             }
             continue;
         }
-        if !in_fence
-            && let Some((date, author)) = parse_comment_heading(trimmed_start)
-        {
+        if !in_fence && let Some((date, author)) = parse_comment_heading(trimmed_start) {
             flush(&mut current, &mut comments);
             current = Some((date, author, Vec::new()));
             continue;
@@ -255,9 +253,7 @@ pub fn demote_comment_headings(text: &str) -> String {
             out.push(line.to_string());
             continue;
         }
-        if !in_fence
-            && let Some(demoted) = demote_heading_line(line)
-        {
+        if !in_fence && let Some(demoted) = demote_heading_line(line) {
             out.push(demoted);
             continue;
         }
@@ -514,7 +510,10 @@ none
     fn parse_item_body_ignores_headings_inside_fences() {
         let body = "# T\n\n```\n## Comments\n### 2026-10-10 fake\n```\n\n## Comments\n\n### 2026-10-10 alice\n\nReal\n```\n### 2099-01-01 no\n```\n";
         let parsed = parse_item_body(body);
-        assert_eq!(parsed.description, "# T\n\n```\n## Comments\n### 2026-10-10 fake\n```");
+        assert_eq!(
+            parsed.description,
+            "# T\n\n```\n## Comments\n### 2026-10-10 fake\n```"
+        );
         assert_eq!(parsed.comments.len(), 1);
         assert_eq!(parsed.comments[0].author, "alice");
         assert!(parsed.comments[0].body.contains("### 2099-01-01 no"));
@@ -540,6 +539,9 @@ none
 
     #[test]
     fn with_description_without_comments_writes_description_only() {
-        assert_eq!(with_description("# Old\n", "# New\n\nBody"), "# New\n\nBody\n");
+        assert_eq!(
+            with_description("# Old\n", "# New\n\nBody"),
+            "# New\n\nBody\n"
+        );
     }
 }

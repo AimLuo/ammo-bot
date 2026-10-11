@@ -68,9 +68,7 @@ pub fn plan_resume(run: &Run, config_dir: &Path) -> Result<ResumePlan, String> {
     };
 
     if last.result.is_some() {
-        return Ok(ResumePlan::AdvanceCompleted {
-            stage: last.stage,
-        });
+        return Ok(ResumePlan::AdvanceCompleted { stage: last.stage });
     }
 
     // Incomplete attempt — try session resume.

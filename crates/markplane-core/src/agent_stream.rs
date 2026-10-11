@@ -78,10 +78,7 @@ pub fn parse_stream_json_line(line: &str) -> Option<StreamEvent> {
 }
 
 fn assistant_text(value: &Value) -> String {
-    let Some(content) = value
-        .pointer("/message/content")
-        .and_then(|v| v.as_array())
-    else {
+    let Some(content) = value.pointer("/message/content").and_then(|v| v.as_array()) else {
         return String::new();
     };
     let mut out = String::new();
@@ -240,7 +237,10 @@ mod tests {
                 duration_ms: None,
             },
         ];
-        assert_eq!(verdict_from_events(&events).as_deref(), Some("REVIEW: clean"));
+        assert_eq!(
+            verdict_from_events(&events).as_deref(),
+            Some("REVIEW: clean")
+        );
         assert!(agent_invocation_succeeded(0, &events));
         assert!(!agent_invocation_succeeded(1, &events));
     }

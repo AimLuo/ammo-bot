@@ -66,7 +66,9 @@ pub fn resolve_transcript_path(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ToolUse {
         name: String,
         #[serde(default)]
@@ -90,14 +92,14 @@ pub enum SessionTranscript {
         /// `success` / `aborted` from trailing `turn_ended`, or null while still writing.
         ended: Option<String>,
     },
-    Unavailable { path: String, reason: String },
+    Unavailable {
+        path: String,
+        reason: String,
+    },
 }
 
 /// Find an attempt that owns `session_id` (first match wins for path resolution).
-pub fn find_session_attempt<'a>(
-    record: &'a RunRecord,
-    session_id: &str,
-) -> Option<&'a Attempt> {
+pub fn find_session_attempt<'a>(record: &'a RunRecord, session_id: &str) -> Option<&'a Attempt> {
     record
         .runs
         .iter()
@@ -194,9 +196,11 @@ fn parse_transcript_jsonl(path: &str, text: &str) -> SessionTranscript {
         }
 
         let role = match value.get("role").and_then(|r| r.as_str()) {
-            Some("user") | Some("assistant") => {
-                value.get("role").and_then(|r| r.as_str()).unwrap().to_string()
-            }
+            Some("user") | Some("assistant") => value
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap()
+                .to_string(),
             _ => continue,
         };
 
@@ -226,7 +230,10 @@ fn parse_transcript_jsonl(path: &str, text: &str) -> SessionTranscript {
                             .and_then(|n| n.as_str())
                             .unwrap_or("?")
                             .to_string(),
-                        input: item.get("input").cloned().unwrap_or(Value::Object(Default::default())),
+                        input: item
+                            .get("input")
+                            .cloned()
+                            .unwrap_or(Value::Object(Default::default())),
                     });
                 }
                 _ => {}
@@ -252,9 +259,7 @@ mod tests {
     #[test]
     fn slug_replaces_non_alnum_collapses_and_trims() {
         assert_eq!(
-            workspace_transcript_slug(
-                "/Users/chuck/agent-space/ammo-bot/.worktrees/TASK-abc12"
-            ),
+            workspace_transcript_slug("/Users/chuck/agent-space/ammo-bot/.worktrees/TASK-abc12"),
             "Users-chuck-agent-space-ammo-bot-worktrees-TASK-abc12"
         );
         assert_eq!(workspace_transcript_slug("---a--b---"), "a-b");

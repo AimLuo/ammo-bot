@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::Utc;
-use markplane_core::{
-    Project, Run, RunRecord, RunStatus, StatusCategory, Task, write_run_record,
-};
+use markplane_core::{Project, Run, RunRecord, RunStatus, StatusCategory, Task, write_run_record};
 use tokio::sync::broadcast;
 
 use super::serve_dispatcher_resume::{run_orphan_pid, terminate_orphan_attempt};
@@ -45,10 +43,7 @@ pub struct CleanupPreview {
 }
 
 /// Whether automatic cleanup may attempt this latest Run.
-pub fn auto_cleanup_eligible(
-    run: &Run,
-    ticket_category: Option<StatusCategory>,
-) -> bool {
+pub fn auto_cleanup_eligible(run: &Run, ticket_category: Option<StatusCategory>) -> bool {
     if run.worktree_removed_at.is_some() && run.branch_removed_at.is_some() {
         return false;
     }
@@ -80,9 +75,7 @@ pub fn manual_cleanup_eligible(
         _ => {}
     }
     // failed while ticket still active → Continue, not Clean up
-    if run.status == RunStatus::Failed
-        && ticket_category == Some(StatusCategory::Active)
-    {
+    if run.status == RunStatus::Failed && ticket_category == Some(StatusCategory::Active) {
         return false;
     }
     true
@@ -104,8 +97,7 @@ pub fn cleanup_preview(
     } else {
         0
     };
-    let branch_present = run.branch_removed_at.is_none()
-        && branch_exists(project_dir, &run.branch);
+    let branch_present = run.branch_removed_at.is_none() && branch_exists(project_dir, &run.branch);
     let branch_head = if branch_present {
         git_stdout(project_dir, &["rev-parse", &run.branch]).ok()
     } else {
@@ -120,9 +112,8 @@ pub fn cleanup_preview(
     let branch_is_agent = run.branch.starts_with("agent/");
     // Spec: only when a recorded remnant is still there and deletable
     // (registered worktree, agent/* branch, and/or orphan to terminate).
-    let has_deletable_remnant = worktree_registered
-        || (branch_present && branch_is_agent)
-        || orphan_pid.is_some();
+    let has_deletable_remnant =
+        worktree_registered || (branch_present && branch_is_agent) || orphan_pid.is_some();
     CleanupPreview {
         worktree: run.worktree.clone(),
         worktree_present,
@@ -172,8 +163,7 @@ pub fn force_cleanup_for_repickup(project_dir: &Path, run: &mut Run) -> bool {
         && branch_exists(project_dir, &run.branch)
         && run.branch_head_at_removal.is_none()
     {
-        run.branch_head_at_removal =
-            git_stdout(project_dir, &["rev-parse", &run.branch]).ok();
+        run.branch_head_at_removal = git_stdout(project_dir, &["rev-parse", &run.branch]).ok();
     }
     cleanup_run(project_dir, run, true, TRIGGER_REPICKUP, true)
 }
@@ -252,9 +242,7 @@ fn cleanup_run(
 ) -> bool {
     let mut changed = false;
 
-    if !force
-        && let Some(_pid) = run_orphan_pid(run)
-    {
+    if !force && let Some(_pid) = run_orphan_pid(run) {
         changed |= set_blocked(run, BLOCKED_ORPHAN);
         run.cleanup_trigger = Some(trigger.to_string());
         return changed;
@@ -350,12 +338,7 @@ fn cleanup_worktree(project_dir: &Path, run: &mut Run, force: bool) -> bool {
     } else {
         let _ = git_run(
             project_dir,
-            &[
-                "worktree",
-                "remove",
-                "--force",
-                &wt.display().to_string(),
-            ],
+            &["worktree", "remove", "--force", &wt.display().to_string()],
         );
         if wt.exists() {
             let _ = fs::remove_dir_all(&wt);
@@ -397,8 +380,7 @@ fn cleanup_branch(
 
     let _ = preserve_branch_head; // caller may pre-set branch_head_at_removal
     if run.branch_head_at_removal.is_none() {
-        run.branch_head_at_removal =
-            git_stdout(project_dir, &["rev-parse", &run.branch]).ok();
+        run.branch_head_at_removal = git_stdout(project_dir, &["rev-parse", &run.branch]).ok();
     }
 
     let delete_flag = if force { "-D" } else { "-d" };
@@ -480,7 +462,12 @@ fn canonicalize(path: &Path) -> PathBuf {
 fn branch_exists(project_dir: &Path, branch: &str) -> bool {
     git_run(
         project_dir,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .is_ok()
 }
@@ -494,7 +481,10 @@ fn count_porcelain_lines(worktree: &Path) -> u32 {
 
 fn count_unmerged_commits(project_dir: &Path, branch: &str) -> u32 {
     // Commits on branch not reachable from current HEAD.
-    match git_stdout(project_dir, &["rev-list", "--count", &format!("HEAD..{branch}")]) {
+    match git_stdout(
+        project_dir,
+        &["rev-list", "--count", &format!("HEAD..{branch}")],
+    ) {
         Ok(s) => s.trim().parse().unwrap_or(0),
         Err(_) => 0,
     }
@@ -544,10 +534,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
         run(&root, &["git", "init", "-b", "main"]);
-        run(
-            &root,
-            &["git", "config", "user.email", "test@example.com"],
-        );
+        run(&root, &["git", "config", "user.email", "test@example.com"]);
         run(&root, &["git", "config", "user.name", "Test"]);
         fs::write(root.join("README"), "hi").unwrap();
         run(&root, &["git", "add", "."]);
@@ -611,7 +598,10 @@ mod tests {
         let (_tmp, root) = init_repo();
         let (wt, branch) = add_agent_worktree(&root, "TASK-clean");
         // Merge branch into main so -d works.
-        run(&root, &["git", "merge", "--no-ff", "-m", "merge agent", &branch]);
+        run(
+            &root,
+            &["git", "merge", "--no-ff", "-m", "merge agent", &branch],
+        );
         let mut run_rec = sample_run(&wt, &branch);
         assert!(attempt_auto_cleanup(&root, &mut run_rec));
         assert!(run_rec.worktree_removed_at.is_some());
@@ -682,10 +672,7 @@ mod tests {
         assert!(attempt_auto_cleanup(&root, &mut run_rec));
         assert!(run_rec.worktree_removed_at.is_some());
         assert!(run_rec.branch_removed_at.is_none());
-        assert_eq!(
-            run_rec.cleanup_blocked.as_deref(),
-            Some(BLOCKED_UNMERGED)
-        );
+        assert_eq!(run_rec.cleanup_blocked.as_deref(), Some(BLOCKED_UNMERGED));
         assert!(branch_exists(&root, &branch));
     }
 
@@ -752,7 +739,10 @@ mod tests {
         let mut run_rec = sample_run(&wt, &branch);
         run_rec.status = RunStatus::Failed;
         assert!(force_cleanup_for_repickup(&root, &mut run_rec));
-        assert_eq!(run_rec.branch_head_at_removal.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            run_rec.branch_head_at_removal.as_deref(),
+            Some(head.as_str())
+        );
         assert!(run_rec.worktree_removed_at.is_some());
         assert!(run_rec.branch_removed_at.is_some());
         assert_eq!(run_rec.cleanup_trigger.as_deref(), Some(TRIGGER_REPICKUP));
@@ -762,10 +752,7 @@ mod tests {
     fn missing_worktree_dir_prunes_and_marks_removed() {
         let (_tmp, root) = init_repo();
         let (wt, branch) = add_agent_worktree(&root, "TASK-gone");
-        run(
-            &root,
-            &["git", "merge", "--no-ff", "-m", "merge", &branch],
-        );
+        run(&root, &["git", "merge", "--no-ff", "-m", "merge", &branch]);
         // Remove directory without git worktree remove.
         fs::remove_dir_all(&wt).unwrap();
         let mut run_rec = sample_run(&wt, &branch);
@@ -844,12 +831,7 @@ mod tests {
         let handmade = root.join("handmade");
         fs::create_dir_all(&handmade).unwrap();
         let run_rec = sample_run(&handmade, "feature/mine");
-        let preview = cleanup_preview(
-            &root,
-            &run_rec,
-            "failed",
-            Some(StatusCategory::Completed),
-        );
+        let preview = cleanup_preview(&root, &run_rec, "failed", Some(StatusCategory::Completed));
         assert!(!preview.worktree_registered);
         assert!(!preview.branch_present);
         assert!(!preview.eligible);

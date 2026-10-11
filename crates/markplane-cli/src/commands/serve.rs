@@ -14,9 +14,9 @@ use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, patch, post};
-use hyper::body::Incoming;
 use futures::SinkExt;
 use futures::stream::StreamExt;
+use hyper::body::Incoming;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tower::Layer;
@@ -26,14 +26,14 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use markplane_core::{
-    AgentModel, Comment, DEFAULT_CONCURRENCY, DispatcherConfig, DispatcherStageConfig, Effort, Epic,
-    EpicStatus, EpicUpdate, EffectiveDispatcherSettings, IdPrefix, LinkAction, LinkRelation, Map,
-    MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, PickupSortKey, Plan, PlanUpdate,
-    Priority, Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate, TaskWorkflow,
-    cmp_pickup_keys, cursor_data_dir, default_comment_author, effective_dispatcher_settings,
-    find_blocked_items, find_frontier_items, parse_id, parse_item_body, read_session_transcript,
-    split_markdown_sections, validate_concurrency, validate_dispatcher_config, validate_model,
-    validate_timeout_minutes,
+    AgentModel, Comment, DEFAULT_CONCURRENCY, DispatcherConfig, DispatcherStageConfig,
+    EffectiveDispatcherSettings, Effort, Epic, EpicStatus, EpicUpdate, IdPrefix, LinkAction,
+    LinkRelation, Map, MarkplaneDocument, MarkplaneError, Note, NoteUpdate, Patch, PickupSortKey,
+    Plan, PlanUpdate, Priority, Project, QueryFilter, ScanScope, StatusCategory, Task, TaskUpdate,
+    TaskWorkflow, cmp_pickup_keys, cursor_data_dir, default_comment_author,
+    effective_dispatcher_settings, find_blocked_items, find_frontier_items, parse_id,
+    parse_item_body, read_session_transcript, split_markdown_sections, validate_concurrency,
+    validate_dispatcher_config, validate_model, validate_timeout_minutes,
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
@@ -42,9 +42,7 @@ use super::serve_dispatcher_engine::{
     self, ContinueError, EngineState, ResumeError, ScanAutoCloseState,
 };
 use super::serve_dispatcher_handoff;
-use super::serve_dispatcher_lock::{
-    self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe,
-};
+use super::serve_dispatcher_lock::{self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe};
 use super::serve_dispatcher_resume;
 use super::serve_git::{self, DispatcherLockKey};
 use super::serve_registry::{self, RegistryEntry};
@@ -211,8 +209,7 @@ impl AppState {
                 .held_locks
                 .iter()
                 .filter(|(id, held)| {
-                    guard.scan_enabled.get(*id).copied().unwrap_or(false)
-                        && !held.still_same_file()
+                    guard.scan_enabled.get(*id).copied().unwrap_or(false) && !held.still_same_file()
                 })
                 .map(|(id, _)| id.clone())
                 .collect()
@@ -591,7 +588,8 @@ pub async fn run(
         let certs_dir = config_dir.join("certs");
         let cert_path = certs_dir.join("cert.pem");
         let key_path = certs_dir.join("key.pem");
-        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
+        let tls =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
         axum_server::bind_rustls(addr, tls)
             .handle(handle)
             .serve(make_service)
@@ -643,9 +641,7 @@ fn fs_create_config_dir(config_dir: &FsPath) -> anyhow::Result<()> {
 }
 
 /// Assemble the serve stack: prefix middleware outside the Router (before matching).
-fn build_app(
-    state: Arc<AppState>,
-) -> tower::util::BoxCloneService<Request, Response, Infallible> {
+fn build_app(state: Arc<AppState>) -> tower::util::BoxCloneService<Request, Response, Infallible> {
     let router = build_router(state.clone());
     let app = middleware::from_fn_with_state(state, project_prefix_middleware).layer(router);
     tower::util::BoxCloneService::new(app)
@@ -773,7 +769,9 @@ fn is_legacy_page_path(path: &str) -> bool {
         "/settings",
         "/docs",
     ];
-    PREFIXES.iter().any(|p| path == *p || path.starts_with(&format!("{p}/")))
+    PREFIXES
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
 #[derive(Clone, Copy)]
@@ -847,11 +845,7 @@ async fn project_prefix_middleware(
     if is_legacy_page_path(&path) {
         // Spec: unprefixed legacy pages (e.g. `/backlog/`) 302 to `/`.
         // axum::Redirect has no 302 helper (only 303/307/308).
-        return (
-            StatusCode::FOUND,
-            [(axum::http::header::LOCATION, "/")],
-        )
-            .into_response();
+        return (StatusCode::FOUND, [(axum::http::header::LOCATION, "/")]).into_response();
     }
 
     if let Some((id, rest, kind)) = parse_project_prefix(&path) {
@@ -1042,9 +1036,7 @@ async fn list_fs(
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let parent = path
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned());
+    let parent = path.parent().map(|p| p.to_string_lossy().into_owned());
     let has_markplane = path.join(".markplane").is_dir();
 
     Ok(Json(ApiResponse {
@@ -1190,7 +1182,10 @@ async fn list_projects(
         )
     })?;
     projects.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
-    let data: Vec<ProjectListItem> = projects.into_iter().map(registry_entry_to_list_item).collect();
+    let data: Vec<ProjectListItem> = projects
+        .into_iter()
+        .map(registry_entry_to_list_item)
+        .collect();
     let total = data.len();
     Ok(Json(ApiListResponse {
         data,
@@ -2253,10 +2248,7 @@ fn map_to_detail(
 ) -> MapDetailResponse {
     let fm = &doc.frontmatter;
     let sections = split_markdown_sections(&doc.body);
-    let destination = sections
-        .get("Destination")
-        .cloned()
-        .unwrap_or_default();
+    let destination = sections.get("Destination").cloned().unwrap_or_default();
     let not_yet_specified = sections
         .get("Not yet specified")
         .map(|s| parse_section_bullets(s))
@@ -2511,10 +2503,7 @@ fn effective_to_response(effective: &EffectiveDispatcherSettings) -> DispatcherC
 
 /// Load shared Dispatcher config from disk, falling back to last-good on
 /// semantic validation failure. Always re-reads (hot-reload).
-async fn load_dispatcher_config(
-    state: &AppState,
-    project: &Project,
-) -> DispatcherConfig {
+async fn load_dispatcher_config(state: &AppState, project: &Project) -> DispatcherConfig {
     let key = dispatcher_key(project);
     let loaded = project.load_config().ok().map(|c| c.dispatcher);
     match loaded {
@@ -2531,18 +2520,12 @@ async fn load_dispatcher_config(
                     e.message
                 );
                 let guard = state.dispatcher_last_good.lock().await;
-                guard
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_default()
+                guard.get(&key).cloned().unwrap_or_default()
             }
         },
         None => {
             let guard = state.dispatcher_last_good.lock().await;
-            guard
-                .get(&key)
-                .cloned()
-                .unwrap_or_default()
+            guard.get(&key).cloned().unwrap_or_default()
         }
     }
 }
@@ -2665,15 +2648,13 @@ fn apply_dispatcher_stage_update(
     update: UpdateDispatcherStageRequest,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     if let Some(model) = update.model {
-        let validated = validate_model(&model).map_err(|e| {
-            error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
-        })?;
+        let validated = validate_model(&model)
+            .map_err(|e| error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message))?;
         stage.model = Some(validated);
     }
     if let Some(timeout) = update.timeout_minutes {
-        let validated = validate_timeout_minutes(timeout).map_err(|e| {
-            error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
-        })?;
+        let validated = validate_timeout_minutes(timeout)
+            .map_err(|e| error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message))?;
         stage.timeout_minutes = Some(validated);
     }
     Ok(())
@@ -2857,9 +2838,8 @@ async fn patch_config(
                 apply_dispatcher_stage_update(&mut config.dispatcher.stages.merge, merge)?;
             }
         }
-        validate_dispatcher_config(&config.dispatcher).map_err(|e| {
-            error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
-        })?;
+        validate_dispatcher_config(&config.dispatcher)
+            .map_err(|e| error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message))?;
     } else {
         config.dispatcher = disk_dispatcher;
     }
@@ -2918,16 +2898,10 @@ async fn patch_dispatcher_concurrency(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateConcurrencyRequest>,
 ) -> Result<Json<ApiResponse<DispatcherConcurrencyResponse>>, (StatusCode, Json<ApiError>)> {
-    let concurrency = validate_concurrency(body.concurrency).map_err(|e| {
-        error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message)
-    })?;
-    super::serve_dispatcher::write_concurrency(&state.config_dir, concurrency).map_err(|e| {
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            &e,
-        )
-    })?;
+    let concurrency = validate_concurrency(body.concurrency)
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, "validation_error", &e.message))?;
+    super::serve_dispatcher::write_concurrency(&state.config_dir, concurrency)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e))?;
     {
         let mut guard = state.concurrency_last_good.lock().await;
         *guard = Some(concurrency);
@@ -3061,7 +3035,11 @@ async fn get_scan_switch(
     Extension(ProjectId(project_id)): Extension<ProjectId>,
 ) -> Result<Json<ApiResponse<ScanSwitchResponse>>, (StatusCode, Json<ApiError>)> {
     let guard = state.dispatcher.lock().await;
-    let enabled = guard.scan_enabled.get(&project_id).copied().unwrap_or(false);
+    let enabled = guard
+        .scan_enabled
+        .get(&project_id)
+        .copied()
+        .unwrap_or(false);
     Ok(Json(ApiResponse {
         data: ScanSwitchResponse { enabled },
     }))
@@ -3139,9 +3117,7 @@ async fn open_scan_switch(
         return Err(error_response(
             StatusCode::CONFLICT,
             "dispatcher_lock_conflict",
-            &format!(
-                "Dispatcher lock key is already held by Project '{other_id}' in this serve"
-            ),
+            &format!("Dispatcher lock key is already held by Project '{other_id}' in this serve"),
         ));
     }
 
@@ -3518,9 +3494,7 @@ async fn create_plan(
 
     // If task_id provided, link the plan back to the task
     if let Some(ref task_id) = body.task_id
-        && let Err(e) =
-            project
-                .link_items(task_id, &plan.id, LinkRelation::Plan, LinkAction::Add)
+        && let Err(e) = project.link_items(task_id, &plan.id, LinkRelation::Plan, LinkAction::Add)
     {
         // Roll back: delete the plan file
         let _ = std::fs::remove_file(project.item_path(&plan.id).unwrap_or_default());
@@ -4452,9 +4426,7 @@ async fn get_search(
     // Search epics
     let mut epics = project.list_epics().map_err(map_core_error)?;
     let archived_epic_ids: HashSet<String> = if params.include_archived {
-        let archived = project
-            .list_epics_filtered(true)
-            .map_err(map_core_error)?;
+        let archived = project.list_epics_filtered(true).map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
         epics.extend(archived);
         ids
@@ -4494,9 +4466,7 @@ async fn get_search(
     // Search plans
     let mut plans = project.list_plans().map_err(map_core_error)?;
     let archived_plan_ids: HashSet<String> = if params.include_archived {
-        let archived = project
-            .list_plans_filtered(true)
-            .map_err(map_core_error)?;
+        let archived = project.list_plans_filtered(true).map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
         plans.extend(archived);
         ids
@@ -4533,9 +4503,7 @@ async fn get_search(
     // Search notes
     let mut notes = project.list_notes().map_err(map_core_error)?;
     let archived_note_ids: HashSet<String> = if params.include_archived {
-        let archived = project
-            .list_notes_filtered(true)
-            .map_err(map_core_error)?;
+        let archived = project.list_notes_filtered(true).map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
         notes.extend(archived);
         ids
@@ -4575,9 +4543,7 @@ async fn get_search(
     // Search maps
     let mut maps = project.list_maps().map_err(map_core_error)?;
     let archived_map_ids: HashSet<String> = if params.include_archived {
-        let archived = project
-            .list_maps_filtered(true)
-            .map_err(map_core_error)?;
+        let archived = project.list_maps_filtered(true).map_err(map_core_error)?;
         let ids = archived.iter().map(|d| d.frontmatter.id.clone()).collect();
         maps.extend(archived);
         ids
@@ -4771,12 +4737,7 @@ async fn list_run_summaries(
             markplane_core::RunMemoryPresence::Absent
         };
         let queue_position = queue_positions.get(&task_id).copied();
-        let mut summary = markplane_core::run_summary(
-            &task_id,
-            run,
-            presence,
-            queue_position,
-        );
+        let mut summary = markplane_core::run_summary(&task_id, run, presence, queue_position);
         if summary.status == "interrupted" {
             summary = markplane_core::run_summary_with_orphan(
                 summary,
@@ -4909,8 +4870,13 @@ async fn resume_all_runs(
                 ));
             }
         };
-        match serve_dispatcher_engine::resume_run(state.engine.clone(), proj, task_id.clone(), false)
-            .await
+        match serve_dispatcher_engine::resume_run(
+            state.engine.clone(),
+            proj,
+            task_id.clone(),
+            false,
+        )
+        .await
         {
             Ok(()) => resumed.push(task_id),
             Err(ResumeError::NoFreeSlot) => {
@@ -5048,9 +5014,13 @@ async fn get_run_cleanup_preview(
 ) -> Result<Json<ApiResponse<serve_dispatcher_cleanup::CleanupPreview>>, (StatusCode, Json<ApiError>)>
 {
     ensure_task_id(&task_id)?;
-    let Some(record) = project
-        .read_run_record(&task_id)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e.to_string()))?
+    let Some(record) = project.read_run_record(&task_id).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?
     else {
         return Err(error_response(
             StatusCode::NOT_FOUND,
@@ -5066,15 +5036,10 @@ async fn get_run_cleanup_preview(
         ));
     };
     let project_dir = project_dir_from_project(&project);
-    let display =
-        run_display_for_cleanup(&state, &project, &project_id, &task_id, run).await;
+    let display = run_display_for_cleanup(&state, &project, &project_id, &task_id, run).await;
     let ticket_cat = ticket_category_for_cleanup(&project, &task_id);
-    let preview = serve_dispatcher_cleanup::cleanup_preview(
-        &project_dir,
-        run,
-        &display,
-        ticket_cat,
-    );
+    let preview =
+        serve_dispatcher_cleanup::cleanup_preview(&project_dir, run, &display, ticket_cat);
     Ok(Json(ApiResponse { data: preview }))
 }
 
@@ -5093,7 +5058,13 @@ async fn cleanup_one_run(
 
     let mut record = project
         .read_run_record(&task_id)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e.to_string()))?
+        .map_err(|e| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| {
             error_response(
                 StatusCode::NOT_FOUND,
@@ -5109,16 +5080,11 @@ async fn cleanup_one_run(
         )
     })?;
 
-    let display =
-        run_display_for_cleanup(&state, &project, &project_id, &task_id, &run).await;
+    let display = run_display_for_cleanup(&state, &project, &project_id, &task_id, &run).await;
     let ticket_cat = ticket_category_for_cleanup(&project, &task_id);
     let project_dir = project_dir_from_project(&project);
-    let preview = serve_dispatcher_cleanup::cleanup_preview(
-        &project_dir,
-        &run,
-        &display,
-        ticket_cat,
-    );
+    let preview =
+        serve_dispatcher_cleanup::cleanup_preview(&project_dir, &run, &display, ticket_cat);
     if !preview.eligible {
         return Err(error_response(
             StatusCode::CONFLICT,
@@ -5127,11 +5093,8 @@ async fn cleanup_one_run(
         ));
     }
 
-    match serve_dispatcher_cleanup::attempt_force_cleanup(
-        &project_dir,
-        &mut run,
-        terminate_orphan,
-    ) {
+    match serve_dispatcher_cleanup::attempt_force_cleanup(&project_dir, &mut run, terminate_orphan)
+    {
         Ok(()) => {}
         Err(err) => {
             return Err(error_response(
@@ -5145,19 +5108,21 @@ async fn cleanup_one_run(
     if let Some(last) = record.runs.last_mut() {
         *last = run.clone();
     }
-    project
-        .write_run_record(&task_id, &record)
-        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e.to_string()))?;
+    project.write_run_record(&task_id, &record).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &e.to_string(),
+        )
+    })?;
 
     if let Ok(rt) = state.get_or_create_runtime(&project_id).await {
         let stage = run
             .current_stage
             .map(|s| s.as_str().to_string())
             .unwrap_or_default();
-        let status = markplane_core::run_display_status(
-            &run,
-            markplane_core::RunMemoryPresence::Absent,
-        );
+        let status =
+            markplane_core::run_display_status(&run, markplane_core::RunMemoryPresence::Absent);
         let _ = rt.ws_tx.send(
             serde_json::json!({
                 "type": "run_changed",
@@ -5286,9 +5251,7 @@ async fn acquire_dispatcher_lock_for_resume(
         return Err(error_response(
             StatusCode::CONFLICT,
             "dispatcher_lock_conflict",
-            &format!(
-                "Dispatcher lock key is already held by Project '{other_id}' in this serve"
-            ),
+            &format!("Dispatcher lock key is already held by Project '{other_id}' in this serve"),
         ));
     }
     match serve_dispatcher_lock::try_acquire(&key, holder) {
@@ -5351,10 +5314,9 @@ async fn reconcile_interrupted_runs(state: &Arc<AppState>, project: &Project, pr
             continue;
         }
         let mut run = run;
-        let _ = serve_dispatcher_handoff::silent_stop(
-            project, &ws_tx, &task_id, &mut record, &mut run,
-        )
-        .await;
+        let _ =
+            serve_dispatcher_handoff::silent_stop(project, &ws_tx, &task_id, &mut record, &mut run)
+                .await;
     }
     let project_dir = project_dir_from_project(project);
     serve_dispatcher_cleanup::auto_cleanup_project(project, &project_dir, &ws_tx);
@@ -5377,7 +5339,8 @@ async fn mark_run_stopped_if_needed(project: &Project, task_id: &str) {
         return;
     }
     let (tx, _) = broadcast::channel(16);
-    let _ = serve_dispatcher_handoff::silent_stop(project, &tx, task_id, &mut record, &mut run).await;
+    let _ =
+        serve_dispatcher_handoff::silent_stop(project, &tx, task_id, &mut record, &mut run).await;
 }
 
 async fn list_interrupted_task_ids(
@@ -5881,10 +5844,7 @@ mod tests {
         assert!(!names.contains(&".hidden"));
         assert!(!names.contains(&"file.txt"));
 
-        let project = entries
-            .iter()
-            .find(|e| e["name"] == "a-project")
-            .unwrap();
+        let project = entries.iter().find(|e| e["name"] == "a-project").unwrap();
         assert_eq!(project["has_markplane"], true);
         let visible = entries.iter().find(|e| e["name"] == "visible").unwrap();
         assert_eq!(visible["has_markplane"], false);
@@ -5973,12 +5933,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json["error"]["code"], "project_not_initialized");
-        assert!(
-            json["error"]["path"]
-                .as_str()
-                .unwrap()
-                .contains("bare")
-        );
+        assert!(json["error"]["path"].as_str().unwrap().contains("bare"));
     }
 
     #[tokio::test]
@@ -6005,8 +5960,7 @@ mod tests {
         // Default CLI init seeds starter content.
         let backlog = bare.join(".markplane/backlog/items");
         assert!(
-            backlog.is_dir()
-                && fs::read_dir(&backlog).unwrap().next().is_some(),
+            backlog.is_dir() && fs::read_dir(&backlog).unwrap().next().is_some(),
             "expected seeded starter tasks"
         );
         assert_eq!(serve_registry::list(&config_dir).unwrap().len(), 1);
@@ -6059,7 +6013,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(env.state.runtimes.lock().await.contains_key(&env.project_id));
+        assert!(
+            env.state
+                .runtimes
+                .lock()
+                .await
+                .contains_key(&env.project_id)
+        );
 
         let (status, json) = oneshot_json(
             &env.app,
@@ -6072,7 +6032,13 @@ mod tests {
 
         let listed = serve_registry::list(&env.config_dir).unwrap();
         assert!(listed.iter().all(|e| e.id != env.project_id));
-        assert!(!env.state.runtimes.lock().await.contains_key(&env.project_id));
+        assert!(
+            !env.state
+                .runtimes
+                .lock()
+                .await
+                .contains_key(&env.project_id)
+        );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "safe");
         assert!(env.project_dir.join(".markplane").is_dir());
 
@@ -6170,8 +6136,7 @@ mod tests {
         let state = AppState::new(config_dir, 4200, true, false);
         let app = build_app(state.clone());
 
-        let (status, list_a) =
-            oneshot_json(&app, "GET", &format!("/api/p/{id_a}/tasks")).await;
+        let (status, list_a) = oneshot_json(&app, "GET", &format!("/api/p/{id_a}/tasks")).await;
         assert_eq!(status, StatusCode::OK);
         let titles_a: Vec<&str> = list_a["data"]
             .as_array()
@@ -6182,8 +6147,7 @@ mod tests {
         assert!(titles_a.contains(&"Task A only"));
         assert!(!titles_a.contains(&"Task B only"));
 
-        let (status, list_b) =
-            oneshot_json(&app, "GET", &format!("/api/p/{id_b}/tasks")).await;
+        let (status, list_b) = oneshot_json(&app, "GET", &format!("/api/p/{id_b}/tasks")).await;
         assert_eq!(status, StatusCode::OK);
         let titles_b: Vec<&str> = list_b["data"]
             .as_array()
@@ -6215,8 +6179,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_project_id_returns_404_project_not_found() {
         let env = setup_env("missing-id");
-        let (status, json) =
-            oneshot_json(&env.app, "GET", "/api/p/does-not-exist/summary").await;
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/p/does-not-exist/summary").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(json["error"]["code"], "project_not_found");
     }
@@ -6234,7 +6197,12 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json["error"]["code"], "project_unavailable");
-        assert!(json["error"]["path"].as_str().unwrap().contains("gone-path"));
+        assert!(
+            json["error"]["path"]
+                .as_str()
+                .unwrap()
+                .contains("gone-path")
+        );
     }
 
     #[tokio::test]
@@ -6261,10 +6229,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FOUND);
-        assert_eq!(
-            response.headers().get("location").unwrap(),
-            "/"
-        );
+        assert_eq!(response.headers().get("location").unwrap(), "/");
     }
 
     #[tokio::test]
@@ -6438,7 +6403,13 @@ mod tests {
         assert_eq!(json["data"]["runs"].as_array().unwrap().len(), 1);
         assert_eq!(json["data"]["runs"][0]["seq"], 1);
         assert_eq!(json["data"]["runs"][0]["status"], "failed");
-        assert_eq!(json["data"]["runs"][0]["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            json["data"]["runs"][0]["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(
             json["data"]["runs"][0]["attempts"][0]["usage"]["inputTokens"],
             1000
@@ -6449,12 +6420,8 @@ mod tests {
     #[tokio::test]
     async fn list_runs_returns_empty_when_no_records() {
         let env = setup_env("runs-list-empty");
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"].as_array().unwrap().len(), 0);
     }
@@ -6554,12 +6521,8 @@ mod tests {
         .unwrap();
 
         // Not in active_slots → non-terminal record is interrupted.
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         let rows = json["data"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
@@ -6580,12 +6543,8 @@ mod tests {
                 .active_slots
                 .insert(task.id.clone(), env.project_id.clone());
         }
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["data"][0]["status"], "running");
         assert_eq!(json["data"][0]["stage"], "fix");
@@ -6640,12 +6599,8 @@ mod tests {
         )
         .unwrap();
 
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["data"][0]["status"], "failed");
         assert_eq!(json["data"][0]["failure_reason"], "MERGE: failed");
@@ -6730,12 +6685,8 @@ mod tests {
                 .insert(task.id.clone(), env.project_id.clone());
         }
 
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["data"][0]["status"], "merge-queued");
         assert_eq!(json["data"][0]["stage"], "merge");
@@ -6769,10 +6720,7 @@ mod tests {
                 None => std::env::remove_var("CURSOR_DATA_DIR"),
             }
         }
-        EnvGuard {
-            prev,
-            _lock: guard,
-        }
+        EnvGuard { prev, _lock: guard }
     }
 
     fn write_session_fixture(
@@ -6829,10 +6777,7 @@ mod tests {
             )
             .unwrap();
 
-        let workspace = format!(
-            "/Users/chuck/agent-space/ammo-bot/.worktrees/{}",
-            task.id
-        );
+        let workspace = format!("/Users/chuck/agent-space/ammo-bot/.worktrees/{}", task.id);
         let session_id = "sess-abc12";
         let expected_path = write_session_fixture(&cursor, &workspace, session_id, sample_jsonl());
 
@@ -6901,14 +6846,8 @@ mod tests {
         assert_eq!(json["data"]["ended"], "success");
         assert_eq!(json["data"]["messages"].as_array().unwrap().len(), 2);
         assert_eq!(json["data"]["messages"][0]["role"], "user");
-        assert_eq!(
-            json["data"]["messages"][0]["blocks"][0]["text"],
-            "hello"
-        );
-        assert_eq!(
-            json["data"]["messages"][1]["blocks"][1]["name"],
-            "Shell"
-        );
+        assert_eq!(json["data"]["messages"][0]["blocks"][0]["text"], "hello");
+        assert_eq!(json["data"]["messages"][1]["blocks"][1]["name"], "Shell");
     }
 
     #[tokio::test]
@@ -6937,7 +6876,11 @@ mod tests {
             .unwrap();
 
         let session_id = "sess-direct";
-        let direct = env._tmp.path().join("direct").join(format!("{session_id}.jsonl"));
+        let direct = env
+            ._tmp
+            .path()
+            .join("direct")
+            .join(format!("{session_id}.jsonl"));
         fs::create_dir_all(direct.parent().unwrap()).unwrap();
         fs::write(&direct, sample_jsonl()).unwrap();
 
@@ -7194,10 +7137,7 @@ mod tests {
                 .unwrap()
                 .to_lowercase()
                 .contains("truncat")
-                || json["data"]["reason"]
-                    .as_str()
-                    .unwrap()
-                    .contains("parse")
+                || json["data"]["reason"].as_str().unwrap().contains("parse")
         );
     }
 
@@ -7475,8 +7415,7 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_concurrency_global_endpoints() {
         let env = setup_env("disp-conc");
-        let (status, json) =
-            oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["concurrency"], 20);
         assert_eq!(json["data"]["in_use"], 0);
@@ -7510,8 +7449,7 @@ mod tests {
 
         // Unreadable serve.json → defaults (not last-good).
         fs::write(env.config_dir.join("serve.json"), "{{{").unwrap();
-        let (status, json) =
-            oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["concurrency"], 20);
     }
@@ -7520,8 +7458,7 @@ mod tests {
     async fn dispatcher_concurrency_unreadable_without_last_good_uses_default() {
         let env = setup_env("disp-conc-bad");
         fs::write(env.config_dir.join("serve.json"), "not-json").unwrap();
-        let (status, json) =
-            oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
+        let (status, json) = oneshot_json(&env.app, "GET", "/api/dispatcher/concurrency").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["data"]["concurrency"], 20);
     }
@@ -7590,14 +7527,7 @@ mod tests {
             fs::set_permissions(&agent_bin, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let state = AppState::with_options(
-            config_dir,
-            4200,
-            true,
-            false,
-            None,
-            Some(agent_bin),
-        );
+        let state = AppState::with_options(config_dir, 4200, true, false, None, Some(agent_bin));
         let app = build_app(state);
 
         let (status, json) = oneshot_json(&app, "GET", "/api/dispatcher/models").await;
@@ -7810,7 +7740,15 @@ mod tests {
             .current_dir(&env.project_dir)
             .status();
         let _ = std::process::Command::new("git")
-            .args(["-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-m", "i"])
+            .args([
+                "-c",
+                "user.email=t@e.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-m",
+                "i",
+            ])
             .current_dir(&env.project_dir)
             .status();
 
@@ -7959,12 +7897,7 @@ mod tests {
         assert_eq!(data["comments"].as_array().unwrap().len(), 1);
         assert_eq!(data["comments"][0]["author"], "serve-author");
         assert_eq!(data["comments"][0]["body"], "#### Heading\nhello");
-        assert!(
-            data["description"]
-                .as_str()
-                .unwrap()
-                .contains("Comment me")
-        );
+        assert!(data["description"].as_str().unwrap().contains("Comment me"));
         assert!(data["body"].as_str().unwrap().contains("## Comments"));
 
         let on_disk: MarkplaneDocument<Task> = project.read_item(&task.id).unwrap();
@@ -8045,7 +7978,12 @@ mod tests {
         let comments = json["data"]["comments"].as_array().unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0]["author"], "alice");
-        assert!(comments[0]["body"].as_str().unwrap().contains("### 2099-01-01 no"));
+        assert!(
+            comments[0]["body"]
+                .as_str()
+                .unwrap()
+                .contains("### 2099-01-01 no")
+        );
         assert!(
             json["data"]["description"]
                 .as_str()
@@ -8138,10 +8076,7 @@ mod tests {
                 None => std::env::remove_var("MARKPLANE_AUTHOR"),
             }
         }
-        EnvGuard {
-            prev,
-            _lock: guard,
-        }
+        EnvGuard { prev, _lock: guard }
     }
 
     // ── Dispatcher engine (TASK-cppqm) ─────────────────────────────────────
@@ -8365,14 +8300,8 @@ mod tests {
         );
         write_happy_fake_agent(&agent_bin, &mp);
 
-        let state = AppState::with_options(
-            config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent_bin),
-        );
+        let state =
+            AppState::with_options(config_dir.clone(), 4200, true, false, None, Some(agent_bin));
         let app = build_app(state.clone());
         EngineEnv {
             _tmp: tmp,
@@ -8426,11 +8355,9 @@ mod tests {
     async fn wait_run_status(env: &EngineEnv, task_id: &str, want: &str, secs: u64) {
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);
         loop {
-            let record = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                task_id,
-            )
-            .unwrap();
+            let record =
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), task_id)
+                    .unwrap();
             if let Some(rec) = record
                 && let Some(run) = rec.runs.last()
             {
@@ -8449,10 +8376,7 @@ mod tests {
                     markplane_core::RunStatus::Failed | markplane_core::RunStatus::Stopped
                 ) && want == "succeeded"
                 {
-                    panic!(
-                        "run ended as {status}: {:?}",
-                        run.failure_reason
-                    );
+                    panic!("run ended as {status}: {:?}", run.failure_reason);
                 }
             }
             if std::time::Instant::now() > deadline {
@@ -8467,12 +8391,7 @@ mod tests {
         let env = setup_engine_env("happy", Some(false));
         let task_id = add_ready_task(&env, "Happy path feature", "high").await;
         // Establish runtime + ws
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         let mut rx = {
             let guard = env.state.runtimes.lock().await;
             guard.get(&env.project_id).unwrap().ws_tx.subscribe()
@@ -8524,7 +8443,12 @@ mod tests {
         let branch_check = std::process::Command::new("git")
             .args(["-C"])
             .arg(&env.project_dir)
-            .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/agent/{task_id}")])
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/agent/{task_id}"),
+            ])
             .status()
             .unwrap();
         assert!(!branch_check.success(), "agent branch should be deleted");
@@ -8537,11 +8461,20 @@ mod tests {
             .output()
             .unwrap();
         let log = String::from_utf8_lossy(&log.stdout);
-        assert!(log.contains(&format!("Merge agent/{task_id}")) || log.contains("Merge"), "{log}");
+        assert!(
+            log.contains(&format!("Merge agent/{task_id}")) || log.contains("Merge"),
+            "{log}"
+        );
         let ticket_msg = std::process::Command::new("git")
             .args(["-C"])
             .arg(&env.project_dir)
-            .args(["log", "-1", "--format=%B", "--", &format!(".markplane/backlog/items/{task_id}.md")])
+            .args([
+                "log",
+                "-1",
+                "--format=%B",
+                "--",
+                &format!(".markplane/backlog/items/{task_id}.md"),
+            ])
             .output()
             .unwrap();
         let ticket_msg = String::from_utf8_lossy(&ticket_msg.stdout);
@@ -8580,25 +8513,14 @@ mod tests {
         }
         let agent = env._tmp.path().join("fake-agent-issues-fix");
         write_issues_fix_fake_agent(&agent, &markplane_debug_bin());
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         let app = build_app(state.clone());
         env.state = state;
         env.app = app;
 
         let task_id = add_ready_task(&env, "Issues then fix", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         wait_run_status(&env, &task_id, "succeeded", 40).await;
@@ -8634,10 +8556,7 @@ mod tests {
         assert_eq!(impls.len(), 1, "exactly one implement");
         assert_eq!(fixes.len(), 1, "exactly one fix — no review-after-fix loop");
         assert_eq!(merges.len(), 1, "exactly one merge");
-        assert_eq!(
-            impls[0].verdict.as_deref(),
-            Some("REVIEW: issues")
-        );
+        assert_eq!(impls[0].verdict.as_deref(), Some("REVIEW: issues"));
         assert_eq!(fixes[0].verdict.as_deref(), Some("FIX: done"));
         assert_eq!(
             fixes[0].model, "fake-fix-model-gxxax",
@@ -8653,7 +8572,9 @@ mod tests {
             "fix runs in the same worktree as implement"
         );
         assert!(
-            fixes[0].workspace.contains(&format!(".worktrees/{task_id}")),
+            fixes[0]
+                .workspace
+                .contains(&format!(".worktrees/{task_id}")),
             "workspace={}",
             fixes[0].workspace
         );
@@ -8683,12 +8604,9 @@ mod tests {
         enable_scan(&env_off).await;
         env_off.state.dispatcher_tick().await;
         wait_run_status(&env_off, &id_off, "succeeded", 30).await;
-        let run = markplane_core::read_run_record(
-            &env_off.project_dir.join(".markplane"),
-            &id_off,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env_off.project_dir.join(".markplane"), &id_off)
+            .unwrap()
+            .unwrap();
         assert!(!run.runs.last().unwrap().pushed);
 
         // On (bare remote)
@@ -8703,12 +8621,9 @@ mod tests {
         enable_scan(&env_on).await;
         env_on.state.dispatcher_tick().await;
         wait_run_status(&env_on, &id_on, "succeeded", 30).await;
-        let run = markplane_core::read_run_record(
-            &env_on.project_dir.join(".markplane"),
-            &id_on,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env_on.project_dir.join(".markplane"), &id_on)
+            .unwrap()
+            .unwrap();
         assert!(run.runs.last().unwrap().pushed);
         let remote = env_on.remote.as_ref().unwrap();
         let remote_log = std::process::Command::new("git")
@@ -8717,10 +8632,7 @@ mod tests {
             .args(["log", "--oneline", "-3"])
             .output()
             .unwrap();
-        assert!(
-            remote_log.status.success(),
-            "remote should have commits"
-        );
+        assert!(remote_log.status.success(), "remote should have commits");
     }
 
     #[tokio::test]
@@ -8732,12 +8644,8 @@ mod tests {
             super::super::serve_dispatcher::write_concurrency(&env.config_dir, 1).unwrap();
             let a = add_ready_task(&env, "First", "critical").await;
             let b = add_ready_task(&env, "Second", "high").await;
-            let _ = oneshot_json(
-                &env.app,
-                "GET",
-                &format!("/api/p/{}/tasks", env.project_id),
-            )
-            .await;
+            let _ =
+                oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
 
             let agent = env._tmp.path().join("fake-agent");
             let mp = markplane_debug_bin();
@@ -8800,12 +8708,7 @@ mod tests {
         let env = setup_engine_env("merge-q", Some(false));
         let a = add_ready_task(&env, "Merge A", "critical").await;
         let b = add_ready_task(&env, "Merge B", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         // concurrency 2 so both implement in parallel, merge serializes
         super::super::serve_dispatcher::write_concurrency(&env.config_dir, 2).unwrap();
@@ -8825,12 +8728,9 @@ mod tests {
 
         // Both merges landed on main (agent branches are auto-deleted after success).
         for id in [&a, &b] {
-            let record = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                id,
-            )
-            .unwrap()
-            .unwrap();
+            let record = markplane_core::read_run_record(&env.project_dir.join(".markplane"), id)
+                .unwrap()
+                .unwrap();
             let run = record.runs.last().unwrap();
             let merge_sha = run.merge_sha.as_deref().expect("merge_sha");
             let status = std::process::Command::new("git")
@@ -8906,11 +8806,9 @@ mod tests {
     ) -> String {
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);
         loop {
-            let record = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                task_id,
-            )
-            .unwrap();
+            let record =
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), task_id)
+                    .unwrap();
             if let Some(rec) = record
                 && let Some(run) = rec.runs.last()
             {
@@ -8936,12 +8834,7 @@ mod tests {
     async fn dispatcher_cross_serve_merge_lock_waits_at_queue_head() {
         let env = setup_engine_env("xserve-lock", Some(false));
         let task_id = add_ready_task(&env, "Wait for other serve", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
 
         // Simulate another serve holding the worktree merge lock.
         let held = hold_merge_lock(&env.project_dir);
@@ -8957,7 +8850,11 @@ mod tests {
             .await
             .merge_queue_position(&task_id)
             .await;
-        assert_eq!(pos, Some(1), "stays at queue head while other serve holds lock");
+        assert_eq!(
+            pos,
+            Some(1),
+            "stays at queue head while other serve holds lock"
+        );
 
         // Still queued after a beat (not failed, not timed out).
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -9017,14 +8914,8 @@ mod tests {
         let b_entry = serve_registry::register(&config_dir, &nested).unwrap();
         let agent_bin = tmp.path().join("fake-agent");
         write_happy_fake_agent(&agent_bin, &markplane_debug_bin());
-        let state = AppState::with_options(
-            config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent_bin),
-        );
+        let state =
+            AppState::with_options(config_dir.clone(), 4200, true, false, None, Some(agent_bin));
         let app = build_app(state.clone());
         super::super::serve_dispatcher::write_concurrency(&config_dir, 2).unwrap();
 
@@ -9038,18 +8929,8 @@ mod tests {
             remote: None,
         };
         // Register runtimes for both projects.
-        let _ = oneshot_json(
-            &env_a.app,
-            "GET",
-            &format!("/api/p/{}/tasks", a_entry.id),
-        )
-        .await;
-        let _ = oneshot_json(
-            &env_a.app,
-            "GET",
-            &format!("/api/p/{}/tasks", b_entry.id),
-        )
-        .await;
+        let _ = oneshot_json(&env_a.app, "GET", &format!("/api/p/{}/tasks", a_entry.id)).await;
+        let _ = oneshot_json(&env_a.app, "GET", &format!("/api/p/{}/tasks", b_entry.id)).await;
 
         let task_a = {
             let (status, json) = oneshot_json_body(
@@ -9126,8 +9007,18 @@ mod tests {
         // Wait until both are merge-queued (same worktree queue).
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            let pos_a = state.engine.lock().await.merge_queue_position(&task_a).await;
-            let pos_b = state.engine.lock().await.merge_queue_position(&task_b).await;
+            let pos_a = state
+                .engine
+                .lock()
+                .await
+                .merge_queue_position(&task_a)
+                .await;
+            let pos_b = state
+                .engine
+                .lock()
+                .await
+                .merge_queue_position(&task_b)
+                .await;
             if let (Some(a), Some(b)) = (pos_a, pos_b) {
                 let positions = [a, b];
                 assert!(
@@ -9151,8 +9042,9 @@ mod tests {
         wait_run_status(&env_a, &task_a, "succeeded", 40).await;
         let deadline = std::time::Instant::now() + Duration::from_secs(40);
         loop {
-            let record = markplane_core::read_run_record(nested.join(".markplane").as_path(), &task_b)
-                .unwrap();
+            let record =
+                markplane_core::read_run_record(nested.join(".markplane").as_path(), &task_b)
+                    .unwrap();
             if let Some(rec) = record
                 && let Some(run) = rec.runs.last()
                 && run.status == markplane_core::RunStatus::Succeeded
@@ -9183,12 +9075,7 @@ mod tests {
             .status();
 
         let task_id = add_ready_task(&env, "Dirty block", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
 
         let held = hold_merge_lock(&env.project_dir);
         enable_scan(&env).await;
@@ -9219,12 +9106,7 @@ mod tests {
     async fn dispatcher_recovers_incomplete_merge_on_merge_failed() {
         let env = setup_failure_env("leave-mh", "merge_leave_merge_head");
         let task_id = add_ready_task(&env, "Leave MERGE_HEAD", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "merge").await;
@@ -9249,12 +9131,7 @@ mod tests {
             .test_stage_timeout_secs
             .store(2, std::sync::atomic::Ordering::Relaxed);
         let task_id = add_ready_task(&env, "Timeout after lock", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
 
         let held = hold_merge_lock(&env.project_dir);
         enable_scan(&env).await;
@@ -9277,12 +9154,7 @@ mod tests {
     async fn dispatcher_success_close_is_idempotent() {
         let env = setup_engine_env("idem", Some(false));
         let task_id = add_ready_task(&env, "Idempotent close", "medium").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         wait_run_status(&env, &task_id, "succeeded", 30).await;
@@ -9325,12 +9197,7 @@ mod tests {
     async fn dispatcher_agent_env_writes_comments_to_main_tree() {
         let env = setup_engine_env("env-root", Some(false));
         let task_id = add_ready_task(&env, "Env check", "medium").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         wait_run_status(&env, &task_id, "succeeded", 30).await;
@@ -9534,14 +9401,8 @@ esac
         let mut env = setup_engine_env(name, Some(false));
         let agent = env._tmp.path().join("fake-agent");
         write_scenario_fake_agent(&agent, scenario);
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         let app = build_app(state.clone());
         env.state = state;
         env.app = app;
@@ -9615,54 +9476,40 @@ esac
     async fn dispatcher_fail_nonzero_exit_hands_off() {
         let env = setup_failure_env("fail-nz", "nonzero");
         let task_id = add_ready_task(&env, "Nonzero", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
-        let run = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let reason = run.runs.last().unwrap().failure_reason.as_deref().unwrap();
-        assert!(reason.contains("exit") || reason.contains("failed"), "{reason}");
+        assert!(
+            reason.contains("exit") || reason.contains("failed"),
+            "{reason}"
+        );
     }
 
     #[tokio::test]
     async fn dispatcher_fail_blocked_hands_off_without_fix() {
         let env = setup_failure_env("fail-blocked", "blocked");
         let task_id = add_ready_task(&env, "Blocked", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
-        let run = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = run.runs.last().unwrap();
         assert!(
-            run.attempts.iter().all(|a| a.stage != markplane_core::Stage::Fix),
+            run.attempts
+                .iter()
+                .all(|a| a.stage != markplane_core::Stage::Fix),
             "BLOCKED must not enter fix"
         );
         assert!(
-            run.failure_reason
-                .as_deref()
-                .unwrap()
-                .contains("blocked"),
+            run.failure_reason.as_deref().unwrap().contains("blocked"),
             "{:?}",
             run.failure_reason
         );
@@ -9672,12 +9519,7 @@ esac
     async fn dispatcher_fail_illegal_review_verdict() {
         let env = setup_failure_env("fail-badrev", "bad_review");
         let task_id = add_ready_task(&env, "Bad review", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
@@ -9687,21 +9529,13 @@ esac
     async fn dispatcher_fail_no_new_commits() {
         let env = setup_failure_env("fail-nocommit", "no_commits");
         let task_id = add_ready_task(&env, "No commits", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
-        let run = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         assert!(
             run.runs
                 .last()
@@ -9719,21 +9553,13 @@ esac
     async fn dispatcher_fail_fix_not_done() {
         let env = setup_failure_env("fail-fix", "fix_not_done");
         let task_id = add_ready_task(&env, "Fix blocked", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "fix").await;
-        let run = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = run.runs.last().unwrap();
         assert!(
             run.attempts
@@ -9742,10 +9568,7 @@ esac
             "fix stage must have run"
         );
         assert!(
-            run.failure_reason
-                .as_deref()
-                .unwrap()
-                .contains("FIX: done"),
+            run.failure_reason.as_deref().unwrap().contains("FIX: done"),
             "{:?}",
             run.failure_reason
         );
@@ -9755,12 +9578,7 @@ esac
     async fn dispatcher_fail_merge_bad_verdict() {
         let env = setup_failure_env("fail-merge-v", "merge_bad_verdict");
         let task_id = add_ready_task(&env, "Merge failed line", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "merge").await;
@@ -9770,21 +9588,13 @@ esac
     async fn dispatcher_fail_merge_missing_branch() {
         let env = setup_failure_env("fail-merge-b", "merge_missing_branch");
         let task_id = add_ready_task(&env, "Merge lie", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "merge").await;
-        let run = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let run = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         assert!(
             run.runs
                 .last()
@@ -9807,27 +9617,18 @@ esac
                 .test_stage_timeout_secs
                 .store(1, std::sync::atomic::Ordering::Relaxed);
             let task_id = add_ready_task(&env, "Timeout", "high").await;
-            let _ = oneshot_json(
-                &env.app,
-                "GET",
-                &format!("/api/p/{}/tasks", env.project_id),
-            )
-            .await;
+            let _ =
+                oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
             enable_scan(&env).await;
             env.state.dispatcher_tick().await;
             assert_human_handoff(&env, &task_id, "implement").await;
-            let run = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                &task_id,
-            )
-            .unwrap()
-            .unwrap();
+            let run =
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                    .unwrap()
+                    .unwrap();
             let run = run.runs.last().unwrap();
             assert!(
-                run.failure_reason
-                    .as_deref()
-                    .unwrap()
-                    .contains("timeout"),
+                run.failure_reason.as_deref().unwrap().contains("timeout"),
                 "{:?}",
                 run.failure_reason
             );
@@ -9859,12 +9660,7 @@ esac
         let a = add_ready_task(&env, "Fail first", "critical").await;
         let b = add_ready_task(&env, "Pickup second", "high").await;
         // Second task needs a happy agent once the slot frees — swap agent after A fails.
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         wait_run_status(&env, &a, "failed", 30).await;
@@ -9881,23 +9677,16 @@ esac
     async fn dispatcher_silent_stop_after_mid_stage_reassign() {
         let env = setup_failure_env("silent-stop", "slow_then_clean");
         let task_id = add_ready_task(&env, "Take over", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
 
         // Wait until implement is running, then reassign away from dispatcher.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let record = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                &task_id,
-            )
-            .unwrap();
+            let record =
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                    .unwrap();
             if record
                 .as_ref()
                 .and_then(|r| r.runs.last())
@@ -10013,20 +9802,24 @@ esac
 
         let agent_bin = tmp.path().join("fake-agent");
         write_happy_fake_agent(&agent_bin, &markplane_debug_bin());
-        let state = AppState::with_options(
-            config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent_bin),
-        );
+        let state =
+            AppState::with_options(config_dir.clone(), 4200, true, false, None, Some(agent_bin));
         let app = build_app(state.clone());
         // Stable order: project_id sort used by RR.
         let (a_id, a_dir, b_id, b_dir) = if ids[0] <= ids[1] {
-            (ids[0].clone(), dirs[0].clone(), ids[1].clone(), dirs[1].clone())
+            (
+                ids[0].clone(),
+                dirs[0].clone(),
+                ids[1].clone(),
+                dirs[1].clone(),
+            )
         } else {
-            (ids[1].clone(), dirs[1].clone(), ids[0].clone(), dirs[0].clone())
+            (
+                ids[1].clone(),
+                dirs[1].clone(),
+                ids[0].clone(),
+                dirs[0].clone(),
+            )
         };
         DualEngineEnv {
             _tmp: tmp,
@@ -10119,8 +9912,7 @@ esac
             slots.iter().map(|(_, p)| p.as_str()).collect();
         assert!(projects.contains(env.a_id.as_str()));
         assert!(projects.contains(env.b_id.as_str()));
-        let tasks: std::collections::HashSet<_> =
-            slots.iter().map(|(t, _)| t.as_str()).collect();
+        let tasks: std::collections::HashSet<_> = slots.iter().map(|(t, _)| t.as_str()).collect();
         assert!(tasks.contains(a1.as_str()));
         assert!(tasks.contains(b1.as_str()));
     }
@@ -10135,12 +9927,8 @@ esac
             let a = add_ready_task(&env, "Hold A", "critical").await;
             let b = add_ready_task(&env, "Hold B", "high").await;
             let c = add_ready_task(&env, "Wait C", "medium").await;
-            let _ = oneshot_json(
-                &env.app,
-                "GET",
-                &format!("/api/p/{}/tasks", env.project_id),
-            )
-            .await;
+            let _ =
+                oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
 
             let agent = env._tmp.path().join("fake-agent");
             let mp = markplane_debug_bin();
@@ -10228,12 +10016,8 @@ esac
             super::super::serve_dispatcher::write_concurrency(&env.config_dir, 2).unwrap();
             let a = add_ready_task(&env, "Running one", "critical").await;
             let b = add_ready_task(&env, "Running two", "high").await;
-            let _ = oneshot_json(
-                &env.app,
-                "GET",
-                &format!("/api/p/{}/tasks", env.project_id),
-            )
-            .await;
+            let _ =
+                oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
 
             let agent = env._tmp.path().join("fake-agent");
             write_happy_fake_agent(&agent, &markplane_debug_bin());
@@ -10278,10 +10062,7 @@ esac
             assert_eq!(json["data"]["running"], 2);
             assert_eq!(json["data"]["merge_queued"], 0);
             let projects = json["data"]["projects"].as_array().unwrap();
-            let mine = projects
-                .iter()
-                .find(|p| p["id"] == env.project_id)
-                .unwrap();
+            let mine = projects.iter().find(|p| p["id"] == env.project_id).unwrap();
             let runs = mine["active_runs"].as_array().unwrap();
             assert_eq!(runs.len(), 2);
             let ids: std::collections::HashSet<_> = runs
@@ -10333,12 +10114,7 @@ esac
         let t1 = add_ready_task(&env, "No init 1", "high").await;
         let t2 = add_ready_task(&env, "No init 2", "high").await;
         let t3 = add_ready_task(&env, "No init 3", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         wait_run_status(&env, &t1, "failed", 40).await;
@@ -10362,8 +10138,7 @@ esac
             .unwrap();
         assert_eq!(mine["scan_enabled"], true);
         assert!(
-            mine.get("auto_close_reason").is_none()
-                || mine["auto_close_reason"].is_null(),
+            mine.get("auto_close_reason").is_none() || mine["auto_close_reason"].is_null(),
             "reason cleared on reopen: {mine}"
         );
     }
@@ -10374,12 +10149,8 @@ esac
         // Five Stage calls: no-init, no-init, init+fail, no-init, no-init → still open.
         for i in 1..=5 {
             let id = add_ready_task(&env, &format!("Reset {i}"), "high").await;
-            let _ = oneshot_json(
-                &env.app,
-                "GET",
-                &format!("/api/p/{}/tasks", env.project_id),
-            )
-            .await;
+            let _ =
+                oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
             if i == 1 {
                 enable_scan(&env).await;
             }
@@ -10450,11 +10221,16 @@ sleep 600
         }
     }
 
-    fn write_resume_aware_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path, mode: &str) {
+    fn write_resume_aware_fake_agent(
+        path: &std::path::Path,
+        markplane_bin: &std::path::Path,
+        mode: &str,
+    ) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = format!(r##"#!/usr/bin/env bash
+            let script = format!(
+                r##"#!/usr/bin/env bash
 set -euo pipefail
 MARKPLANE="{mp}"
 AUTHOR="${{MARKPLANE_AUTHOR:-}}"
@@ -10507,7 +10283,10 @@ elif [ "$AUTHOR" = "agent-merge" ]; then
 else
   emit "sess-other-$TASK" "noop"
 fi
-"##, mp = markplane_bin.display(), mode = mode);
+"##,
+                mp = markplane_bin.display(),
+                mode = mode
+            );
             fs::write(path, script).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -10521,16 +10300,24 @@ fi
         let worktree = env.project_dir.join(".worktrees").join(task_id);
         let branch = format!("agent/{task_id}");
         let base = std::process::Command::new("git")
-            .args(["-C"]).arg(&env.project_dir).args(["rev-parse", "HEAD"])
-            .output().unwrap();
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
         let base_sha = String::from_utf8_lossy(&base.stdout).trim().to_string();
         let _ = std::process::Command::new("git")
-            .args(["-C"]).arg(&env.project_dir)
+            .args(["-C"])
+            .arg(&env.project_dir)
             .args(["worktree", "add", "-b", &branch])
             .arg(&worktree)
             .arg(&base_sha)
             .status();
-        let workspace = worktree.canonicalize().unwrap_or(worktree.clone()).display().to_string();
+        let workspace = worktree
+            .canonicalize()
+            .unwrap_or(worktree.clone())
+            .display()
+            .to_string();
         let mut attempt = Attempt {
             stage: Stage::Implement,
             model: "fake".into(),
@@ -10556,11 +10343,24 @@ fi
             let feat = worktree.join(format!("feat-{task_id}.txt"));
             fs::write(&feat, "done").unwrap();
             let _ = std::process::Command::new("git")
-                .args(["-C"]).arg(&worktree)
-                .args(["add", "."]).status();
+                .args(["-C"])
+                .arg(&worktree)
+                .args(["add", "."])
+                .status();
             let _ = std::process::Command::new("git")
-                .args(["-C"]).arg(&worktree)
-                .args(["-c", "user.email=a@b", "-c", "user.name=agent", "commit", "-m", "feat", "-m", &format!("Refs: {task_id}")])
+                .args(["-C"])
+                .arg(&worktree)
+                .args([
+                    "-c",
+                    "user.email=a@b",
+                    "-c",
+                    "user.name=agent",
+                    "commit",
+                    "-m",
+                    "feat",
+                    "-m",
+                    &format!("Refs: {task_id}"),
+                ])
                 .status();
             attempt.ended_at = Some("2026-10-10T09:30:00+08:00".into());
             attempt.exit_code = Some(0);
@@ -10612,14 +10412,8 @@ fi
         let mut env = setup_engine_env("shutdown-kill", Some(false));
         let agent = env._tmp.path().join("fake-agent-hang");
         write_hang_fake_agent(&agent);
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -10632,10 +10426,9 @@ fi
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut pid = None;
         while std::time::Instant::now() < deadline {
-            if let Ok(Some(rec)) = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                &task_id,
-            ) && let Some(a) = rec.runs.last().and_then(|r| r.attempts.last())
+            if let Ok(Some(rec)) =
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                && let Some(a) = rec.runs.last().and_then(|r| r.attempts.last())
                 && let Some(p) = a.pid
             {
                 pid = Some(p);
@@ -10644,7 +10437,10 @@ fi
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let pid = pid.expect("agent pid recorded");
-        assert!(serve_dispatcher_resume::pid_alive(pid), "agent should be alive");
+        assert!(
+            serve_dispatcher_resume::pid_alive(pid),
+            "agent should be alive"
+        );
 
         env.state.shutdown_dispatcher().await;
         // Process group should be dead soon.
@@ -10652,7 +10448,10 @@ fi
         while serve_dispatcher_resume::pid_alive(pid) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(!serve_dispatcher_resume::pid_alive(pid), "agent killed on shutdown");
+        assert!(
+            !serve_dispatcher_resume::pid_alive(pid),
+            "agent killed on shutdown"
+        );
 
         let project = Project::new(env.project_dir.join(".markplane"));
         let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
@@ -10679,12 +10478,8 @@ fi
         let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         seed_interrupted_implement(&env, &task_id, false).await;
 
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["data"][0]["status"], "interrupted");
         assert_eq!(json["data"][0]["stage"], "implement");
@@ -10725,7 +10520,10 @@ fi
         let rec = markplane_core::read_run_record(project.root(), &task_id)
             .unwrap()
             .unwrap();
-        assert_eq!(rec.runs.last().unwrap().status, markplane_core::RunStatus::Stopped);
+        assert_eq!(
+            rec.runs.last().unwrap().status,
+            markplane_core::RunStatus::Stopped
+        );
     }
 
     #[tokio::test]
@@ -10733,14 +10531,8 @@ fi
         let mut env = setup_engine_env("resume-advance", Some(false));
         let agent = env._tmp.path().join("fake-agent-resume");
         write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -10766,8 +10558,13 @@ fi
             .unwrap();
         let run = rec.runs.last().unwrap();
         assert!(
-            run.attempts.iter().any(|a| a.trigger == markplane_core::Trigger::Resume)
-                || run.attempts.iter().any(|a| a.stage == markplane_core::Stage::Merge),
+            run.attempts
+                .iter()
+                .any(|a| a.trigger == markplane_core::Trigger::Resume)
+                || run
+                    .attempts
+                    .iter()
+                    .any(|a| a.stage == markplane_core::Stage::Merge),
             "expected merge after resume advance"
         );
     }
@@ -10794,14 +10591,8 @@ fi
 
         let agent = env._tmp.path().join("fake-agent-mismatch");
         write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "mismatch");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -10815,12 +10606,9 @@ fi
         assert_eq!(status, StatusCode::OK, "{json}");
         wait_run_status(&env, &task_id, "succeeded", 40).await;
 
-        let rec = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let rec = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = rec.runs.last().unwrap();
         assert!(
             run.attempts
@@ -10838,14 +10626,8 @@ fi
         let mut env = setup_engine_env("resume-orphan", Some(false));
         let agent = env._tmp.path().join("fake-agent-resume");
         write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -10925,14 +10707,8 @@ fi
         write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
         // Hang agent so first resume holds the only slot.
         write_hang_fake_agent(&agent);
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -10967,14 +10743,8 @@ fi
 
         let agent = env._tmp.path().join("fake-agent-resume");
         write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11019,14 +10789,8 @@ fi
         let mut env = setup_engine_env("resume-merge-queued", Some(false));
         let agent = env._tmp.path().join("fake-agent-resume");
         write_resume_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11035,7 +10799,7 @@ fi
         seed_interrupted_implement(&env, &task_id, true).await;
         // Flip latest run to merge-queued with a completed implement attempt.
         {
-            use markplane_core::{read_run_record, write_run_record, RunStatus, Stage};
+            use markplane_core::{RunStatus, Stage, read_run_record, write_run_record};
             let mut rec = read_run_record(&env.project_dir.join(".markplane"), &task_id)
                 .unwrap()
                 .unwrap();
@@ -11076,12 +10840,8 @@ fi
         };
         let _held = serve_dispatcher_lock::try_acquire(&key, holder).unwrap();
 
-        let (status, json) = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/runs", env.project_id),
-        )
-        .await;
+        let (status, json) =
+            oneshot_json(&env.app, "GET", &format!("/api/p/{}/runs", env.project_id)).await;
         assert_eq!(status, StatusCode::OK, "{json}");
 
         assert_eq!(json["data"][0]["status"], "running elsewhere");
@@ -11096,12 +10856,14 @@ fi
         // Merge the agent branch into main ourselves, then leave Run as Running@merge.
         let branch = format!("agent/{task_id}");
         let _ = std::process::Command::new("git")
-            .args(["-C"]).arg(&env.project_dir)
+            .args(["-C"])
+            .arg(&env.project_dir)
             .args(["merge", "--no-ff", "-m", "premerge", &branch])
             .status();
         {
             use markplane_core::{
-                Attempt, AttemptResult, RunStatus, Stage, Trigger, read_run_record, write_run_record,
+                Attempt, AttemptResult, RunStatus, Stage, Trigger, read_run_record,
+                write_run_record,
             };
             let mut rec = read_run_record(&env.project_dir.join(".markplane"), &task_id)
                 .unwrap()
@@ -11160,8 +10922,8 @@ fi
         with_commit: bool,
     ) {
         use markplane_core::{
-            Attempt, Run, RunRecord, RunStatus, Trigger, UpdateFields, write_run_record,
-            READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG,
+            Attempt, READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, Run, RunRecord, RunStatus, Trigger,
+            UpdateFields, write_run_record,
         };
         let worktree = env.project_dir.join(".worktrees").join(task_id);
         let branch = format!("agent/{task_id}");
@@ -11225,7 +10987,10 @@ fi
             .add_comment(
                 task_id,
                 "dispatcher",
-                &format!("{} stage failed in session sess-fail-{task_id}: {reason}", stage.as_str()),
+                &format!(
+                    "{} stage failed in session sess-fail-{task_id}: {reason}",
+                    stage.as_str()
+                ),
             )
             .unwrap();
         write_run_record(
@@ -11259,7 +11024,9 @@ fi
                         transcript_path: None,
                         pid: None,
                         process_group_id: None,
-                        agent_config_dir: Some(markplane_core::agent_config_dir().display().to_string()),
+                        agent_config_dir: Some(
+                            markplane_core::agent_config_dir().display().to_string(),
+                        ),
                         trigger: Trigger::Initial,
                         started_at: "2026-10-10T09:00:00+08:00".into(),
                         ended_at: Some("2026-10-10T09:30:00+08:00".into()),
@@ -11276,11 +11043,16 @@ fi
         .unwrap();
     }
 
-    fn write_continue_aware_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path, mode: &str) {
+    fn write_continue_aware_fake_agent(
+        path: &std::path::Path,
+        markplane_bin: &std::path::Path,
+        mode: &str,
+    ) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let script = format!(r##"#!/usr/bin/env bash
+            let script = format!(
+                r##"#!/usr/bin/env bash
 set -euo pipefail
 MARKPLANE="{mp}"
 AUTHOR="${{MARKPLANE_AUTHOR:-}}"
@@ -11347,7 +11119,10 @@ elif [ "$AUTHOR" = "agent-merge" ]; then
 else
   emit "sess-other-$TASK" "noop"
 fi
-"##, mp = markplane_bin.display(), mode = mode);
+"##,
+                mp = markplane_bin.display(),
+                mode = mode
+            );
             fs::write(path, script).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -11386,14 +11161,8 @@ fi
         crate::commands::serve_dispatcher::write_concurrency(&env.config_dir, 1).unwrap();
         let hang = env._tmp.path().join("fake-agent-hang");
         write_hang_fake_agent(&hang);
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(hang),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(hang));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11457,14 +11226,8 @@ fi
         let mut env = setup_engine_env("continue-ok", Some(false));
         let agent = env._tmp.path().join("fake-agent-continue");
         write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11528,14 +11291,8 @@ fi
         let mut env = setup_engine_env(name, Some(false));
         let agent = env._tmp.path().join("fake-agent-continue");
         write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11553,12 +11310,9 @@ fi
         assert_eq!(status, StatusCode::OK, "{json}");
         wait_run_status(&env, &task_id, "succeeded", 40).await;
 
-        let rec = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let rec = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = rec.runs.last().unwrap();
         let cont = run
             .attempts
@@ -11664,14 +11418,8 @@ fi
         let mut env = setup_engine_env("cont-merge-already-merged", Some(false));
         let agent = env._tmp.path().join("fake-agent-continue");
         write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11725,14 +11473,8 @@ fi
         let mut env = setup_engine_env("continue-issues", Some(false));
         let agent = env._tmp.path().join("fake-agent-continue");
         write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "issues");
-        let state = AppState::with_options(
-            env.config_dir.clone(),
-            4200,
-            true,
-            false,
-            None,
-            Some(agent),
-        );
+        let state =
+            AppState::with_options(env.config_dir.clone(), 4200, true, false, None, Some(agent));
         env.state = state;
         env.app = build_app(env.state.clone());
 
@@ -11759,12 +11501,9 @@ fi
         assert_eq!(status, StatusCode::OK, "{json}");
         wait_run_status(&env, &task_id, "succeeded", 40).await;
 
-        let rec = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let rec = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = rec.runs.last().unwrap();
         assert!(
             run.attempts
@@ -11789,12 +11528,7 @@ fi
     async fn cleanup_auto_after_failed_run_when_ticket_marked_done() {
         let env = setup_failure_env("cleanup-auto-done", "nonzero");
         let task_id = add_ready_task(&env, "Cleanup auto done", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
@@ -11818,7 +11552,13 @@ fi
         let _ = std::process::Command::new("git")
             .args(["-C"])
             .arg(&env.project_dir)
-            .args(["merge", "--no-ff", "-m", "merge leftover", &format!("agent/{task_id}")])
+            .args([
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge leftover",
+                &format!("agent/{task_id}"),
+            ])
             .status();
 
         let (status, json) = oneshot_json_body(
@@ -11832,14 +11572,14 @@ fi
 
         env.state.dispatcher_tick().await;
 
-        let record = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let record = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = record.runs.last().unwrap();
-        assert!(run.worktree_removed_at.is_some(), "worktree cleaned: {run:?}");
+        assert!(
+            run.worktree_removed_at.is_some(),
+            "worktree cleaned: {run:?}"
+        );
         assert!(run.branch_removed_at.is_some(), "branch cleaned: {run:?}");
         assert_eq!(run.cleanup_trigger.as_deref(), Some("auto"));
         assert!(!worktree.exists());
@@ -11849,12 +11589,7 @@ fi
     async fn cleanup_auto_skips_uncommitted_and_records_reason() {
         let env = setup_failure_env("cleanup-skip-dirty", "nonzero");
         let task_id = add_ready_task(&env, "Cleanup dirty", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
@@ -11872,18 +11607,12 @@ fi
         assert_eq!(status, StatusCode::OK);
         env.state.dispatcher_tick().await;
 
-        let record = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let record = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = record.runs.last().unwrap();
         assert!(run.worktree_removed_at.is_none());
-        assert_eq!(
-            run.cleanup_blocked.as_deref(),
-            Some("uncommitted_changes")
-        );
+        assert_eq!(run.cleanup_blocked.as_deref(), Some("uncommitted_changes"));
         assert!(worktree.exists());
     }
 
@@ -11891,12 +11620,7 @@ fi
     async fn cleanup_manual_force_via_api() {
         let env = setup_failure_env("cleanup-manual", "nonzero");
         let task_id = add_ready_task(&env, "Cleanup manual", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
@@ -11942,12 +11666,9 @@ fi
         .await;
         assert_eq!(status, StatusCode::OK, "{json}");
         assert!(!worktree.exists());
-        let record = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let record = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         let run = record.runs.last().unwrap();
         assert!(run.worktree_removed_at.is_some());
         assert!(run.branch_removed_at.is_some());
@@ -11958,12 +11679,7 @@ fi
     async fn cleanup_manual_not_shown_while_failed_and_active() {
         let env = setup_failure_env("cleanup-not-elig", "nonzero");
         let task_id = add_ready_task(&env, "Cleanup not elig", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
@@ -12001,12 +11717,7 @@ fi
     async fn cleanup_repickup_records_old_branch_head() {
         let env = setup_failure_env("cleanup-repickup", "nonzero");
         let task_id = add_ready_task(&env, "Cleanup repickup", "high").await;
-        let _ = oneshot_json(
-            &env.app,
-            "GET",
-            &format!("/api/p/{}/tasks", env.project_id),
-        )
-        .await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
         enable_scan(&env).await;
         env.state.dispatcher_tick().await;
         assert_human_handoff(&env, &task_id, "implement").await;
@@ -12046,19 +11757,16 @@ fi
         // Don't use wait_run_status: it panics on the prior failed Run before seq 2 exists.
         let deadline = std::time::Instant::now() + Duration::from_secs(40);
         loop {
-            let record = markplane_core::read_run_record(
-                &env.project_dir.join(".markplane"),
-                &task_id,
-            )
-            .unwrap();
+            let record =
+                markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+                    .unwrap();
             if let Some(rec) = record.as_ref()
                 && rec.runs.len() >= 2
             {
                 let latest = rec.runs.last().unwrap();
                 match latest.status {
                     markplane_core::RunStatus::Succeeded => break,
-                    markplane_core::RunStatus::Failed
-                    | markplane_core::RunStatus::Stopped => {
+                    markplane_core::RunStatus::Failed | markplane_core::RunStatus::Stopped => {
                         panic!(
                             "second run ended {:?}: {:?}",
                             latest.status, latest.failure_reason
@@ -12073,12 +11781,9 @@ fi
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let record = markplane_core::read_run_record(
-            &env.project_dir.join(".markplane"),
-            &task_id,
-        )
-        .unwrap()
-        .unwrap();
+        let record = markplane_core::read_run_record(&env.project_dir.join(".markplane"), &task_id)
+            .unwrap()
+            .unwrap();
         assert!(record.runs.len() >= 2, "expected a second Run");
         let old = &record.runs[0];
         assert_eq!(

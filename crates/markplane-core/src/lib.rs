@@ -38,14 +38,6 @@ pub use dispatcher::{
     effective_dispatcher_settings, parse_agent_models, strip_ansi, validate_concurrency,
     validate_dispatcher_config, validate_model, validate_timeout_minutes,
 };
-pub use pickup::{
-    READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, PickupSortKey, cmp_pickup_keys,
-    filter_and_sort_pickup_candidates, is_implementation_ticket, round_robin_pickup,
-};
-pub use stage_verdict::{
-    ImplementVerdict, classify_implement_verdict, implement_verdict_failure_reason, is_fix_done,
-    is_merge_done,
-};
 pub use error::{MarkplaneError, Result};
 pub use frontmatter::{parse_frontmatter, parse_frontmatter_raw, write_frontmatter};
 pub use links::{LinkAction, LinkRelation};
@@ -54,6 +46,10 @@ pub use models::{
     IdPrefix, Map, MapStatus, MarkplaneDocument, Note, NoteStatus, Plan, PlanStatus, Priority,
     StatusCategory, Task, TaskWorkflow, WorkflowConfig, default_note_types, default_task_types,
     default_task_workflow, generate_random_id, parse_id,
+};
+pub use pickup::{
+    PickupSortKey, READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, cmp_pickup_keys,
+    filter_and_sort_pickup_candidates, is_implementation_ticket, round_robin_pickup,
 };
 pub use project::{
     EpicUpdate, MapUpdate, MoveDirective, NoteUpdate, Patch, PlanUpdate, Project, ResolveOutcome,
@@ -71,13 +67,17 @@ pub use runs::{
     Stage, Trigger, Usage, ensure_runs_dir, list_run_records, read_run_record, run_display_status,
     run_record_path, run_summary, run_summary_with_orphan, stage_started_at, write_run_record,
 };
+pub use sections::{
+    REQUIRED_MAP_SECTIONS, append_line_to_section, missing_map_sections, set_answer_section,
+    split_markdown_sections,
+};
+pub use stage_verdict::{
+    ImplementVerdict, classify_implement_verdict, implement_verdict_failure_reason, is_fix_done,
+    is_merge_done,
+};
+pub use templates::render_template;
 pub use transcripts::{
     SessionTranscript, TranscriptBlock, TranscriptMessage, cursor_data_dir,
     read_session_transcript, read_transcript_file, resolve_transcript_path,
     workspace_transcript_slug,
 };
-pub use sections::{
-    REQUIRED_MAP_SECTIONS, append_line_to_section, missing_map_sections, set_answer_section,
-    split_markdown_sections,
-};
-pub use templates::render_template;
