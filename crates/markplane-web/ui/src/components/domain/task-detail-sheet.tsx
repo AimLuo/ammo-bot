@@ -7,7 +7,11 @@ import { useEpics } from "@/lib/hooks/use-epics";
 import { usePlans } from "@/lib/hooks/use-plans";
 import { useNotes } from "@/lib/hooks/use-notes";
 import { useUpdateTask, useAddTaskComment, useArchiveItem, useUnarchiveItem } from "@/lib/hooks/use-mutations";
-import { useContinueRun, useRunSummaryMap } from "@/lib/hooks/use-runs";
+import {
+  useContinueRun,
+  useRunRecord,
+  useRunSummaryMap,
+} from "@/lib/hooks/use-runs";
 import { useDispatcher, useScanSwitch } from "@/lib/hooks/use-dispatcher";
 import {
   activeRunConfirmMessage,
@@ -84,6 +88,9 @@ export function TaskDetailSheet({
   const archiveItem = useArchiveItem();
   const unarchiveItem = useUnarchiveItem();
   const { map: runMap } = useRunSummaryMap();
+  const { data: runRecord } = useRunRecord(taskId || "", {
+    enabled: !!taskId,
+  });
   const { data: dispatcher } = useDispatcher();
   const { lock } = useScanSwitch();
   const { data: epics } = useEpics();
@@ -98,10 +105,16 @@ export function TaskDetailSheet({
   const taskCategory = task && workflow ? categoryOf(workflow, task.status) : undefined;
   const isClosedStatus = taskCategory === "completed" || taskCategory === "cancelled";
   const runSummary = task ? runMap.get(task.id) : undefined;
+  const latestRun = runRecord?.runs?.length
+    ? [...runRecord.runs].sort((a, b) => b.seq - a.seq)[0]
+    : undefined;
+  const worktreeAndBranchPresent =
+    !!latestRun && !latestRun.worktree_removed_at && !latestRun.branch_removed_at;
   const canContinue =
     !!task &&
     !archived &&
     taskCategory === "active" &&
+    worktreeAndBranchPresent &&
     (runSummary?.status === "failed" || runSummary?.status === "interrupted");
   const lockHeldByOther = lock?.status === "held_by_other";
   const slotsFull =

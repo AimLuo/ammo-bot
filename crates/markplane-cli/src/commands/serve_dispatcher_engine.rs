@@ -2052,6 +2052,32 @@ fn worktree_and_branch_ok(project_dir: &Path, worktree: &Path, branch: &str) -> 
         .unwrap_or(false)
 }
 
+/// Append a completed `trigger: continue` attempt with no agent process
+/// (already-merged shortcut). Lets "continued n×" and history stay honest.
+fn append_continue_noop_attempt(run: &mut Run, stage: Stage, workspace: &Path) {
+    let now = Utc::now().to_rfc3339();
+    run.attempts.push(Attempt {
+        stage,
+        model: String::new(),
+        timeout_secs: None,
+        session_id: None,
+        workspace: workspace.display().to_string(),
+        transcript_path: None,
+        pid: None,
+        process_group_id: None,
+        agent_config_dir: None,
+        trigger: Trigger::Continue,
+        started_at: now.clone(),
+        ended_at: Some(now),
+        exit_code: Some(0),
+        verdict: Some("MERGE: done".into()),
+        result: Some(AttemptResult::Ok),
+        usage: None,
+        duration_api_ms: None,
+        stderr_tail: None,
+    });
+}
+
 /// Whether the latest Run may be continued (`failed` or interrupted display).
 ///
 /// `in_memory` is true when this serve holds the Run's Slot.
@@ -2080,8 +2106,6 @@ pub async fn continue_run(
     }
 
     let human = default_comment_author();
-    let failure_reason;
-    let continue_prompt;
 
     {
         let record = read_run_record(proj.project.root(), &task_id)
@@ -2139,16 +2163,6 @@ pub async fn continue_run(
             return Err(ContinueError::NoFreeSlot);
         }
 
-        failure_reason = run
-            .failure_reason
-            .clone()
-            .unwrap_or_else(|| "interrupted".into());
-        continue_prompt = ContinuePrompt {
-            human_comment: text.clone(),
-            failure_reason: failure_reason.clone(),
-            human: human.clone(),
-        };
-
         // Single ticket write: comment + tags + assignee.
         let date = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
         let _lock = proj
@@ -2180,8 +2194,6 @@ pub async fn continue_run(
         let mut run = run;
         run.status = RunStatus::Running;
         run.ended_at = None;
-        // Keep failure_reason until Stage succeeds; UI can still show last reason
-        // briefly — epic says clear end time; failure_reason cleared at Stage start below.
         update_latest_run(&mut record, &run);
         if let Err(e) = write_run_record(proj.project.root(), &task_id, &record) {
             let mut g = engine.lock().await;
@@ -2189,8 +2201,6 @@ pub async fn continue_run(
             g.in_flight.remove(&task_id);
             return Err(ContinueError::Internal(e.to_string()));
         }
-        let _ = continue_prompt;
-        let _ = failure_reason;
     }
 
     engine.lock().await.broadcast_dispatcher_changed();
@@ -2298,6 +2308,8 @@ async fn continue_pipeline(
                     git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
                 let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
                 run.current_stage = Some(Stage::Merge);
+                // Record a continue invocation even when no agent runs (AC: trigger continue).
+                append_continue_noop_attempt(&mut run, Stage::Merge, &proj.project_dir);
                 update_latest_run(&mut record, &run);
                 persist_run(&engine, proj, task_id, &record, &run, true).await?;
                 return success_close(

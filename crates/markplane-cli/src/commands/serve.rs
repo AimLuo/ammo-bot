@@ -11467,6 +11467,16 @@ fi
         let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
         assert_eq!(doc.frontmatter.status, "done");
         assert!(doc.body.contains("retry merge"));
+        let rec = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            rec.runs.last().unwrap().attempts.iter().any(|a| {
+                a.trigger == markplane_core::Trigger::Continue
+                    && a.stage == markplane_core::Stage::Merge
+            }),
+            "already-merged continue must still record trigger: continue"
+        );
     }
 
     #[tokio::test]

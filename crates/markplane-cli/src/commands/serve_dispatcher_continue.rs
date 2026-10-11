@@ -2,9 +2,7 @@
 
 use std::path::Path;
 
-use markplane_core::{
-    AttemptResult, Run, RunStatus, Stage, Trigger, agent_config_dir, session_meta_exists,
-};
+use markplane_core::{AttemptResult, Run, RunStatus, Stage, Trigger, session_meta_exists};
 
 /// How to continue a failed or interrupted Run after a human comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,12 +140,6 @@ pub fn continue_count(run: &Run) -> usize {
         .iter()
         .filter(|a| a.trigger == Trigger::Continue)
         .count()
-}
-
-/// Default config dir helper for callers that don't inject one.
-#[allow(dead_code)]
-pub fn plan_continue_default(run: &Run) -> Result<ContinuePlan, String> {
-    plan_continue(run, &agent_config_dir())
 }
 
 #[cfg(test)]
