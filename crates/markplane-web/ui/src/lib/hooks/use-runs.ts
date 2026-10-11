@@ -4,9 +4,11 @@ import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiPath } from "@/lib/project-prefix";
 import { throwIfNotOk } from "@/lib/api-error";
-import { postJson } from "@/lib/api";
+import { fetcher, postJson } from "@/lib/api";
 import { toast } from "sonner";
 import type {
+  CleanupOneResponse,
+  CleanupPreview,
   ResumeAllResponse,
   ResumeOneResponse,
   RunRecord,
@@ -145,6 +147,33 @@ export function useContinueRun(taskId: string) {
       void qc.invalidateQueries({ queryKey: ["tasks"] });
       void qc.invalidateQueries({ queryKey: ["task", taskId] });
       toast.success(`Continued ${taskId}`);
+    },
+  });
+}
+
+/** Fetch Clean up confirmation preview. */
+export async function fetchCleanupPreview(
+  taskId: string,
+): Promise<CleanupPreview> {
+  return fetcher<CleanupPreview>(`/api/runs/${taskId}/cleanup`);
+}
+
+/** Force-clean recorded worktree / agent branch for a Run. */
+export function useCleanupRun(taskId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (terminateOrphan?: boolean) =>
+      postJson<CleanupOneResponse>(`/api/runs/${taskId}/cleanup`, {
+        terminate_orphan: !!terminateOrphan,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      void qc.invalidateQueries({ queryKey: ["runs", taskId] });
+      void qc.invalidateQueries({ queryKey: ["dispatcher"] });
+      toast.success(`Cleaned up ${taskId}`);
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || "Clean up failed");
     },
   });
 }

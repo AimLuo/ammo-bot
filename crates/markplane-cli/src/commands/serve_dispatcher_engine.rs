@@ -25,6 +25,7 @@ use markplane_core::{
 use serde_json::json;
 use tokio::sync::{Mutex, broadcast};
 
+use super::serve_dispatcher_cleanup;
 use super::serve_dispatcher_continue::{ContinuePlan, plan_continue};
 use super::serve_dispatcher_handoff::{self, ticket_still_ours};
 use super::serve_dispatcher_prompts::{self, PromptContext};
@@ -319,6 +320,15 @@ pub async fn dispatcher_tick(engine: Arc<Mutex<EngineState>>, mut projects: Vec<
     // Stable order so rr_start indexes stay meaningful across ticks.
     projects.sort_by(|a, b| a.project_id.cmp(&b.project_id));
 
+    // Auto-clean eligible remnants while Scan holds the Dispatcher lock.
+    for proj in &projects {
+        serve_dispatcher_cleanup::auto_cleanup_project(
+            &proj.project,
+            &proj.project_dir,
+            &proj.ws_tx,
+        );
+    }
+
     let concurrency = projects[0].concurrency;
     let free = {
         let g = engine.lock().await;
@@ -472,6 +482,24 @@ async fn run_pipeline(
     let mut record = read_run_record(proj.project.root(), task_id)
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
+
+    // Re-pickup: force-clean the previous Run's remnants and record old branch head.
+    if let Some(mut prev) = record.runs.last().cloned() {
+        if prev.worktree_removed_at.is_none() || prev.branch_removed_at.is_none() {
+            if serve_dispatcher_cleanup::force_cleanup_for_repickup(&proj.project_dir, &mut prev)
+            {
+                if let Some(last) = record.runs.last_mut() {
+                    *last = prev;
+                }
+                write_run_record(proj.project.root(), task_id, &record)
+                    .map_err(|e| e.to_string())?;
+                if let Some(prev_run) = record.runs.last() {
+                    broadcast_run_changed(&proj.ws_tx, task_id, prev_run);
+                }
+            }
+        }
+    }
+
     let seq = record.runs.last().map(|r| r.seq + 1).unwrap_or(1);
     let mut run = Run {
         seq,
@@ -507,7 +535,7 @@ async fn run_pipeline(
         )
         .map_err(|e| e.to_string())?;
 
-    // Worktree
+    // Fresh worktree for this Run (remnants already force-cleaned above).
     let _ = git_run(&proj.project_dir, &["worktree", "prune"]);
     if worktree.exists() {
         let _ = git_run(
@@ -1407,6 +1435,8 @@ async fn success_close(
     run.pushed = pushed;
     run.ended_at = Some(Utc::now().to_rfc3339());
     run.failure_reason = None;
+    // Success finish: auto-clean worktree + merged agent branch.
+    let _ = serve_dispatcher_cleanup::attempt_auto_cleanup(&proj.project_dir, run);
     update_latest_run(record, run);
     persist_run(engine, proj, task_id, record, run, true).await?;
     Ok(())

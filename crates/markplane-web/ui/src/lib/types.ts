@@ -278,6 +278,27 @@ export interface ResumeAllResponse {
   reason?: string | null;
 }
 
+/** `GET /api/runs/{task_id}/cleanup` confirmation preview. */
+export interface CleanupPreview {
+  worktree: string;
+  worktree_present: boolean;
+  uncommitted_files: number;
+  branch: string;
+  branch_present: boolean;
+  unmerged_commits: number;
+  branch_head?: string | null;
+  orphan_pid?: number | null;
+  eligible: boolean;
+}
+
+export interface CleanupOneResponse {
+  task_id: string;
+  worktree_removed_at?: string | null;
+  branch_removed_at?: string | null;
+  cleanup_blocked?: string | null;
+  cleanup_trigger?: string | null;
+}
+
 export type TranscriptBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; name: string; input: Record<string, unknown> };

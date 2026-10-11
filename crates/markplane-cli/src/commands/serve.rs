@@ -37,6 +37,7 @@ use markplane_core::{
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
+use super::serve_dispatcher_cleanup;
 use super::serve_dispatcher_engine::{
     self, ContinueError, EngineState, ResumeError, ScanAutoCloseState,
 };
@@ -703,6 +704,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/runs/{task_id}", get(get_run_record))
         .route("/api/runs/{task_id}/resume", post(resume_one_run))
         .route("/api/runs/{task_id}/continue", post(continue_one_run))
+        .route(
+            "/api/runs/{task_id}/cleanup",
+            get(get_run_cleanup_preview).post(cleanup_one_run),
+        )
         .route(
             "/api/runs/{task_id}/sessions/{session_id}",
             get(get_session_transcript),
@@ -5028,6 +5033,209 @@ async fn continue_one_run(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CleanupRunRequest {
+    #[serde(default)]
+    terminate_orphan: bool,
+}
+
+/// `GET /api/runs/{task_id}/cleanup` — confirmation preview for Clean up.
+async fn get_run_cleanup_preview(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<serve_dispatcher_cleanup::CleanupPreview>>, (StatusCode, Json<ApiError>)>
+{
+    ensure_task_id(&task_id)?;
+    let Some(record) = project
+        .read_run_record(&task_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e.to_string()))?
+    else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no Run record for this ticket",
+        ));
+    };
+    let Some(run) = record.runs.last() else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no Run record for this ticket",
+        ));
+    };
+    let project_dir = project_dir_from_project(&project);
+    let display =
+        run_display_for_cleanup(&state, &project, &project_id, &task_id, run).await;
+    let ticket_cat = ticket_category_for_cleanup(&project, &task_id);
+    let preview = serve_dispatcher_cleanup::cleanup_preview(
+        &project_dir,
+        run,
+        &display,
+        ticket_cat,
+    );
+    Ok(Json(ApiResponse { data: preview }))
+}
+
+/// `POST /api/runs/{task_id}/cleanup` — force-remove recorded worktree / agent branch.
+async fn cleanup_one_run(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+    Path(task_id): Path<String>,
+    body: Option<Json<CleanupRunRequest>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
+    let terminate_orphan = body.map(|b| b.0.terminate_orphan).unwrap_or(false);
+    ensure_task_id(&task_id)?;
+    acquire_dispatcher_lock_for_resume(&state, &project, &project_id).await?;
+    reconcile_interrupted_runs(&state, &project, &project_id).await;
+
+    let mut record = project
+        .read_run_record(&task_id)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e.to_string()))?
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no Run record for this ticket",
+            )
+        })?;
+    let mut run = record.runs.last().cloned().ok_or_else(|| {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no Run record for this ticket",
+        )
+    })?;
+
+    let display =
+        run_display_for_cleanup(&state, &project, &project_id, &task_id, &run).await;
+    let ticket_cat = ticket_category_for_cleanup(&project, &task_id);
+    if !serve_dispatcher_cleanup::manual_cleanup_eligible(&run, &display, ticket_cat) {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "not_cleanup_eligible",
+            "Clean up is not available for this Run",
+        ));
+    }
+
+    let project_dir = project_dir_from_project(&project);
+    match serve_dispatcher_cleanup::attempt_force_cleanup(
+        &project_dir,
+        &mut run,
+        terminate_orphan,
+    ) {
+        Ok(()) => {}
+        Err(serve_dispatcher_cleanup::CleanupError::OrphanRunning { pid }) => {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "orphan_running",
+                &format!("Previous agent process still running (pid {pid})"),
+            ));
+        }
+        Err(serve_dispatcher_cleanup::CleanupError::NotEligible) => {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "not_cleanup_eligible",
+                "Clean up is not available for this Run",
+            ));
+        }
+    }
+
+    if let Some(last) = record.runs.last_mut() {
+        *last = run.clone();
+    }
+    project
+        .write_run_record(&task_id, &record)
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e.to_string()))?;
+
+    if let Ok(rt) = state.get_or_create_runtime(&project_id).await {
+        let stage = run
+            .current_stage
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        let status = markplane_core::run_display_status(
+            &run,
+            markplane_core::RunMemoryPresence::Absent,
+        );
+        let _ = rt.ws_tx.send(
+            serde_json::json!({
+                "type": "run_changed",
+                "task_id": task_id,
+                "seq": run.seq,
+                "status": status,
+                "stage": stage,
+            })
+            .to_string(),
+        );
+    }
+    broadcast_dispatcher_changed(&state).await;
+
+    Ok(Json(ApiResponse {
+        data: serde_json::json!({
+            "task_id": task_id,
+            "worktree_removed_at": run.worktree_removed_at,
+            "branch_removed_at": run.branch_removed_at,
+            "cleanup_blocked": run.cleanup_blocked,
+            "cleanup_trigger": run.cleanup_trigger,
+        }),
+    }))
+}
+
+async fn run_display_for_cleanup(
+    state: &AppState,
+    project: &Project,
+    project_id: &str,
+    task_id: &str,
+    run: &markplane_core::Run,
+) -> String {
+    let in_memory = {
+        let engine = state.engine.lock().await;
+        engine
+            .active_slots
+            .get(task_id)
+            .map(|p| p == project_id)
+            .unwrap_or(false)
+    };
+    let lock_held_by_other = {
+        let project_dir = project_dir_from_project(project);
+        match serve_git::resolve_lock_key(&project_dir) {
+            Ok(key) => {
+                let held_by_us = {
+                    let disp = state.dispatcher.lock().await;
+                    disp.key_to_project
+                        .get(&key)
+                        .map(|id| id == project_id)
+                        .unwrap_or(false)
+                };
+                matches!(
+                    serve_dispatcher_lock::probe(&key, held_by_us),
+                    Ok(LockProbe::HeldByOther(_))
+                )
+            }
+            Err(_) => false,
+        }
+    };
+    let presence = if in_memory {
+        markplane_core::RunMemoryPresence::InMemory
+    } else if lock_held_by_other {
+        markplane_core::RunMemoryPresence::HeldElsewhere
+    } else {
+        markplane_core::RunMemoryPresence::Absent
+    };
+    markplane_core::run_display_status(run, presence).to_string()
+}
+
+fn ticket_category_for_cleanup(
+    project: &Project,
+    task_id: &str,
+) -> Option<markplane_core::StatusCategory> {
+    let config = project.load_config().ok()?;
+    let doc = project.read_item::<Task>(task_id).ok()?;
+    config.workflows.task.category_of(&doc.frontmatter.status)
+}
+
 fn ensure_task_id(task_id: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
     let (prefix, _) = parse_id(task_id).map_err(|_| {
         error_response(
@@ -5107,7 +5315,8 @@ async fn acquire_dispatcher_lock_for_resume(
     }
 }
 
-/// On lock acquire: non-terminal Runs whose ticket left active/dispatcher → stopped.
+/// On lock acquire: non-terminal Runs whose ticket left active/dispatcher → stopped;
+/// also auto-clean eligible remnants (failed/stopped + done/cancelled, or succeeded leftovers).
 async fn reconcile_interrupted_runs(state: &Arc<AppState>, project: &Project, project_id: &str) {
     let Ok(records) = project.list_run_records() else {
         return;
@@ -5148,6 +5357,8 @@ async fn reconcile_interrupted_runs(state: &Arc<AppState>, project: &Project, pr
         )
         .await;
     }
+    let project_dir = project_dir_from_project(project);
+    serve_dispatcher_cleanup::auto_cleanup_project(project, &project_dir, &ws_tx);
 }
 
 async fn mark_run_stopped_if_needed(project: &Project, task_id: &str) {
@@ -8302,6 +8513,24 @@ mod tests {
                 .all(|a| !a.model.is_empty() && a.timeout_secs.is_some()),
             "model and timeout snapshot required on every attempt"
         );
+        // Success finish auto-cleans recorded worktree + merged agent branch.
+        assert!(
+            run.worktree_removed_at.is_some(),
+            "worktree should be cleaned after success"
+        );
+        assert!(
+            run.branch_removed_at.is_some(),
+            "agent branch should be cleaned after success"
+        );
+        assert_eq!(run.cleanup_trigger.as_deref(), Some("auto"));
+        assert!(!std::path::Path::new(&run.worktree).exists());
+        let branch_check = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/agent/{task_id}")])
+            .status()
+            .unwrap();
+        assert!(!branch_check.success(), "agent branch should be deleted");
 
         // Main branch contains merge; ticket-only commit has Refs trailer.
         let log = std::process::Command::new("git")
@@ -8597,15 +8826,30 @@ mod tests {
         wait_run_status(&env, &a, "succeeded", 40).await;
         wait_run_status(&env, &b, "succeeded", 40).await;
 
-        // Both branches contained in main
+        // Both merges landed on main (agent branches are auto-deleted after success).
         for id in [&a, &b] {
+            let record = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                id,
+            )
+            .unwrap()
+            .unwrap();
+            let run = record.runs.last().unwrap();
+            let merge_sha = run.merge_sha.as_deref().expect("merge_sha");
             let status = std::process::Command::new("git")
                 .args(["-C"])
                 .arg(&env.project_dir)
-                .args(["merge-base", "--is-ancestor", &format!("agent/{id}"), "HEAD"])
+                .args(["merge-base", "--is-ancestor", merge_sha, "HEAD"])
                 .status()
                 .unwrap();
-            assert!(status.success(), "branch agent/{id} should be merged");
+            assert!(
+                status.success(),
+                "merge_sha {merge_sha} for {id} should be on HEAD"
+            );
+            assert!(
+                run.branch_removed_at.is_some(),
+                "agent branch cleaned after success for {id}"
+            );
         }
     }
 
@@ -11540,6 +11784,373 @@ fi
                 .any(|a| a.stage == markplane_core::Stage::Merge),
             "expected merge: {:?}",
             run.attempts
+        );
+    }
+
+    // ── TASK-kkmrn: leftover worktree / branch cleanup ─────────────────────
+
+    #[tokio::test]
+    async fn cleanup_auto_after_failed_run_when_ticket_marked_done() {
+        let env = setup_failure_env("cleanup-auto-done", "nonzero");
+        let task_id = add_ready_task(&env, "Cleanup auto done", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+
+        let worktree = env.project_dir.join(".worktrees").join(&task_id);
+        assert!(worktree.is_dir(), "failed run keeps worktree");
+
+        // Human marks ticket done → next scan auto-cleans clean remnants.
+        // Ensure worktree is clean so auto remove succeeds.
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&worktree)
+            .args(["reset", "--hard"])
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&worktree)
+            .args(["clean", "-fd"])
+            .status();
+        // Merge agent branch so `branch -d` can succeed.
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["merge", "--no-ff", "-m", "merge leftover", &format!("agent/{task_id}")])
+            .status();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{task_id}", env.project_id),
+            Some(serde_json::json!({ "status": "done" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+
+        env.state.dispatcher_tick().await;
+
+        let record = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = record.runs.last().unwrap();
+        assert!(run.worktree_removed_at.is_some(), "worktree cleaned: {run:?}");
+        assert!(run.branch_removed_at.is_some(), "branch cleaned: {run:?}");
+        assert_eq!(run.cleanup_trigger.as_deref(), Some("auto"));
+        assert!(!worktree.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_auto_skips_uncommitted_and_records_reason() {
+        let env = setup_failure_env("cleanup-skip-dirty", "nonzero");
+        let task_id = add_ready_task(&env, "Cleanup dirty", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+
+        let worktree = env.project_dir.join(".worktrees").join(&task_id);
+        fs::write(worktree.join("leftover.txt"), "keep me").unwrap();
+
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{task_id}", env.project_id),
+            Some(serde_json::json!({ "status": "done" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        env.state.dispatcher_tick().await;
+
+        let record = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = record.runs.last().unwrap();
+        assert!(run.worktree_removed_at.is_none());
+        assert_eq!(
+            run.cleanup_blocked.as_deref(),
+            Some("uncommitted_changes")
+        );
+        assert!(worktree.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_manual_force_via_api() {
+        let env = setup_failure_env("cleanup-manual", "nonzero");
+        let task_id = add_ready_task(&env, "Cleanup manual", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+
+        // Close Scan so Clean up can take the lock; mark ticket cancelled
+        // so manual cleanup is eligible (not failed+active).
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{task_id}", env.project_id),
+            Some(serde_json::json!({ "status": "cancelled" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let worktree = env.project_dir.join(".worktrees").join(&task_id);
+        fs::write(worktree.join("dirty.txt"), "x").unwrap();
+
+        let (status, preview) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs/{task_id}/cleanup", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["data"]["eligible"], true);
+        assert!(preview["data"]["uncommitted_files"].as_u64().unwrap() >= 1);
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/cleanup", env.project_id),
+            Some(serde_json::json!({ "terminate_orphan": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!worktree.exists());
+        let record = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = record.runs.last().unwrap();
+        assert!(run.worktree_removed_at.is_some());
+        assert!(run.branch_removed_at.is_some());
+        assert_eq!(run.cleanup_trigger.as_deref(), Some("manual"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_manual_not_shown_while_failed_and_active() {
+        let env = setup_failure_env("cleanup-not-elig", "nonzero");
+        let task_id = add_ready_task(&env, "Cleanup not elig", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/dispatcher/scan", env.project_id),
+            Some(serde_json::json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, preview) = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/runs/{task_id}/cleanup", env.project_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["data"]["eligible"], false);
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/cleanup", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["error"]["code"], "not_cleanup_eligible");
+    }
+
+    #[tokio::test]
+    async fn cleanup_repickup_records_old_branch_head() {
+        let env = setup_failure_env("cleanup-repickup", "nonzero");
+        let task_id = add_ready_task(&env, "Cleanup repickup", "high").await;
+        let _ = oneshot_json(
+            &env.app,
+            "GET",
+            &format!("/api/p/{}/tasks", env.project_id),
+        )
+        .await;
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+        assert_human_handoff(&env, &task_id, "implement").await;
+
+        let branch = format!("agent/{task_id}");
+        let old_head = {
+            let out = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&env.project_dir)
+                .args(["rev-parse", &branch])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert!(!old_head.is_empty());
+
+        // Overwrite the failure fake-agent with the happy-path script (same path /
+        // same AppState) so re-pickup runs implement→merge successfully.
+        let agent = env._tmp.path().join("fake-agent");
+        write_happy_fake_agent(&agent, &markplane_debug_bin());
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{task_id}", env.project_id),
+            Some(serde_json::json!({
+                "status": "planned",
+                "assignee": "",
+                "tags": ["ready-for-agent"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        // Scan is still on from the first failure; tick picks up the re-planned ticket.
+        env.state.dispatcher_tick().await;
+
+        // Don't use wait_run_status: it panics on the prior failed Run before seq 2 exists.
+        let deadline = std::time::Instant::now() + Duration::from_secs(40);
+        loop {
+            let record = markplane_core::read_run_record(
+                &env.project_dir.join(".markplane"),
+                &task_id,
+            )
+            .unwrap();
+            if let Some(rec) = record.as_ref()
+                && rec.runs.len() >= 2
+            {
+                let latest = rec.runs.last().unwrap();
+                match latest.status {
+                    markplane_core::RunStatus::Succeeded => break,
+                    markplane_core::RunStatus::Failed
+                    | markplane_core::RunStatus::Stopped => {
+                        panic!(
+                            "second run ended {:?}: {:?}",
+                            latest.status, latest.failure_reason
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("timeout waiting for second succeeded run on {task_id}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let record = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(record.runs.len() >= 2, "expected a second Run");
+        let old = &record.runs[0];
+        assert_eq!(
+            old.branch_head_at_removal.as_deref(),
+            Some(old_head.as_str()),
+            "old Run should record prior branch head"
+        );
+        assert_eq!(old.cleanup_trigger.as_deref(), Some("repickup"));
+        assert!(old.worktree_removed_at.is_some());
+        assert!(old.branch_removed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_never_deletes_handmade_worktree() {
+        let env = setup_engine_env("cleanup-handmade", Some(false));
+        let task_id = add_ready_task(&env, "Cleanup handmade", "high").await;
+        let handmade = env.project_dir.join("my-hand-worktree");
+        fs::create_dir_all(&handmade).unwrap();
+        fs::write(handmade.join("keep.txt"), "safe").unwrap();
+
+        // Plant a failed Run that points at the handmade path (not registered).
+        use markplane_core::{Run, RunRecord, RunStatus, write_run_record};
+        let project = Project::new(env.project_dir.join(".markplane"));
+        write_run_record(
+            project.root(),
+            &task_id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Failed,
+                    current_stage: Some(markplane_core::Stage::Implement),
+                    worktree: handmade.display().to_string(),
+                    branch: format!("agent/{task_id}"),
+                    base_sha: "deadbeef".into(),
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: Some("2026-10-10T09:30:00+08:00".into()),
+                    failure_reason: Some("boom".into()),
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![],
+                }],
+            },
+        )
+        .unwrap();
+        let (status, _) = oneshot_json_body(
+            &env.app,
+            "PATCH",
+            &format!("/api/p/{}/tasks/{task_id}", env.project_id),
+            Some(serde_json::json!({ "status": "done" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        enable_scan(&env).await;
+        env.state.dispatcher_tick().await;
+
+        assert!(handmade.exists(), "handmade directory must survive");
+        let record = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.runs[0].cleanup_blocked.as_deref(),
+            Some("not_a_worktree")
         );
     }
 }

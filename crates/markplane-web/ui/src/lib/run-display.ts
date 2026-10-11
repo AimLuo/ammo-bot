@@ -361,3 +361,63 @@ export function activeRunConfirmMessage(
   const stage = summary.stage ?? "current stage";
   return `Dispatcher is running ${taskId} (${stage}). It will stop after the current stage ends; the agent process is not killed and the worktree is kept. Continue?`;
 }
+
+/**
+ * Whether the Run section should show "Clean up…".
+ * Mirrors server `manual_cleanup_eligible`: not live/interrupted/elsewhere,
+ * not failed-while-active, and at least one remnant remains.
+ */
+export function canCleanupRun(
+  run: Run,
+  displayStatus: string | undefined,
+  task: Pick<Task, "status">,
+  workflow?: TaskWorkflow,
+): boolean {
+  if (run.worktree_removed_at && run.branch_removed_at) return false;
+  const status = displayStatus ?? run.status;
+  if (
+    status === "running" ||
+    status === "merge-queued" ||
+    status === "stopping" ||
+    status === "running elsewhere" ||
+    status === "interrupted"
+  ) {
+    return false;
+  }
+  const cat: StatusCategory | undefined = workflow
+    ? categoryOf(workflow, task.status)
+    : undefined;
+  if (run.status === "failed" && cat === "active") return false;
+  return true;
+}
+
+/** Confirm-dialog body for Clean up from a cleanup preview. */
+export function cleanupConfirmMessage(preview: {
+  worktree: string;
+  worktree_present: boolean;
+  uncommitted_files: number;
+  branch: string;
+  branch_present: boolean;
+  unmerged_commits: number;
+  branch_head?: string | null;
+  orphan_pid?: number | null;
+}): string {
+  const lines: string[] = ["Force-delete Dispatcher remnants?"];
+  if (preview.worktree_present) {
+    lines.push(
+      `Worktree: ${preview.worktree} (${preview.uncommitted_files} uncommitted file${preview.uncommitted_files === 1 ? "" : "s"})`,
+    );
+  }
+  if (preview.branch_present) {
+    const head = preview.branch_head
+      ? preview.branch_head.slice(0, 12)
+      : "unknown";
+    lines.push(
+      `Branch: ${preview.branch} (${preview.unmerged_commits} unmerged commit${preview.unmerged_commits === 1 ? "" : "s"}, head ${head})`,
+    );
+  }
+  if (preview.orphan_pid != null) {
+    lines.push(`Orphan agent pid ${preview.orphan_pid} will be terminated.`);
+  }
+  return lines.join("\n");
+}

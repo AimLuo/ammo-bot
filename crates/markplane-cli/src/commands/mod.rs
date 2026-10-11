@@ -24,6 +24,7 @@ mod resolve;
 mod serve;
 mod serve_daemon;
 mod serve_dispatcher;
+mod serve_dispatcher_cleanup;
 mod serve_dispatcher_continue;
 mod serve_dispatcher_engine;
 mod serve_dispatcher_handoff;

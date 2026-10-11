@@ -13,17 +13,21 @@ import {
   Minus,
   Play,
   ScrollText,
+  Trash2,
   TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { RunBadge } from "@/components/domain/run-badge";
 import {
+  fetchCleanupPreview,
+  useCleanupRun,
   useResumeRun,
   useRunRecord,
   useRunSummaryMap,
 } from "@/lib/hooks/use-runs";
 import { useConfig } from "@/lib/hooks/use-config";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   fmtDuration,
   fmtTime,
@@ -32,6 +36,8 @@ import {
   usageTooltip,
 } from "@/lib/session-log";
 import {
+  canCleanupRun,
+  cleanupConfirmMessage,
   endingStage,
   remnantStatusLine,
   runsNewestFirst,
@@ -194,6 +200,50 @@ function ContinueFocusButton({
   );
 }
 
+function CleanupRunButton({
+  taskId,
+  run,
+  displayStatus,
+  task,
+  workflow,
+}: {
+  taskId: string;
+  run: Run;
+  displayStatus?: string;
+  task: Pick<Task, "status" | "assignee">;
+  workflow?: TaskWorkflow;
+}) {
+  const cleanup = useCleanupRun(taskId);
+  if (!canCleanupRun(run, displayStatus, task, workflow)) return null;
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-7 gap-1.5 text-xs"
+      disabled={cleanup.isPending}
+      onClick={() => {
+        void (async () => {
+          try {
+            const preview = await fetchCleanupPreview(taskId);
+            if (!preview.eligible) return;
+            const ok = window.confirm(cleanupConfirmMessage(preview));
+            if (!ok) return;
+            cleanup.mutate(preview.orphan_pid != null);
+          } catch (err) {
+            const message =
+              err instanceof Error ? err.message : "Clean up preview failed";
+            toast.error(message);
+          }
+        })();
+      }}
+    >
+      <Trash2 className="size-3.5" />
+      Clean up…
+    </Button>
+  );
+}
+
 function continueCount(run: Run): number {
   return run.attempts.filter((a) => a.trigger === "continue").length;
 }
@@ -301,6 +351,13 @@ function LatestRunBlock({
           <ContinueFocusButton
             displayStatus={listSummary?.status}
             onContinueFocus={onContinueFocus}
+          />
+          <CleanupRunButton
+            taskId={taskId}
+            run={run}
+            displayStatus={listSummary?.status}
+            task={task}
+            workflow={workflow}
           />
           <ViewSessionsButton onClick={onViewSessions} />
         </div>
