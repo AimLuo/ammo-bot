@@ -37,7 +37,9 @@ use markplane_core::{
 };
 
 use super::serve_daemon::{self, PidInfo, PidLock};
-use super::serve_dispatcher_engine::{self, EngineState, ResumeError, ScanAutoCloseState};
+use super::serve_dispatcher_engine::{
+    self, ContinueError, EngineState, ResumeError, ScanAutoCloseState,
+};
 use super::serve_dispatcher_handoff;
 use super::serve_dispatcher_lock::{
     self, AcquireError, HeldDispatcherLock, LockHolder, LockProbe,
@@ -700,6 +702,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/runs/resume", post(resume_all_runs))
         .route("/api/runs/{task_id}", get(get_run_record))
         .route("/api/runs/{task_id}/resume", post(resume_one_run))
+        .route("/api/runs/{task_id}/continue", post(continue_one_run))
         .route(
             "/api/runs/{task_id}/sessions/{session_id}",
             get(get_session_transcript),
@@ -4945,6 +4948,84 @@ async fn resume_all_runs(
             reason,
         },
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ContinueRunRequest {
+    text: String,
+    #[serde(default)]
+    terminate_orphan: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ContinueOneResponse {
+    task_id: String,
+    status: String,
+}
+
+/// `POST /api/runs/{task_id}/continue` — comment & continue a failed/interrupted Run.
+async fn continue_one_run(
+    State(state): State<Arc<AppState>>,
+    Extension(project): Extension<Project>,
+    Extension(ProjectId(project_id)): Extension<ProjectId>,
+    Path(task_id): Path<String>,
+    Json(body): Json<ContinueRunRequest>,
+) -> Result<Json<ApiResponse<ContinueOneResponse>>, (StatusCode, Json<ApiError>)> {
+    ensure_task_id(&task_id)?;
+    let text = body.text.trim();
+    if text.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_field",
+            "Comment text must not be empty",
+        ));
+    }
+
+    acquire_dispatcher_lock_for_resume(&state, &project, &project_id).await?;
+
+    let proj = project_tick_input(state.clone(), &project, &project_id)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", &e))?;
+
+    match serve_dispatcher_engine::continue_run(
+        state.engine.clone(),
+        proj,
+        task_id.clone(),
+        text.to_string(),
+        body.terminate_orphan,
+    )
+    .await
+    {
+        Ok(()) => {
+            broadcast_dispatcher_changed(&state).await;
+            Ok(Json(ApiResponse {
+                data: ContinueOneResponse {
+                    task_id,
+                    status: "running".into(),
+                },
+            }))
+        }
+        Err(ContinueError::OrphanRunning { pid }) => Err(error_response(
+            StatusCode::CONFLICT,
+            "orphan_running",
+            &format!("Previous agent process still running (pid {pid})"),
+        )),
+        Err(ContinueError::NoFreeSlot) => Err(error_response(
+            StatusCode::CONFLICT,
+            "no_free_slot",
+            "no free dispatcher slot",
+        )),
+        Err(ContinueError::NotContinuable) => Err(error_response(
+            StatusCode::CONFLICT,
+            "not_continuable",
+            "run is not continuable",
+        )),
+        Err(ContinueError::Internal(msg)) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            &msg,
+        )),
+    }
 }
 
 fn ensure_task_id(task_id: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -10825,5 +10906,630 @@ fi
         let project = Project::new(env.project_dir.join(".markplane"));
         let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
         assert_eq!(doc.frontmatter.status, "done");
+    }
+
+    // ── TASK-55iug: Comment & continue ─────────────────────────────────────
+
+    /// Seed a failed Run at `stage` with the given failure reason (worktree + branch present).
+    async fn seed_failed_run(
+        env: &EngineEnv,
+        task_id: &str,
+        stage: markplane_core::Stage,
+        reason: &str,
+        attempt_result: markplane_core::AttemptResult,
+        verdict: Option<&str>,
+        with_commit: bool,
+    ) {
+        use markplane_core::{
+            Attempt, Run, RunRecord, RunStatus, Trigger, UpdateFields, write_run_record,
+            READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG,
+        };
+        let worktree = env.project_dir.join(".worktrees").join(task_id);
+        let branch = format!("agent/{task_id}");
+        let base = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let base_sha = String::from_utf8_lossy(&base.stdout).trim().to_string();
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&worktree)
+            .arg(&base_sha)
+            .status();
+        if with_commit {
+            let feat = worktree.join(format!("feat-{task_id}.txt"));
+            fs::write(&feat, "partial").unwrap();
+            let _ = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&worktree)
+                .args(["add", "."])
+                .status();
+            let _ = std::process::Command::new("git")
+                .args(["-C"])
+                .arg(&worktree)
+                .args([
+                    "-c",
+                    "user.email=a@b",
+                    "-c",
+                    "user.name=agent",
+                    "commit",
+                    "-m",
+                    "feat",
+                    "-m",
+                    &format!("Refs: {task_id}"),
+                ])
+                .status();
+        }
+        let workspace = worktree
+            .canonicalize()
+            .unwrap_or(worktree.clone())
+            .display()
+            .to_string();
+        let project = Project::new(env.project_dir.join(".markplane"));
+        project
+            .update_item(
+                task_id,
+                UpdateFields {
+                    status: Some("in-progress".into()),
+                    assignee: Patch::Set("dispatcher".into()),
+                    remove_tags: vec![READY_FOR_AGENT_TAG.into()],
+                    add_tags: vec![READY_FOR_HUMAN_TAG.into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        project
+            .add_comment(
+                task_id,
+                "dispatcher",
+                &format!("{} stage failed in session sess-fail-{task_id}: {reason}", stage.as_str()),
+            )
+            .unwrap();
+        write_run_record(
+            project.root(),
+            task_id,
+            &RunRecord {
+                runs: vec![Run {
+                    seq: 1,
+                    status: RunStatus::Failed,
+                    current_stage: Some(stage),
+                    worktree: worktree.display().to_string(),
+                    branch,
+                    base_sha,
+                    merge_target: "main".into(),
+                    merge_sha: None,
+                    pushed: false,
+                    started_at: "2026-10-10T09:00:00+08:00".into(),
+                    ended_at: Some("2026-10-10T09:30:00+08:00".into()),
+                    failure_reason: Some(reason.into()),
+                    worktree_removed_at: None,
+                    branch_removed_at: None,
+                    branch_head_at_removal: None,
+                    cleanup_blocked: None,
+                    cleanup_trigger: None,
+                    attempts: vec![Attempt {
+                        stage,
+                        model: "fake".into(),
+                        timeout_secs: Some(3600),
+                        session_id: Some(format!("sess-fail-{task_id}")),
+                        workspace,
+                        transcript_path: None,
+                        pid: None,
+                        process_group_id: None,
+                        agent_config_dir: Some(markplane_core::agent_config_dir().display().to_string()),
+                        trigger: Trigger::Initial,
+                        started_at: "2026-10-10T09:00:00+08:00".into(),
+                        ended_at: Some("2026-10-10T09:30:00+08:00".into()),
+                        exit_code: Some(1),
+                        verdict: verdict.map(str::to_string),
+                        result: Some(attempt_result),
+                        usage: None,
+                        duration_api_ms: None,
+                        stderr_tail: None,
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    fn write_continue_aware_fake_agent(path: &std::path::Path, markplane_bin: &std::path::Path, mode: &str) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = format!(r##"#!/usr/bin/env bash
+set -euo pipefail
+MARKPLANE="{mp}"
+AUTHOR="${{MARKPLANE_AUTHOR:-}}"
+MODE="{mode}"
+RESUME=""
+args=("$@")
+for ((i=0; i<${{#args[@]}}; i++)); do
+  case "${{args[$i]}}" in
+    --resume) RESUME="${{args[$((i+1))]}}" ;;
+  esac
+done
+PROMPT="${{@: -1}}"
+TASK="$(printf '%s' "$PROMPT" | sed -n 's/.*\(TASK-[a-z0-9]*\).*/\1/p' | head -1)"
+emit() {{
+  local session="$1" text="$2"
+  printf '%s\n' "{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session\",\"model\":\"fake\"}}"
+  python3 -c 'import json,sys; print(json.dumps({{"type":"assistant","message":{{"content":[{{"type":"text","text":sys.argv[1]}}]}}}}))' "$text"
+  printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"usage":{{"inputTokens":1,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}},"duration_api_ms":10}}'
+}}
+# When this is a continue prompt, the human comment must be inlined.
+if printf '%s' "$PROMPT" | grep -q '<human-comment>'; then
+  if ! printf '%s' "$PROMPT" | grep -Eq 'please fix the typo|try again with issues|retry '; then
+    echo "human comment not inlined" >&2
+    exit 43
+  fi
+fi
+if [ "$AUTHOR" = "agent-implement" ]; then
+  if [ "$MODE" = "issues" ]; then
+    echo "implemented with issues" > "feat-$TASK.txt"
+    git add "feat-$TASK.txt"
+    git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK" || true
+    printf '%s\n' '**Review** base fake · 1 must-fix · 0 optional' '' '**Must-fix**' '1. rename foo' '' '**Optional**' 'none' | "$MARKPLANE" comment "$TASK" --body-file -
+    SID="sess-impl-$TASK"
+    [ -n "$RESUME" ] && SID="$RESUME"
+    emit "$SID" "$(printf 'done\n\nREVIEW: issues\n')"
+  else
+    echo "implemented by continue agent" > "feat-$TASK.txt"
+    git add "feat-$TASK.txt"
+    git -c user.email=a@b -c user.name=agent commit -m "feat: $TASK" -m "Refs: $TASK" || true
+    printf '%s\n' '**Review** base fake · 0 must-fix · 0 optional' '' '**Must-fix**' 'none' '' '**Optional**' 'none' | "$MARKPLANE" comment "$TASK" --body-file -
+    SID="sess-impl-$TASK"
+    [ -n "$RESUME" ] && SID="$RESUME"
+    emit "$SID" "$(printf 'done\n\nREVIEW: clean\n')"
+  fi
+elif [ "$AUTHOR" = "agent-fix" ]; then
+  case "$PROMPT" in
+    *"<human-comment>"*|*"What to fix"*) ;;
+    *) echo "unexpected fix prompt" >&2; exit 44 ;;
+  esac
+  echo "fixed" >> "feat-$TASK.txt" 2>/dev/null || echo "fixed" > "feat-$TASK.txt"
+  git add "feat-$TASK.txt" 2>/dev/null || true
+  git -c user.email=a@b -c user.name=agent commit -m "fix: $TASK" -m "Refs: $TASK" || true
+  printf '%s\n' '**Fix report** · 1 fixed · 0 declined · 0 blocked' '1. rename foo — fixed' 'Tests: ok → pass' | "$MARKPLANE" comment "$TASK" --body-file -
+  emit "sess-fix-$TASK" "$(printf 'fixed\n\nFIX: done\n')"
+elif [ "$AUTHOR" = "agent-merge" ]; then
+  BRANCH="agent/$TASK"
+  if git merge-base --is-ancestor "$BRANCH" HEAD; then
+    emit "sess-merge-$TASK" "$(printf 'already\n\nMERGE: done\n')"
+    exit 0
+  fi
+  git merge --no-ff --no-commit "$BRANCH"
+  git -c user.email=a@b -c user.name=agent commit -m "Merge $BRANCH" -m "Refs: $TASK"
+  emit "sess-merge-$TASK" "$(printf 'merged\n\nMERGE: done\n')"
+else
+  emit "sess-other-$TASK" "noop"
+fi
+"##, mp = markplane_bin.display(), mode = mode);
+            fs::write(path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn continue_empty_text_is_400() {
+        let env = setup_engine_env("continue-empty", Some(false));
+        let task_id = add_ready_task(&env, "Empty continue", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_failed_run(
+            &env,
+            &task_id,
+            markplane_core::Stage::Implement,
+            "implement agent failed (exit 1, verdict=<none>)",
+            markplane_core::AttemptResult::Failed,
+            None,
+            true,
+        )
+        .await;
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/continue", env.project_id),
+            Some(serde_json::json!({ "text": "   " })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    }
+
+    #[tokio::test]
+    async fn continue_409_writes_nothing() {
+        let _guard = markplane_author_guard(Some("chuck-human"));
+        let mut env = setup_engine_env("continue-409", Some(false));
+        // Concurrency 0 is invalid; fill the only slot with a hanging run instead.
+        crate::commands::serve_dispatcher::write_concurrency(&env.config_dir, 1).unwrap();
+        let hang = env._tmp.path().join("fake-agent-hang");
+        write_hang_fake_agent(&hang);
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(hang),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let blocker = add_ready_task(&env, "Slot hog", "critical").await;
+        let task_id = add_ready_task(&env, "Needs continue", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_interrupted_implement(&env, &blocker, false).await;
+        seed_failed_run(
+            &env,
+            &task_id,
+            markplane_core::Stage::Implement,
+            "implement agent failed (exit 1, verdict=<none>)",
+            markplane_core::AttemptResult::Failed,
+            None,
+            true,
+        )
+        .await;
+
+        // Occupy the only Slot via Resume.
+        let (st, _) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{blocker}/resume", env.project_id),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let before_doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        let before_body = before_doc.body.clone();
+        let before_tags = before_doc.frontmatter.tags.clone();
+        let before_run = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/continue", env.project_id),
+            Some(serde_json::json!({ "text": "please fix the typo" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["error"]["code"], "no_free_slot");
+
+        let after_doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(after_doc.body, before_body);
+        assert_eq!(after_doc.frontmatter.tags, before_tags);
+        let after_run = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_run, before_run);
+
+        env.state.shutdown_dispatcher().await;
+    }
+
+    #[tokio::test]
+    async fn continue_success_posts_comment_and_trigger() {
+        let _guard = markplane_author_guard(Some("chuck-human"));
+        let mut env = setup_engine_env("continue-ok", Some(false));
+        let agent = env._tmp.path().join("fake-agent-continue");
+        write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Continue ok", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_failed_run(
+            &env,
+            &task_id,
+            markplane_core::Stage::Implement,
+            "implement agent failed (exit 1, verdict=<none>)",
+            markplane_core::AttemptResult::Failed,
+            None,
+            true,
+        )
+        .await;
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/continue", env.project_id),
+            Some(serde_json::json!({ "text": "please fix the typo" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert!(doc.body.contains("please fix the typo"));
+        assert!(doc.body.contains("chuck-human"));
+        assert!(doc.frontmatter.tags.iter().any(|t| t == "ready-for-agent"));
+        assert!(!doc.frontmatter.tags.iter().any(|t| t == "ready-for-human"));
+        assert_eq!(doc.frontmatter.assignee.as_deref(), Some("dispatcher"));
+        assert_eq!(doc.frontmatter.status, "done");
+
+        let rec = markplane_core::read_run_record(project.root(), &task_id)
+            .unwrap()
+            .unwrap();
+        let run = rec.runs.last().unwrap();
+        assert!(
+            run.attempts
+                .iter()
+                .any(|a| a.trigger == markplane_core::Trigger::Continue),
+            "expected trigger: continue: {:?}",
+            run.attempts
+        );
+    }
+
+    async fn continue_routes_scenario(
+        name: &str,
+        stage: markplane_core::Stage,
+        reason: &str,
+        result: markplane_core::AttemptResult,
+        verdict: Option<&str>,
+        with_commit: bool,
+        comment: &str,
+        expect_continue_stage: markplane_core::Stage,
+    ) {
+        let _guard = markplane_author_guard(Some("chuck-human"));
+        let mut env = setup_engine_env(name, Some(false));
+        let agent = env._tmp.path().join("fake-agent-continue");
+        write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, name, "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_failed_run(&env, &task_id, stage, reason, result, verdict, with_commit).await;
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/continue", env.project_id),
+            Some(serde_json::json!({ "text": comment })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+
+        let rec = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = rec.runs.last().unwrap();
+        let cont = run
+            .attempts
+            .iter()
+            .find(|a| a.trigger == markplane_core::Trigger::Continue)
+            .expect("continue attempt");
+        assert_eq!(cont.stage, expect_continue_stage);
+    }
+
+    #[tokio::test]
+    async fn continue_routes_agent_exit_same_stage() {
+        continue_routes_scenario(
+            "cont-exit",
+            markplane_core::Stage::Implement,
+            "implement agent failed (exit 1, verdict=<none>)",
+            markplane_core::AttemptResult::Failed,
+            None,
+            true,
+            "retry after exit",
+            markplane_core::Stage::Implement,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn continue_routes_timeout_same_stage() {
+        continue_routes_scenario(
+            "cont-timeout",
+            markplane_core::Stage::Fix,
+            "fix stage timeout",
+            markplane_core::AttemptResult::Timeout,
+            None,
+            true,
+            "retry timeout",
+            markplane_core::Stage::Fix,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn continue_routes_bad_review_to_implement() {
+        continue_routes_scenario(
+            "cont-bad-review",
+            markplane_core::Stage::Implement,
+            "implement ended without a legal REVIEW: clean|issues line",
+            markplane_core::AttemptResult::Ok,
+            Some("BLOCKED: nope"),
+            true,
+            "retry bad review",
+            markplane_core::Stage::Implement,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn continue_routes_no_commits_to_implement() {
+        continue_routes_scenario(
+            "cont-no-commits",
+            markplane_core::Stage::Implement,
+            "implement produced no new commits",
+            markplane_core::AttemptResult::Ok,
+            Some("REVIEW: clean"),
+            false,
+            "retry no commits",
+            markplane_core::Stage::Implement,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn continue_routes_fix_verdict_to_fix() {
+        continue_routes_scenario(
+            "cont-fix",
+            markplane_core::Stage::Fix,
+            "fix ended without FIX: done (got FIX: blocked)",
+            markplane_core::AttemptResult::Ok,
+            Some("FIX: blocked"),
+            true,
+            "retry fix",
+            markplane_core::Stage::Fix,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn continue_routes_merge_failure_via_queue() {
+        continue_routes_scenario(
+            "cont-merge",
+            markplane_core::Stage::Merge,
+            "merge ended without MERGE: done (got MERGE: failed)",
+            markplane_core::AttemptResult::Ok,
+            Some("MERGE: failed"),
+            true,
+            "retry merge",
+            markplane_core::Stage::Merge,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn continue_merge_already_merged_finishes() {
+        let _guard = markplane_author_guard(Some("chuck-human"));
+        let mut env = setup_engine_env("cont-merge-already-merged", Some(false));
+        let agent = env._tmp.path().join("fake-agent-continue");
+        write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "ok");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Already merged continue", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_failed_run(
+            &env,
+            &task_id,
+            markplane_core::Stage::Merge,
+            "merge ended without MERGE: done (got MERGE: failed)",
+            markplane_core::AttemptResult::Ok,
+            Some("MERGE: failed"),
+            true,
+        )
+        .await;
+        let branch = format!("agent/{task_id}");
+        let _ = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&env.project_dir)
+            .args(["merge", "--no-ff", "-m", "premerge", &branch])
+            .status();
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/continue", env.project_id),
+            Some(serde_json::json!({ "text": "retry merge" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+        let project = Project::new(env.project_dir.join(".markplane"));
+        let doc: MarkplaneDocument<Task> = project.read_item(&task_id).unwrap();
+        assert_eq!(doc.frontmatter.status, "done");
+        assert!(doc.body.contains("retry merge"));
+    }
+
+    #[tokio::test]
+    async fn continue_then_issues_still_runs_fix_then_merge() {
+        let _guard = markplane_author_guard(Some("chuck-human"));
+        let mut env = setup_engine_env("continue-issues", Some(false));
+        let agent = env._tmp.path().join("fake-agent-continue");
+        write_continue_aware_fake_agent(&agent, &markplane_debug_bin(), "issues");
+        let state = AppState::with_options(
+            env.config_dir.clone(),
+            4200,
+            true,
+            false,
+            None,
+            Some(agent),
+        );
+        env.state = state;
+        env.app = build_app(env.state.clone());
+
+        let task_id = add_ready_task(&env, "Continue issues", "high").await;
+        let _ = oneshot_json(&env.app, "GET", &format!("/api/p/{}/tasks", env.project_id)).await;
+        seed_failed_run(
+            &env,
+            &task_id,
+            markplane_core::Stage::Implement,
+            "implement agent failed (exit 1, verdict=<none>)",
+            markplane_core::AttemptResult::Failed,
+            None,
+            true,
+        )
+        .await;
+
+        let (status, json) = oneshot_json_body(
+            &env.app,
+            "POST",
+            &format!("/api/p/{}/runs/{task_id}/continue", env.project_id),
+            Some(serde_json::json!({ "text": "try again with issues" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        wait_run_status(&env, &task_id, "succeeded", 40).await;
+
+        let rec = markplane_core::read_run_record(
+            &env.project_dir.join(".markplane"),
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let run = rec.runs.last().unwrap();
+        assert!(
+            run.attempts
+                .iter()
+                .any(|a| a.stage == markplane_core::Stage::Fix
+                    && a.result == Some(markplane_core::AttemptResult::Ok)),
+            "expected fix after REVIEW: issues: {:?}",
+            run.attempts
+        );
+        assert!(
+            run.attempts
+                .iter()
+                .any(|a| a.stage == markplane_core::Stage::Merge),
+            "expected merge: {:?}",
+            run.attempts
+        );
     }
 }

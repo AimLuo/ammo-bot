@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ProjectLink } from "@/components/project-link";
 import { useTask, useTasks } from "@/lib/hooks/use-tasks";
 import { useEpics } from "@/lib/hooks/use-epics";
 import { usePlans } from "@/lib/hooks/use-plans";
 import { useNotes } from "@/lib/hooks/use-notes";
 import { useUpdateTask, useAddTaskComment, useArchiveItem, useUnarchiveItem } from "@/lib/hooks/use-mutations";
-import { useRunSummaryMap } from "@/lib/hooks/use-runs";
+import { useContinueRun, useRunSummaryMap } from "@/lib/hooks/use-runs";
+import { useDispatcher, useScanSwitch } from "@/lib/hooks/use-dispatcher";
 import {
   activeRunConfirmMessage,
   hasActiveDispatcherRun,
@@ -22,7 +23,10 @@ import { EntityCombobox } from "./entity-combobox";
 import { EntityRefEditor } from "./entity-ref-editor";
 import { FieldRow } from "./field-row";
 import { RunSection } from "./run-section";
-import { CommentComposer } from "./comment-composer";
+import {
+  CommentComposer,
+  type CommentComposerHandle,
+} from "./comment-composer";
 import {
   Sheet,
   SheetHeader,
@@ -70,14 +74,18 @@ export function TaskDetailSheet({
 }) {
   const [isEditingDescription, setIsEditingDescription] = useState(false);
   const [createPlanOpen, setCreatePlanOpen] = useState(false);
+  const commentRef = useRef<CommentComposerHandle>(null);
   const { data: task, isLoading } = useTask(taskId || "", {
     enabled: !isEditingDescription,
   });
   const updateTask = useUpdateTask();
   const addComment = useAddTaskComment();
+  const continueRun = useContinueRun(taskId || "");
   const archiveItem = useArchiveItem();
   const unarchiveItem = useUnarchiveItem();
   const { map: runMap } = useRunSummaryMap();
+  const { data: dispatcher } = useDispatcher();
+  const { lock } = useScanSwitch();
   const { data: epics } = useEpics();
   const { data: allTasks } = useTasks();
   const { data: plans } = usePlans();
@@ -90,6 +98,20 @@ export function TaskDetailSheet({
   const taskCategory = task && workflow ? categoryOf(workflow, task.status) : undefined;
   const isClosedStatus = taskCategory === "completed" || taskCategory === "cancelled";
   const runSummary = task ? runMap.get(task.id) : undefined;
+  const canContinue =
+    !!task &&
+    !archived &&
+    taskCategory === "active" &&
+    (runSummary?.status === "failed" || runSummary?.status === "interrupted");
+  const lockHeldByOther = lock?.status === "held_by_other";
+  const slotsFull =
+    !!dispatcher && dispatcher.slots_used >= dispatcher.concurrency;
+  const continueDisabled = lockHeldByOther || slotsFull || continueRun.isPending;
+  const continueDisabledReason = lockHeldByOther
+    ? "Dispatcher lock held by another server"
+    : slotsFull
+      ? "No free dispatcher slot"
+      : undefined;
 
   const confirmActiveRun = (taskId: string): boolean => {
     if (!hasActiveDispatcherRun(runSummary)) return true;
@@ -417,7 +439,11 @@ export function TaskDetailSheet({
                 </FieldRow>
               </div>
 
-              <RunSection taskId={task.id} task={task} />
+              <RunSection
+                taskId={task.id}
+                task={task}
+                onContinueFocus={() => commentRef.current?.scrollIntoView()}
+              />
 
               <Separator />
 
@@ -476,9 +502,28 @@ export function TaskDetailSheet({
                 )}
                 {!archived && (
                   <CommentComposer
+                    ref={commentRef}
                     onSubmit={async (text) => {
                       await addComment.mutateAsync({ id: task.id, text });
                     }}
+                    onContinue={
+                      canContinue
+                        ? async (text) => {
+                            if (runSummary?.orphan_pid != null) {
+                              const ok = window.confirm(
+                                `Previous agent process still running (pid ${runSummary.orphan_pid}). Terminate it and continue?`
+                              );
+                              if (!ok) return false;
+                            }
+                            await continueRun.mutateAsync({
+                              text,
+                              terminateOrphan: runSummary?.orphan_pid != null,
+                            });
+                          }
+                        : undefined
+                    }
+                    continueDisabled={continueDisabled}
+                    continueTitle={continueDisabledReason}
                   />
                 )}
               </div>

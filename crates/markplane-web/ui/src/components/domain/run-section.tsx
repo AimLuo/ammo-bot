@@ -58,10 +58,13 @@ import { SessionLogModal } from "./session-log-modal";
 export function RunSection({
   taskId,
   task,
+  onContinueFocus,
 }: {
   taskId: string;
   /** Full task (status/assignee) for RunBadge stopping / visibility. */
   task: Pick<Task, "status" | "assignee">;
+  /** Scroll/focus the CommentComposer for "Continue…". */
+  onContinueFocus?: () => void;
 }) {
   const assignee = task.assignee;
   const { data: record, isLoading } = useRunRecord(taskId);
@@ -93,6 +96,7 @@ export function RunSection({
           runsFetched={runsFetched}
           workflow={workflow}
           onViewSessions={() => setOpen(true)}
+          onContinueFocus={onContinueFocus}
         />
       ) : (
         <div className="flex items-center gap-2">
@@ -164,6 +168,36 @@ function ResumeRunButton({
   );
 }
 
+function ContinueFocusButton({
+  displayStatus,
+  onContinueFocus,
+}: {
+  displayStatus?: string;
+  onContinueFocus?: () => void;
+}) {
+  if (
+    displayStatus !== "failed" &&
+    displayStatus !== "interrupted"
+  ) {
+    return null;
+  }
+  if (!onContinueFocus) return null;
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-7 gap-1.5 text-xs"
+      onClick={onContinueFocus}
+    >
+      Continue…
+    </Button>
+  );
+}
+
+function continueCount(run: Run): number {
+  return run.attempts.filter((a) => a.trigger === "continue").length;
+}
+
 function ResultIcon({
   result,
   pending,
@@ -206,6 +240,7 @@ function LatestRunBlock({
   runsFetched,
   workflow,
   onViewSessions,
+  onContinueFocus,
 }: {
   taskId: string;
   task: Pick<Task, "status" | "assignee">;
@@ -215,10 +250,12 @@ function LatestRunBlock({
   runsFetched: boolean;
   workflow?: TaskWorkflow;
   onViewSessions: () => void;
+  onContinueFocus?: () => void;
 }) {
   const stages = stageSummaries(run);
   const remnant = remnantStatusLine(run);
   const total = sumUsage(run.attempts);
+  const continued = continueCount(run);
   // Wait for GET /api/runs so display status (interrupted / elsewhere) is server-truth.
   const badgeSummary =
     runsFetched && listSummary
@@ -249,12 +286,21 @@ function LatestRunBlock({
         <span className="text-xs text-muted-foreground tabular-nums">
           {fmtDuration(run.started_at, run.ended_at)}
         </span>
+        {continued > 0 ? (
+          <span className="text-xs text-muted-foreground">
+            continued {continued}×
+          </span>
+        ) : null}
         <div className="min-w-2 flex-1" />
         <div className="flex items-center gap-1.5">
           <ResumeRunButton
             taskId={taskId}
             displayStatus={listSummary?.status}
             orphanPid={listSummary?.orphan_pid}
+          />
+          <ContinueFocusButton
+            displayStatus={listSummary?.status}
+            onContinueFocus={onContinueFocus}
           />
           <ViewSessionsButton onClick={onViewSessions} />
         </div>

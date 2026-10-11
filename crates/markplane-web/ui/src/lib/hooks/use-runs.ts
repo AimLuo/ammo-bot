@@ -123,3 +123,28 @@ export function useResumeAllInterrupted() {
     },
   });
 }
+
+export type ContinueOneResponse = {
+  task_id: string;
+  status: string;
+};
+
+/** Comment & continue a failed or interrupted Run. */
+export function useContinueRun(taskId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { text: string; terminateOrphan?: boolean }) =>
+      postJson<ContinueOneResponse>(`/api/runs/${taskId}/continue`, {
+        text: args.text,
+        terminate_orphan: !!args.terminateOrphan,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      void qc.invalidateQueries({ queryKey: ["runs", taskId] });
+      void qc.invalidateQueries({ queryKey: ["dispatcher"] });
+      void qc.invalidateQueries({ queryKey: ["tasks"] });
+      void qc.invalidateQueries({ queryKey: ["task", taskId] });
+      toast.success(`Continued ${taskId}`);
+    },
+  });
+}

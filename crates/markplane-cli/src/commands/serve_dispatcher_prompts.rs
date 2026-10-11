@@ -18,6 +18,12 @@ pub struct PromptContext {
     pub review_comment: String,
     /// When set, prepended as a prior-attempt note (fresh session after interrupt).
     pub prior_attempt: String,
+    /// Human comment body for continue-with-comment / prior-continue (empty otherwise).
+    pub human_comment: String,
+    /// Last failure reason for continue prompts.
+    pub failure_reason: String,
+    /// Human comment author (serve default author).
+    pub human: String,
 }
 
 impl PromptContext {
@@ -40,6 +46,9 @@ impl PromptContext {
             .replace("{{author}}", &self.author)
             .replace("{{review_comment}}", &self.review_comment)
             .replace("{{prior_attempt}}", &self.prior_attempt)
+            .replace("{{human_comment}}", &self.human_comment)
+            .replace("{{failure_reason}}", &self.failure_reason)
+            .replace("{{human}}", &self.human)
             .replace("{{inspect_hint}}", &self.inspect_hint())
     }
 
@@ -117,6 +126,20 @@ FIX: blocked
 const PRIOR_HALFDONE: &str = r#"## Previous attempt (interrupted)
 
 An earlier session for this stage was interrupted (the Markplane server stopped) and couldn't be resumed, so this is a fresh session with no memory of it. Its work may still be here: {{inspect_hint}}. Look before you change anything. Keep what is correct and already committed, finish or discard half-done edits, and don't redo finished steps. It may also have posted comments as `{{author}}`; check `markplane show {{task_id}}` and don't post duplicates.
+
+"#;
+
+const PRIOR_CONTINUE: &str = r#"## Previous attempt (failed, human replied)
+
+An earlier session for this stage failed: {{failure_reason}}. Its session couldn't be resumed, so this is a fresh session with no memory of it. A human then commented on the ticket (as `{{human}}`):
+
+<human-comment>
+{{human_comment}}
+</human-comment>
+
+Act on that comment. Where it conflicts with the instructions below it wins, except for "Boundaries", "Writing on the ticket", and "Finishing", which always apply. If it asks a question, answer it in a ticket comment and keep going. If it tells you to stop, end with the failing final line.
+
+The earlier session's work may still be here: {{inspect_hint}}. Look before you change anything. Keep what is correct, and don't post duplicate comments.
 
 "#;
 
@@ -251,6 +274,42 @@ pub fn render_resume_interrupted_prompt(ctx: &PromptContext, stage: Stage) -> St
     ctx.fill(&template)
 }
 
+/// Short prompt when `--resume` continues after a human "Comment & continue".
+///
+/// From `prototype/stage-prompts/templates/continue-with-comment.md`.
+pub fn render_continue_with_comment_prompt(ctx: &PromptContext, stage: Stage) -> String {
+    let mut ctx = ctx.clone();
+    ctx.author = match stage {
+        Stage::Implement => "agent-implement".into(),
+        Stage::Fix => "agent-fix".into(),
+        Stage::Merge => "agent-merge".into(),
+    };
+    let contract = match stage {
+        Stage::Implement => CONTRACT_IMPLEMENT,
+        Stage::Fix => CONTRACT_FIX,
+        Stage::Merge => CONTRACT_MERGE,
+    };
+    let stage_name = stage.as_str();
+    let template = format!(
+        "Your **{stage_name}** task for {{{{task_id}}}} ended without success: {{{{failure_reason}}}}. A human looked at it and commented on the ticket (as `{{{{human}}}}`):\n\n\
+<human-comment>\n\
+{{{{human_comment}}}}\n\
+</human-comment>\n\n\
+Continue the same task, acting on that comment.\n\n\
+- Where the comment conflicts with your original instructions, the comment wins. The exceptions are the boundaries, the rules for writing on the ticket, and the finishing contract below; those always apply.\n\
+- If the comment asks a question, answer it in a ticket comment and carry on. If it tells you to stop, end with the failing final line.\n\
+- Check the current state before changing anything: {{{{inspect_hint}}}}. Re-read the ticket with `markplane show {{{{task_id}}}}` if you need its other comments.\n\
+- Don't repeat comments you already posted. If one is out of date, post a new one with the same marker; the latest one counts.\n\n\
+{contract}\n"
+    );
+    ctx.fill(&template)
+}
+
+/// Preamble when continue starts a fresh session (session could not be resumed).
+pub fn render_prior_continue(ctx: &PromptContext) -> String {
+    ctx.fill(PRIOR_CONTINUE)
+}
+
 /// Render the merge Stage prompt.
 pub fn render_merge_prompt(ctx: &PromptContext) -> String {
     let mut ctx = ctx.clone();
@@ -319,7 +378,36 @@ mod tests {
             author: String::new(),
             review_comment: String::new(),
             prior_attempt: String::new(),
+            human_comment: String::new(),
+            failure_reason: String::new(),
+            human: String::new(),
         }
+    }
+
+    #[test]
+    fn continue_with_comment_prompt_inlines_human_and_contract() {
+        let mut c = ctx();
+        c.human_comment = "fix the typo in foo.rs".into();
+        c.failure_reason = "implement agent failed (exit 1, verdict=<none>)".into();
+        c.human = "chuck".into();
+        let p = render_continue_with_comment_prompt(&c, Stage::Implement);
+        assert!(p.contains("<human-comment>"));
+        assert!(p.contains("fix the typo in foo.rs"));
+        assert!(p.contains("chuck"));
+        assert!(p.contains("REVIEW: clean"));
+        assert!(p.contains("implement agent failed"));
+    }
+
+    #[test]
+    fn prior_continue_has_human_comment_block() {
+        let mut c = ctx();
+        c.human_comment = "try again".into();
+        c.failure_reason = "no new commits".into();
+        c.human = "alice".into();
+        let p = render_prior_continue(&c);
+        assert!(p.contains("failed, human replied"));
+        assert!(p.contains("try again"));
+        assert!(p.contains("alice"));
     }
 
     #[test]

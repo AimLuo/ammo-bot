@@ -15,15 +15,17 @@ use chrono::Utc;
 use std::fs::TryLockError;
 use markplane_core::{
     Attempt, AttemptResult, EffectiveDispatcherSettings, ImplementVerdict, MarkplaneDocument,
-    Patch, Project, QueryFilter, Run, RunRecord, RunStatus, Stage, StatusCategory, StreamEvent,
-    Task, Trigger, UpdateFields, agent_invocation_succeeded, classify_implement_verdict,
-    filter_and_sort_pickup_candidates, implement_verdict_failure_reason, is_fix_done,
-    is_merge_done, latest_agent_implement_review, parse_stream_json_line, read_run_record,
-    round_robin_pickup, usage_from_events, verdict_from_events, write_run_record,
+    Patch, Project, QueryFilter, READY_FOR_AGENT_TAG, READY_FOR_HUMAN_TAG, Run, RunRecord,
+    RunStatus, Stage, StatusCategory, StreamEvent, Task, Trigger, UpdateFields,
+    agent_invocation_succeeded, append_comment_to_body, classify_implement_verdict,
+    default_comment_author, filter_and_sort_pickup_candidates, implement_verdict_failure_reason,
+    is_fix_done, is_merge_done, latest_agent_implement_review, parse_stream_json_line,
+    read_run_record, round_robin_pickup, usage_from_events, verdict_from_events, write_run_record,
 };
 use serde_json::json;
 use tokio::sync::{Mutex, broadcast};
 
+use super::serve_dispatcher_continue::{ContinuePlan, plan_continue};
 use super::serve_dispatcher_handoff::{self, ticket_still_ours};
 use super::serve_dispatcher_prompts::{self, PromptContext};
 use super::serve_dispatcher_resume::{
@@ -539,6 +541,9 @@ async fn run_pipeline(
         author: String::new(),
         review_comment: String::new(),
         prior_attempt: String::new(),
+        human_comment: String::new(),
+        failure_reason: String::new(),
+        human: String::new(),
     };
 
     // ── implement (silent-stop check at Stage boundary) ──
@@ -1716,13 +1721,35 @@ fn with_abort_note(project_dir: &Path, branch: &str, reason: String) -> String {
 }
 
 
-/// Errors from [`resume_run`] mapped to HTTP 409 by serve.
+/// Errors from [`resume_run`] / [`continue_run`] mapped to HTTP 409 by serve.
 #[derive(Debug)]
 pub enum ResumeError {
     OrphanRunning { pid: u32 },
     NoFreeSlot,
     NotResumable,
     Internal(String),
+}
+
+/// Errors from [`continue_run`] (same codes as resume; no ticket/run writes on failure).
+#[derive(Debug)]
+pub enum ContinueError {
+    OrphanRunning { pid: u32 },
+    NoFreeSlot,
+    NotContinuable,
+    Internal(String),
+}
+
+impl std::fmt::Display for ContinueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OrphanRunning { pid } => {
+                write!(f, "previous agent process still running (pid {pid})")
+            }
+            Self::NoFreeSlot => write!(f, "no free dispatcher slot"),
+            Self::NotContinuable => write!(f, "run is not continuable"),
+            Self::Internal(msg) => write!(f, "{msg}"),
+        }
+    }
 }
 
 impl std::fmt::Display for ResumeError {
@@ -1866,6 +1893,9 @@ async fn resume_pipeline(
         author: String::new(),
         review_comment: String::new(),
         prior_attempt: String::new(),
+        human_comment: String::new(),
+        failure_reason: String::new(),
+        human: String::new(),
     };
 
     let config_dir = markplane_core::agent_config_dir();
@@ -1924,6 +1954,7 @@ async fn resume_pipeline(
                 &git_dir,
                 front,
                 /*resume_agent*/ true,
+                None,
             )
             .await
         }
@@ -1950,6 +1981,7 @@ async fn resume_pipeline(
                 stage,
                 resume_session_id.as_deref(),
                 interrupted_fresh,
+                None,
             )
             .await?;
             if outcome.interrupted_by_shutdown {
@@ -1968,6 +2000,7 @@ async fn resume_pipeline(
                     stage,
                     None,
                     true,
+                    None,
                 )
                 .await?;
                 if outcome2.interrupted_by_shutdown {
@@ -2019,6 +2052,364 @@ fn worktree_and_branch_ok(project_dir: &Path, worktree: &Path, branch: &str) -> 
         .unwrap_or(false)
 }
 
+/// Whether the latest Run may be continued (`failed` or interrupted display).
+///
+/// `in_memory` is true when this serve holds the Run's Slot.
+pub fn run_is_continuable(run: &Run, in_memory: bool) -> bool {
+    match run.status {
+        RunStatus::Failed => true,
+        RunStatus::Running | RunStatus::MergeQueued => !in_memory,
+        RunStatus::Succeeded | RunStatus::Stopped => false,
+    }
+}
+
+/// Claim a Slot and continue a failed/interrupted Run with a human comment.
+///
+/// Preflight writes nothing on failure. On success: one ticket write (comment +
+/// tags + assignee), Run → running, then Stage start with `trigger: continue`.
+pub async fn continue_run(
+    engine: Arc<Mutex<EngineState>>,
+    proj: ProjectTickInput,
+    task_id: String,
+    text: String,
+    terminate_orphan: bool,
+) -> Result<(), ContinueError> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err(ContinueError::Internal("empty comment".into()));
+    }
+
+    let human = default_comment_author();
+    let failure_reason;
+    let continue_prompt;
+
+    {
+        let record = read_run_record(proj.project.root(), &task_id)
+            .map_err(|e| ContinueError::Internal(e.to_string()))?
+            .ok_or(ContinueError::NotContinuable)?;
+        let run = record
+            .runs
+            .last()
+            .cloned()
+            .ok_or(ContinueError::NotContinuable)?;
+
+        let in_memory = {
+            let g = engine.lock().await;
+            g.active_slots.contains_key(&task_id) || g.in_flight.contains(&task_id)
+        };
+        if !run_is_continuable(&run, in_memory) {
+            return Err(ContinueError::NotContinuable);
+        }
+
+        // Ticket must be in active category (assignee may still be dispatcher).
+        let config = proj
+            .project
+            .load_config()
+            .map_err(|e| ContinueError::Internal(e.to_string()))?;
+        let doc: MarkplaneDocument<Task> = proj
+            .project
+            .read_item(&task_id)
+            .map_err(|e| ContinueError::Internal(e.to_string()))?;
+        if config
+            .workflows
+            .task
+            .category_of(&doc.frontmatter.status)
+            != Some(StatusCategory::Active)
+        {
+            return Err(ContinueError::NotContinuable);
+        }
+
+        let worktree = PathBuf::from(&run.worktree);
+        if !worktree_and_branch_ok(&proj.project_dir, &worktree, &run.branch) {
+            return Err(ContinueError::NotContinuable);
+        }
+
+        if let Some(pid) = run_orphan_pid(&run) {
+            if !terminate_orphan {
+                return Err(ContinueError::OrphanRunning { pid });
+            }
+            if let Some(last) = run.attempts.last().cloned() {
+                tokio::task::spawn_blocking(move || terminate_orphan_attempt(&last))
+                    .await
+                    .map_err(|e| ContinueError::Internal(e.to_string()))?;
+            }
+        }
+
+        if !claim_slot(engine.clone(), &proj, &task_id).await {
+            return Err(ContinueError::NoFreeSlot);
+        }
+
+        failure_reason = run
+            .failure_reason
+            .clone()
+            .unwrap_or_else(|| "interrupted".into());
+        continue_prompt = ContinuePrompt {
+            human_comment: text.clone(),
+            failure_reason: failure_reason.clone(),
+            human: human.clone(),
+        };
+
+        // Single ticket write: comment + tags + assignee.
+        let date = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let _lock = proj
+            .project
+            .lock_item(&task_id)
+            .map_err(|e| ContinueError::Internal(e.to_string()))?;
+        let mut doc: MarkplaneDocument<Task> = proj
+            .project
+            .read_item(&task_id)
+            .map_err(|e| ContinueError::Internal(e.to_string()))?;
+        doc.body = append_comment_to_body(&doc.body, &date, &human, &text);
+        doc.frontmatter.assignee = Some("dispatcher".into());
+        markplane_core::apply_tag_changes(
+            &mut doc.frontmatter.tags,
+            &[READY_FOR_AGENT_TAG.to_string()],
+            &[READY_FOR_HUMAN_TAG.to_string()],
+        );
+        doc.frontmatter.updated = chrono::Local::now().date_naive();
+        if let Err(e) = proj.project.write_item(&task_id, &doc) {
+            // Roll back Slot on write failure.
+            let mut g = engine.lock().await;
+            g.active_slots.remove(&task_id);
+            g.in_flight.remove(&task_id);
+            return Err(ContinueError::Internal(e.to_string()));
+        }
+
+        // Run → running, clear end time (attempt appended when Stage starts).
+        let mut record = record;
+        let mut run = run;
+        run.status = RunStatus::Running;
+        run.ended_at = None;
+        // Keep failure_reason until Stage succeeds; UI can still show last reason
+        // briefly — epic says clear end time; failure_reason cleared at Stage start below.
+        update_latest_run(&mut record, &run);
+        if let Err(e) = write_run_record(proj.project.root(), &task_id, &record) {
+            let mut g = engine.lock().await;
+            g.active_slots.remove(&task_id);
+            g.in_flight.remove(&task_id);
+            return Err(ContinueError::Internal(e.to_string()));
+        }
+        let _ = continue_prompt;
+        let _ = failure_reason;
+    }
+
+    engine.lock().await.broadcast_dispatcher_changed();
+
+    let engine_bg = engine.clone();
+    let task_id_bg = task_id.clone();
+    let text_bg = text;
+    let human_bg = human;
+    tokio::spawn(async move {
+        if let Err(e) =
+            continue_pipeline(engine_bg.clone(), &proj, &task_id_bg, &text_bg, &human_bg).await
+        {
+            eprintln!("dispatcher: continue {task_id_bg} error: {e}");
+            let _ = fail_run_internal(
+                &engine_bg,
+                &proj,
+                &task_id_bg,
+                &format!("internal error: {e}"),
+            )
+            .await;
+        }
+        let mut g = engine_bg.lock().await;
+        g.active_slots.remove(&task_id_bg);
+        g.in_flight.remove(&task_id_bg);
+        g.broadcast_dispatcher_changed();
+    });
+    Ok(())
+}
+
+async fn continue_pipeline(
+    engine: Arc<Mutex<EngineState>>,
+    proj: &ProjectTickInput,
+    task_id: &str,
+    human_comment: &str,
+    human: &str,
+) -> Result<(), String> {
+    let mut record = read_run_record(proj.project.root(), task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no run record".to_string())?;
+    let mut run = record
+        .runs
+        .last()
+        .cloned()
+        .ok_or_else(|| "empty run record".to_string())?;
+
+    let failure_reason = run
+        .failure_reason
+        .clone()
+        .unwrap_or_else(|| "interrupted".into());
+    let continue_prompt = ContinuePrompt {
+        human_comment: human_comment.to_string(),
+        failure_reason: failure_reason.clone(),
+        human: human.to_string(),
+    };
+
+    let worktree = PathBuf::from(&run.worktree);
+    let branch = run.branch.clone();
+    if !worktree_and_branch_ok(&proj.project_dir, &worktree, &branch) {
+        let stage = run.current_stage.unwrap_or(Stage::Implement);
+        return fail_and_finish(
+            &engine,
+            proj,
+            task_id,
+            &mut record,
+            &mut run,
+            stage,
+            "worktree missing".into(),
+        )
+        .await
+        .map(|_| ());
+    }
+
+    let doc: MarkplaneDocument<Task> = proj.project.read_item(task_id).map_err(|e| e.to_string())?;
+    let title = doc.frontmatter.title.clone();
+    let git_dir = git_dir_realpath(&proj.project_dir)?;
+    let ctx = PromptContext {
+        task_id: task_id.to_string(),
+        title,
+        worktree: run.worktree.clone(),
+        branch: branch.clone(),
+        base_branch: run.merge_target.clone(),
+        base_sha: run.base_sha.clone(),
+        main_tree: proj.project_dir.display().to_string(),
+        target_branch: run.merge_target.clone(),
+        author: String::new(),
+        review_comment: String::new(),
+        prior_attempt: String::new(),
+        human_comment: human_comment.to_string(),
+        failure_reason: failure_reason.clone(),
+        human: human.to_string(),
+    };
+
+    let config_dir = markplane_core::agent_config_dir();
+    let plan = plan_continue(&run, &config_dir)?;
+
+    // Clear prior failure markers now that we're actively continuing.
+    run.failure_reason = None;
+    run.ended_at = None;
+    run.status = RunStatus::Running;
+
+    match plan {
+        ContinuePlan::MergeQueue => {
+            if branch_is_ancestor(&proj.project_dir, &branch)? {
+                let target =
+                    git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                let merge_sha = git_stdout(&proj.project_dir, &["rev-parse", "HEAD"])?;
+                run.current_stage = Some(Stage::Merge);
+                update_latest_run(&mut record, &run);
+                persist_run(&engine, proj, task_id, &record, &run, true).await?;
+                return success_close(
+                    &engine,
+                    proj,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                    &target,
+                    &merge_sha,
+                )
+                .await;
+            }
+            run_merge_from_queue(
+                engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &branch,
+                &git_dir,
+                false,
+                true,
+                Some(&continue_prompt),
+            )
+            .await
+        }
+        ContinuePlan::RunAgent {
+            stage,
+            resume_session_id,
+        } => {
+            run.current_stage = Some(stage);
+            update_latest_run(&mut record, &run);
+            persist_run(&engine, proj, task_id, &record, &run, true).await?;
+
+            let outcome = run_stage_agent(
+                &engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &worktree,
+                stage,
+                resume_session_id.as_deref(),
+                false,
+                Some(&continue_prompt),
+            )
+            .await?;
+            if outcome.interrupted_by_shutdown {
+                return Ok(());
+            }
+            if outcome.resume_mismatch {
+                let outcome2 = run_stage_agent(
+                    &engine,
+                    proj,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                    &ctx,
+                    &worktree,
+                    stage,
+                    None,
+                    false,
+                    Some(&continue_prompt),
+                )
+                .await?;
+                if outcome2.interrupted_by_shutdown {
+                    return Ok(());
+                }
+                return after_stage_agent(
+                    engine,
+                    proj,
+                    task_id,
+                    &mut record,
+                    &mut run,
+                    &ctx,
+                    &worktree,
+                    &branch,
+                    &git_dir,
+                    stage,
+                    &outcome2,
+                )
+                .await;
+            }
+            after_stage_agent(
+                engine,
+                proj,
+                task_id,
+                &mut record,
+                &mut run,
+                &ctx,
+                &worktree,
+                &branch,
+                &git_dir,
+                stage,
+                &outcome,
+            )
+            .await
+        }
+    }
+}
+
+/// Human continue context injected into Stage prompts (`trigger: continue`).
+#[derive(Debug, Clone)]
+struct ContinuePrompt {
+    human_comment: String,
+    failure_reason: String,
+    human: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_stage_agent(
     engine: &Arc<Mutex<EngineState>>,
@@ -2031,15 +2422,30 @@ async fn run_stage_agent(
     stage: Stage,
     resume_session_id: Option<&str>,
     interrupted_fresh: bool,
+    continue_prompt: Option<&ContinuePrompt>,
 ) -> Result<AgentOutcome, String> {
     let mut ctx = ctx.clone();
-    if interrupted_fresh && resume_session_id.is_none() {
+    let is_continue = continue_prompt.is_some();
+    if let Some(c) = continue_prompt {
+        ctx.human_comment = c.human_comment.clone();
+        ctx.failure_reason = c.failure_reason.clone();
+        ctx.human = c.human.clone();
+    }
+    if !is_continue && interrupted_fresh && resume_session_id.is_none() {
         ctx.prior_attempt = "interrupted".into();
     }
     let (model, timeout, author, prompt, cwd) = match stage {
         Stage::Implement => {
             let s = proj.settings.stages.implement.clone();
-            let prompt = if let Some(_sid) = resume_session_id {
+            let prompt = if is_continue && resume_session_id.is_some() {
+                serve_dispatcher_prompts::render_continue_with_comment_prompt(&ctx, stage)
+            } else if is_continue {
+                let prior = serve_dispatcher_prompts::render_prior_continue(&ctx);
+                let mut c2 = ctx.clone();
+                c2.prior_attempt.clear();
+                let body = serve_dispatcher_prompts::render_implement_prompt(&c2);
+                insert_after_skill_line(&body, &prior)
+            } else if resume_session_id.is_some() {
                 serve_dispatcher_prompts::render_resume_interrupted_prompt(&ctx, stage)
             } else {
                 serve_dispatcher_prompts::render_implement_prompt(&ctx)
@@ -2060,7 +2466,15 @@ async fn run_stage_agent(
                 latest_agent_implement_review(&doc.body).unwrap_or_default()
             };
             ctx.review_comment = review;
-            let prompt = if resume_session_id.is_some() {
+            let prompt = if is_continue && resume_session_id.is_some() {
+                serve_dispatcher_prompts::render_continue_with_comment_prompt(&ctx, stage)
+            } else if is_continue {
+                let prior = serve_dispatcher_prompts::render_prior_continue(&ctx);
+                let mut c2 = ctx.clone();
+                c2.prior_attempt.clear();
+                let body = serve_dispatcher_prompts::render_fix_prompt(&c2);
+                format!("{prior}{body}")
+            } else if resume_session_id.is_some() {
                 serve_dispatcher_prompts::render_resume_interrupted_prompt(&ctx, stage)
             } else {
                 serve_dispatcher_prompts::render_fix_prompt(&ctx)
@@ -2077,7 +2491,15 @@ async fn run_stage_agent(
             let s = proj.settings.stages.merge.clone();
             let target = git_stdout(&proj.project_dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
             ctx.target_branch = target;
-            let prompt = if resume_session_id.is_some() {
+            let prompt = if is_continue && resume_session_id.is_some() {
+                serve_dispatcher_prompts::render_continue_with_comment_prompt(&ctx, stage)
+            } else if is_continue {
+                let prior = serve_dispatcher_prompts::render_prior_continue(&ctx);
+                let mut c2 = ctx.clone();
+                c2.prior_attempt.clear();
+                let body = serve_dispatcher_prompts::render_merge_prompt(&c2);
+                format!("{prior}{body}")
+            } else if resume_session_id.is_some() {
                 serve_dispatcher_prompts::render_resume_interrupted_prompt(&ctx, stage)
             } else {
                 serve_dispatcher_prompts::render_merge_prompt(&ctx)
@@ -2093,7 +2515,11 @@ async fn run_stage_agent(
     };
 
     let opts = AgentRunOpts {
-        trigger: Trigger::Resume,
+        trigger: if is_continue {
+            Trigger::Continue
+        } else {
+            Trigger::Resume
+        },
         resume_session_id,
         expect_session_id: resume_session_id,
     };
@@ -2112,6 +2538,18 @@ async fn run_stage_agent(
         opts,
     )
     .await
+}
+
+/// Insert `prior` after the leading `/implement …` skill line (keep skill first).
+fn insert_after_skill_line(body: &str, prior: &str) -> String {
+    if let Some(rest) = body.strip_prefix("/implement ") {
+        if let Some(nl) = rest.find('\n') {
+            let skill = &body[.."/implement ".len() + nl + 1];
+            let after = rest[nl + 1..].trim_start_matches('\n');
+            return format!("{skill}\n{prior}{after}");
+        }
+    }
+    format!("{prior}{body}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2218,6 +2656,7 @@ async fn advance_from_completed(
                         Stage::Fix,
                         None,
                         false,
+                        None,
                     )
                     .await?;
                     if outcome.interrupted_by_shutdown {
@@ -2245,7 +2684,7 @@ async fn advance_from_completed(
                 }
             }
             run_merge_from_queue(
-                engine, proj, task_id, record, run, ctx, branch, git_dir, false, true,
+                engine, proj, task_id, record, run, ctx, branch, git_dir, false, true, None,
             )
             .await
         }
@@ -2277,7 +2716,7 @@ async fn advance_from_completed(
                 .await;
             }
             run_merge_from_queue(
-                engine, proj, task_id, record, run, ctx, branch, git_dir, false, true,
+                engine, proj, task_id, record, run, ctx, branch, git_dir, false, true, None,
             )
             .await
         }
@@ -2292,7 +2731,7 @@ async fn advance_from_completed(
                 .await
             } else {
                 run_merge_from_queue(
-                    engine, proj, task_id, record, run, ctx, branch, git_dir, true, true,
+                    engine, proj, task_id, record, run, ctx, branch, git_dir, true, true, None,
                 )
                 .await
             }
@@ -2312,6 +2751,7 @@ async fn run_merge_from_queue(
     git_dir: &Path,
     front: bool,
     run_agent_if_needed: bool,
+    continue_prompt: Option<&ContinuePrompt>,
 ) -> Result<(), String> {
     run.status = RunStatus::MergeQueued;
     run.current_stage = Some(Stage::Merge);
@@ -2385,25 +2825,19 @@ async fn run_merge_from_queue(
 
     let mut merge_ctx = ctx.clone();
     merge_ctx.target_branch = target_branch.clone();
-    let merge_settings = proj.settings.stages.merge.clone();
-    let merge_prompt = serve_dispatcher_prompts::render_merge_prompt(&merge_ctx);
-    let merge_result = run_agent(
+    let worktree = PathBuf::from(&run.worktree);
+    let merge_result = run_stage_agent(
         &engine,
         proj,
         task_id,
         record,
         run,
+        &merge_ctx,
+        &worktree,
         Stage::Merge,
-        &merge_settings.model,
-        merge_settings.timeout_minutes,
-        &proj.project_dir,
-        &merge_prompt,
-        "agent-merge",
-        AgentRunOpts {
-            trigger: Trigger::Resume,
-            resume_session_id: None,
-            expect_session_id: None,
-        },
+        None,
+        false,
+        continue_prompt,
     )
     .await?;
     if merge_result.interrupted_by_shutdown {
