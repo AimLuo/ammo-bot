@@ -282,9 +282,11 @@ export interface ResumeAllResponse {
 export interface CleanupPreview {
   worktree: string;
   worktree_present: boolean;
+  worktree_registered: boolean;
   uncommitted_files: number;
   branch: string;
   branch_present: boolean;
+  branch_is_agent: boolean;
   unmerged_commits: number;
   branch_head?: string | null;
   orphan_pid?: number | null;

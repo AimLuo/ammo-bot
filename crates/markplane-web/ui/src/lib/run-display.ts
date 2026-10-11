@@ -395,26 +395,40 @@ export function canCleanupRun(
 export function cleanupConfirmMessage(preview: {
   worktree: string;
   worktree_present: boolean;
+  worktree_registered: boolean;
   uncommitted_files: number;
   branch: string;
   branch_present: boolean;
+  branch_is_agent: boolean;
   unmerged_commits: number;
   branch_head?: string | null;
   orphan_pid?: number | null;
 }): string {
   const lines: string[] = ["Force-delete Dispatcher remnants?"];
   if (preview.worktree_present) {
-    lines.push(
-      `Worktree: ${preview.worktree} (${preview.uncommitted_files} uncommitted file${preview.uncommitted_files === 1 ? "" : "s"})`,
-    );
+    if (preview.worktree_registered) {
+      lines.push(
+        `Worktree: ${preview.worktree} (${preview.uncommitted_files} uncommitted file${preview.uncommitted_files === 1 ? "" : "s"}) — will force-remove`,
+      );
+    } else {
+      lines.push(
+        `Path: ${preview.worktree} (not a git worktree — will not delete)`,
+      );
+    }
   }
   if (preview.branch_present) {
     const head = preview.branch_head
       ? preview.branch_head.slice(0, 12)
       : "unknown";
-    lines.push(
-      `Branch: ${preview.branch} (${preview.unmerged_commits} unmerged commit${preview.unmerged_commits === 1 ? "" : "s"}, head ${head})`,
-    );
+    if (preview.branch_is_agent) {
+      lines.push(
+        `Branch: ${preview.branch} (${preview.unmerged_commits} unmerged commit${preview.unmerged_commits === 1 ? "" : "s"}, head ${head}) — will force-delete`,
+      );
+    } else {
+      lines.push(
+        `Branch: ${preview.branch} (not agent/* — will not delete)`,
+      );
+    }
   }
   if (preview.orphan_pid != null) {
     lines.push(`Orphan agent pid ${preview.orphan_pid} will be terminated.`);

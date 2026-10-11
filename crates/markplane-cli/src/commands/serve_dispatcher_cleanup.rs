@@ -30,9 +30,13 @@ pub const TRIGGER_REPICKUP: &str = "repickup";
 pub struct CleanupPreview {
     pub worktree: String,
     pub worktree_present: bool,
+    /// Path exists and is listed by `git worktree list` (safe to force-remove).
+    pub worktree_registered: bool,
     pub uncommitted_files: u32,
     pub branch: String,
     pub branch_present: bool,
+    /// Branch name starts with `agent/` (only those are deleted).
+    pub branch_is_agent: bool,
     pub unmerged_commits: u32,
     pub branch_head: Option<String>,
     pub orphan_pid: Option<u32>,
@@ -93,8 +97,8 @@ pub fn cleanup_preview(
 ) -> CleanupPreview {
     let orphan_pid = run_orphan_pid(run);
     let wt_path = PathBuf::from(&run.worktree);
-    let worktree_present = wt_path.exists()
-        || (run.worktree_removed_at.is_none() && is_registered_worktree(project_dir, &wt_path));
+    let registered = is_registered_worktree(project_dir, &wt_path);
+    let worktree_present = run.worktree_removed_at.is_none() && (wt_path.exists() || registered);
     let uncommitted_files = if wt_path.is_dir() {
         count_porcelain_lines(&wt_path)
     } else {
@@ -114,10 +118,12 @@ pub fn cleanup_preview(
     };
     CleanupPreview {
         worktree: run.worktree.clone(),
-        worktree_present: worktree_present && run.worktree_removed_at.is_none(),
+        worktree_present,
+        worktree_registered: worktree_present && registered,
         uncommitted_files,
         branch: run.branch.clone(),
         branch_present,
+        branch_is_agent: run.branch.starts_with("agent/"),
         unmerged_commits,
         branch_head,
         orphan_pid,
@@ -254,16 +260,24 @@ fn cleanup_run(
     if run.worktree_removed_at.is_none() {
         changed |= cleanup_worktree(project_dir, run, force);
     }
-    // Auto mode: leave the branch alone while the worktree is still present and
-    // blocked, so cleanup_blocked keeps the worktree reason.
+    // A registered worktree still checks out `agent/<id>`, so `git branch -d`
+    // cannot succeed until the worktree is gone. Skip the branch step only in
+    // that case (or when an orphan is still running). `not_a_worktree` paths
+    // are not checkouts, so the branch can still be removed independently.
     let skip_branch = !force
         && run.worktree_removed_at.is_none()
         && matches!(
             run.cleanup_blocked.as_deref(),
-            Some(BLOCKED_UNCOMMITTED | BLOCKED_NOT_WORKTREE | BLOCKED_ORPHAN)
+            Some(BLOCKED_UNCOMMITTED | BLOCKED_ORPHAN)
         );
     if !skip_branch && run.branch_removed_at.is_none() {
+        let prev_blocked = run.cleanup_blocked.clone();
+        let prefer_wt = run.cleanup_blocked.as_deref() == Some(BLOCKED_NOT_WORKTREE)
+            && run.worktree_removed_at.is_none();
         changed |= cleanup_branch(project_dir, run, force, preserve_branch_head);
+        if prefer_wt {
+            run.cleanup_blocked = prev_blocked;
+        }
     }
 
     if run.worktree_removed_at.is_some() && run.branch_removed_at.is_some() {
@@ -377,10 +391,8 @@ fn cleanup_branch(
         return true;
     }
 
-    if !preserve_branch_head && run.branch_head_at_removal.is_none() {
-        run.branch_head_at_removal =
-            git_stdout(project_dir, &["rev-parse", &run.branch]).ok();
-    } else if preserve_branch_head && run.branch_head_at_removal.is_none() {
+    let _ = preserve_branch_head; // caller may pre-set branch_head_at_removal
+    if run.branch_head_at_removal.is_none() {
         run.branch_head_at_removal =
             git_stdout(project_dir, &["rev-parse", &run.branch]).ok();
     }
@@ -615,11 +627,43 @@ mod tests {
         let mut run_rec = sample_run(&wt, &branch);
         assert!(attempt_auto_cleanup(&root, &mut run_rec));
         assert!(run_rec.worktree_removed_at.is_none());
+        // Branch stays: still checked out in the dirty worktree.
+        assert!(run_rec.branch_removed_at.is_none());
         assert_eq!(
             run_rec.cleanup_blocked.as_deref(),
             Some(BLOCKED_UNCOMMITTED)
         );
         assert!(wt.exists());
+        assert!(branch_exists(&root, &branch));
+    }
+
+    #[test]
+    fn auto_removes_branch_when_path_is_not_a_worktree() {
+        let (_tmp, root) = init_repo();
+        let (wt, branch) = add_agent_worktree(&root, "TASK-mix");
+        run(
+            &root,
+            &["git", "merge", "--no-ff", "-m", "merge agent", &branch],
+        );
+        // Detach the worktree registration but leave the directory + branch.
+        run(
+            &root,
+            &["git", "worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join("x"), "y").unwrap();
+        let mut run_rec = sample_run(&wt, &branch);
+        assert!(attempt_auto_cleanup(&root, &mut run_rec));
+        assert!(run_rec.worktree_removed_at.is_none());
+        assert_eq!(
+            run_rec.cleanup_blocked.as_deref(),
+            Some(BLOCKED_NOT_WORKTREE)
+        );
+        assert!(
+            run_rec.branch_removed_at.is_some(),
+            "merged agent branch removed even when path is not a worktree"
+        );
+        assert!(!branch_exists(&root, &branch));
     }
 
     #[test]
@@ -785,7 +829,9 @@ mod tests {
         assert!(preview.unmerged_commits >= 1);
         assert!(preview.branch_head.is_some());
         assert!(preview.worktree_present);
+        assert!(preview.worktree_registered);
         assert!(preview.branch_present);
+        assert!(preview.branch_is_agent);
     }
 
     #[test]
