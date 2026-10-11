@@ -1,7 +1,7 @@
 ---
 id: TASK-55iug
 title: Comment & continue
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -17,7 +17,7 @@ tags:
 - ready-for-agent
 position: b09
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Comment & continue

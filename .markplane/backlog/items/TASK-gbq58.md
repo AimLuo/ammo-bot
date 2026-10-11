@@ -1,7 +1,7 @@
 ---
 id: TASK-gbq58
 title: Run record 格式、只读接口、最小 Run 段与会话弹窗列表
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -18,7 +18,7 @@ tags:
 - ready-for-agent
 position: at
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Run record 格式、只读接口、最小 Run 段与会话弹窗列表

@@ -1,7 +1,7 @@
 ---
 id: TASK-hkj4u
 title: Dispatcher 设置与 Settings 的 Dispatcher 标签页
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -16,7 +16,7 @@ tags:
 - ready-for-agent
 position: av
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Dispatcher 设置与 Settings 的 Dispatcher 标签页

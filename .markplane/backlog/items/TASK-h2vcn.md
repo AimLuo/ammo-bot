@@ -1,7 +1,7 @@
 ---
 id: TASK-h2vcn
 title: 详情面板分开描述与评论，并能发评论
-status: planned
+status: done
 priority: medium
 type: feature
 effort: large
@@ -18,7 +18,7 @@ tags:
 - ready-for-agent
 position: ax
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 详情面板分开描述与评论，并能发评论

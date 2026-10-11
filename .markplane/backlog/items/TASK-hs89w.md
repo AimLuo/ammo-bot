@@ -1,7 +1,7 @@
 ---
 id: TASK-hs89w
 title: 评论默认作者统一并支持 MARKPLANE_AUTHOR，追加时标题降级
-status: planned
+status: done
 priority: medium
 type: feature
 effort: small
@@ -17,7 +17,7 @@ tags:
 - ready-for-agent
 position: as
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 评论默认作者统一并支持 MARKPLANE_AUTHOR，追加时标题降级

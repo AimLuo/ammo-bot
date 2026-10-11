@@ -1,7 +1,7 @@
 ---
 id: TASK-72tr5
 title: Dispatcher 锁与 Scan switch
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -16,7 +16,7 @@ tags:
 - ready-for-agent
 position: aw
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Dispatcher 锁与 Scan switch

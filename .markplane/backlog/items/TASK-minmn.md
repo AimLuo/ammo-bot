@@ -1,7 +1,7 @@
 ---
 id: TASK-minmn
 title: serve 关闭、中断识别与 Resume
-status: planned
+status: done
 priority: medium
 type: feature
 effort: large
@@ -20,7 +20,7 @@ tags:
 - ready-for-agent
 position: b08
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # serve 关闭、中断识别与 Resume

@@ -1,7 +1,7 @@
 ---
 id: TASK-cppqm
 title: Dispatcher 主干：拾取 → implement → merge → done
-status: planned
+status: done
 priority: medium
 type: feature
 effort: large
@@ -22,7 +22,7 @@ tags:
 - ready-for-agent
 position: b00
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Dispatcher 主干：拾取 → implement → merge → done

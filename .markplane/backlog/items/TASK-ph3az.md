@@ -1,7 +1,7 @@
 ---
 id: TASK-ph3az
 title: 合并安全：跨 serve 合并锁、脏工作区保护与失败复原
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -17,7 +17,7 @@ tags:
 - ready-for-agent
 position: b04
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 合并安全：跨 serve 合并锁、脏工作区保护与失败复原

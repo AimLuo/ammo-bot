@@ -1,7 +1,7 @@
 ---
 id: TASK-gxxax
 title: 'REVIEW: issues 后走一轮 fix'
-status: planned
+status: done
 priority: medium
 type: feature
 effort: small
@@ -16,7 +16,7 @@ tags:
 - ready-for-agent
 position: b03
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # REVIEW: issues 后走一轮 fix

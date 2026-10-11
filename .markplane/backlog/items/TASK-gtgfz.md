@@ -1,7 +1,7 @@
 ---
 id: TASK-gtgfz
 title: 看板 RunBadge、失败 toast 与改状态确认
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -17,7 +17,7 @@ tags:
 - ready-for-agent
 position: b07
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 看板 RunBadge、失败 toast 与改状态确认

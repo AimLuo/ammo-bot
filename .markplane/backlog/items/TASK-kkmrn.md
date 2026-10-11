@@ -1,7 +1,7 @@
 ---
 id: TASK-kkmrn
 title: 清理遗留 worktree 与分支
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -17,7 +17,7 @@ tags:
 - ready-for-agent
 position: b0A
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 清理遗留 worktree 与分支

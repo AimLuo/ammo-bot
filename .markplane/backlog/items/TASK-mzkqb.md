@@ -1,7 +1,7 @@
 ---
 id: TASK-mzkqb
 title: 跨 Project 轮转与 Slot 总览
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -17,7 +17,7 @@ tags:
 - ready-for-agent
 position: b02
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 跨 Project 轮转与 Slot 总览

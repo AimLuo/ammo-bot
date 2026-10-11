@@ -1,7 +1,7 @@
 ---
 id: TASK-d7i23
 title: 详情面板完整 Run 段
-status: planned
+status: done
 priority: medium
 type: feature
 effort: medium
@@ -19,7 +19,7 @@ tags:
 - ready-for-agent
 position: b06
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # 详情面板完整 Run 段

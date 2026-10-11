@@ -1,7 +1,7 @@
 ---
 id: TASK-rhzty
 title: Dispatcher 自动关闭 Scan switch
-status: planned
+status: done
 priority: medium
 type: feature
 effort: small
@@ -16,7 +16,7 @@ tags:
 - ready-for-agent
 position: b05
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # Dispatcher 自动关闭 Scan switch

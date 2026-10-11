@@ -1,7 +1,7 @@
 ---
 id: TASK-v4j2t
 title: CLI 支持 MARKPLANE_ROOT
-status: planned
+status: done
 priority: medium
 type: feature
 effort: small
@@ -16,7 +16,7 @@ tags:
 - ready-for-agent
 position: au
 created: 2026-10-10
-updated: 2026-10-10
+updated: 2026-10-11
 ---
 
 # CLI 支持 MARKPLANE_ROOT
